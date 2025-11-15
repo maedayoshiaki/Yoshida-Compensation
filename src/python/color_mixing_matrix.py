@@ -3,6 +3,7 @@ import numpy as np
 import PIL.Image as Image
 from numpy import ndarray
 from typing import Callable, Dict, List, Optional, Tuple, Union, TYPE_CHECKING, Type
+import torch
 
 
 def generate_projection_patterns(
@@ -133,13 +134,38 @@ def calculate_color_mixing_matrix(
     elif cap_dtype == np.uint16:
         captured_images = [img.astype(np.float32) / 65535.0 for img in captured_images]
 
-    color_mixing_matrices = []
-    for y in range(proj_images[0].shape[0]):
-        for x in range(proj_images[0].shape[1]):
-            P = np.array([img[y, x, :] for img in proj_images])
-            C = np.array([img[y, x, :] for img in captured_images])
-            C = np.append(C, np.ones((C.shape[0], 1)), axis=1)  # Add bias term
-            M, _, _, _ = np.linalg.lstsq(C, P, rcond=None)
-            color_mixing_matrices.append(M)
+    n = len(proj_images)
+    height, width, _ = proj_images[0].shape
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    return color_mixing_matrices
+    # Convert images to torch tensors (N, H, W, 3)
+    P = torch.from_numpy(np.array(proj_images)).to(device=device, dtype=torch.float32)
+    C = torch.from_numpy(np.array(captured_images)).to(
+        device=device, dtype=torch.float32
+    )
+
+    num_pixels = height * width
+
+    # reshape to (N, H*W, 3)
+    P_batch = torch.reshape(P, (n, num_pixels, 3))
+    C_batch = torch.reshape(C, (n, num_pixels, 3))
+
+    # Add bias term to C_batch -> (N, H*W, 4)
+    bias = torch.ones((n, num_pixels, 1), device=device, dtype=torch.float32)
+    C_batch = torch.cat([C_batch, bias], dim=2)
+
+    # Move pixel dimension first so we can solve per-pixel regressions in batch
+    P_pixels = P_batch.permute(1, 0, 2)  # (H*W, N, 3)
+    C_pixels = C_batch.permute(1, 0, 2)  # (H*W, N, 4)
+
+    C_pixels_T = torch.transpose(C_pixels, 1, 2)  # (H*W, 4, N)
+    CTC = torch.bmm(C_pixels_T, C_pixels)  # (H*W, 4, 4)
+    CTP = torch.bmm(C_pixels_T, P_pixels)  # (H*W, 4, 3)
+
+    # Solve normal equations per pixel
+    CTC_inv = torch.linalg.pinv(CTC)  # (H*W, 4, 4)
+    M_pixels = torch.bmm(CTC_inv, CTP)  # (H*W, 4, 3)
+
+    M = torch.reshape(M_pixels, (height, width, 4, 3)).cpu().numpy()
+
+    return M

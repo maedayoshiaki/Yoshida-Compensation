@@ -4,8 +4,7 @@ from numpy import ndarray
 import PIL.Image as Image
 from PIL import ImageTk
 from tkinter import Tk, Label
-from pathlib import Path
-import sys
+
 
 from src.python.color_mixing_matrix import (
     generate_projection_patterns,
@@ -88,7 +87,7 @@ def main():
     for img_name in os.listdir(target_image_folder_path):
         if img_name.endswith((".png", ".jpg", ".jpeg")):
             img_path = os.path.join(target_image_folder_path, img_name)
-            target_img = Image.open(img_path).convert("BGR")
+            target_img = Image.open(img_path).convert("RGB")
             target_img_array = np.array(target_img)
             target_images.append(target_img_array)
 
