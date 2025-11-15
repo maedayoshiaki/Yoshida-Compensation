@@ -6,6 +6,7 @@ from typing import List
 def calculate_compensation_image(
     target_image: ndarray,
     color_mixing_matrices: List[ndarray],
+    dtype: np.dtype = np.float32,
 ) -> ndarray:
     """
     Calculate the compensation image using the target image and color mixing matrices.
@@ -25,10 +26,25 @@ def calculate_compensation_image(
     for y in range(height):
         for x in range(width):
             M = color_mixing_matrices[y * width + x]
-            C = np.append(target_image[y, x, :], 1.0)  # Add bias term
-            P = M @ C
+            C = np.array(
+                [
+                    target_image[y, x, 0],
+                    target_image[y, x, 1],
+                    target_image[y, x, 2],
+                    1.0,
+                ],
+                dtype=np.float32,
+            )
+            P = C @ M
             compensation_image[y, x, :] = P[:3]
 
     np.clip(compensation_image, 0.0, 1.0, out=compensation_image)
+
+    compensation_image = compensation_image.astype(dtype)
+
+    if dtype == np.uint8:
+        compensation_image = (compensation_image * 255).astype(np.uint8)
+    elif dtype == np.uint16:
+        compensation_image = (compensation_image * 65535).astype(np.uint16)
 
     return compensation_image
