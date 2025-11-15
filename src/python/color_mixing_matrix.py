@@ -7,18 +7,18 @@ from typing import Callable, Dict, List, Optional, Tuple, Union, TYPE_CHECKING, 
 
 def calculate_color_mixing_matrix(
     proj_images: List[ndarray], captured_images: List[ndarray]
-) -> ndarray:
+) -> List[ndarray]:
     """
     Calculate the color mixing matrix based on projected and captured images.
     Input images should be lists of numpy arrays representing the images.
-    Each numpy array should have shape (height, width, 3(R, G, B)) for RGB images.
+    Each numpy array should have shape (height, width, 3) for RGB images.
 
     Args:
         proj_images (List[ndarray]): List of projection images as numpy arrays.
         captured_images (List[ndarray]): List of captured images as numpy arrays.
 
     Returns:
-        ndarray: The calculated color mixing matrix.
+        List[ndarray]: The calculated color mixing matrices for each pixel.
     """
     # Validate input images
     num_colors = proj_images[0].shape[0]
@@ -61,9 +61,7 @@ def calculate_color_mixing_matrix(
             P = np.array([img[y, x, :] for img in proj_images])
             P = np.append(P, np.ones((P.shape[0], 1)), axis=1)  # Add bias term
             C = np.array([img[y, x, :] for img in captured_images])
-            M, _, _, _ = np.linalg.lstsq(P, C, rcond=None)
+            M, _, _, _ = np.linalg.lstsq(C, P, rcond=None)
             color_mixing_matrices.append(M)
 
-    return np.array(color_mixing_matrices).reshape(
-        proj_images[0].shape[0], proj_images[0].shape[1], num_colors, num_colors + 1
-    )
+    return color_mixing_matrices
