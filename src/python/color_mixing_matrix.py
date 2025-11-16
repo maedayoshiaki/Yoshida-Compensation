@@ -1,13 +1,11 @@
-import os
 import numpy as np
-import PIL.Image as Image
 from numpy import ndarray
-from typing import Callable, Dict, List, Optional, Tuple, Union, TYPE_CHECKING, Type
+from typing import List
 import torch
 
 
 def generate_projection_patterns(
-    x_size: int, y_size: int, num_divisions: int = 3, dtype: ndarray.dtype = np.uint8
+    x_size: int, y_size: int, num_divisions: int = 3, dtype: np.dtype = np.uint8
 ) -> List[ndarray]:
     """
     Generate a set of RGB projection patterns covering a discrete color grid.
@@ -42,13 +40,13 @@ def generate_projection_patterns(
 
     num_divisions = max(2, num_divisions)
     patterns = []
-    for r in range(num_divisions):  # B, G, R channels
+    for r in range(num_divisions):  # R, G, B channels
         for g in range(num_divisions):
             for b in range(num_divisions):
                 pattern = np.zeros((y_size, x_size, 3), dtype=np.float32)
-                pattern[:, :, 0] = (b * 1.0) / (num_divisions - 1)
+                pattern[:, :, 0] = (r * 1.0) / (num_divisions - 1)
                 pattern[:, :, 1] = (g * 1.0) / (num_divisions - 1)
-                pattern[:, :, 2] = (r * 1.0) / (num_divisions - 1)
+                pattern[:, :, 2] = (b * 1.0) / (num_divisions - 1)
                 if dtype == np.uint8:
                     pattern = (pattern * 255.0).astype(np.uint8)
                 elif dtype == np.uint16:
@@ -64,48 +62,82 @@ def generate_projection_patterns(
     return patterns
 
 
-def apply_inverse_gamma_correction(image: ndarray, gamma: float = 2.2) -> ndarray:
+def apply_inverse_gamma_correction(
+    image: ndarray | torch.Tensor,
+    gamma: float = 2.2,
+    device: str | torch.device = "cuda",
+) -> ndarray | torch.Tensor:
     """
-    Apply inverse gamma correction to an RGB image.
+    Apply inverse gamma correction to an RGB image using PyTorch.
     This function adjusts the pixel intensities of the input image according
     to the specified gamma value, effectively linearizing the color values.
+    Supports GPU acceleration when available.
+
     Parameters
     ----------
-    image : numpy.ndarray
-        Input RGB image as a NumPy array of shape (height, width, 3).
-        The pixel values should be in the range [0, 1].
+    image : numpy.ndarray or torch.Tensor
+        Input RGB image as a NumPy array or torch.Tensor of shape (height, width, 3).
+        The pixel values should be in the range [0, 1] for float types,
+        [0, 255] for uint8, or [0, 65535] for uint16.
     gamma : float, optional
         The gamma value to use for correction. Default is 2.2.
+    device : str or torch.device, optional
+        Device to perform computation on. Default is "cuda".
+        Automatically falls back to "cpu" if CUDA is not available.
+
     Returns
     -------
-    numpy.ndarray
-        The gamma-corrected RGB image as a NumPy array of the same shape
-        as the input.
+    numpy.ndarray or torch.Tensor
+        The gamma-corrected RGB image. Returns the same type as input.
     """
-    image_dtype = image.dtype
-    if image_dtype == np.uint8:
-        _image = image.astype(np.float32) / 255.0
-    elif image_dtype == np.uint16:
-        _image = image.astype(np.float32) / 65535.0
-    else:
-        _image = image.astype(np.float32)
+    # Determine if input is numpy array
+    is_numpy = isinstance(image, np.ndarray)
 
-    corrected_image = np.power(_image, 1.0 / gamma)
-    np.clip(corrected_image, 0.0, 1.0, out=corrected_image)
-
-    if image_dtype == np.uint8:
-        corrected_image = (corrected_image * 255).astype(np.uint8)
-    elif image_dtype == np.uint16:
-        corrected_image = (corrected_image * 65535).astype(np.uint16)
+    # Convert to torch tensor if needed
+    if is_numpy:
+        image_dtype = image.dtype
+        image_tensor = torch.from_numpy(image)
     else:
-        pass
+        image_tensor = image
+        image_dtype = image_tensor.dtype
+
+    # Determine device
+    if isinstance(device, str):
+        device = torch.device(
+            device if torch.cuda.is_available() and device == "cuda" else "cpu"
+        )
+
+    # Move to device
+    image_tensor = image_tensor.to(device)
+
+    # Normalize to [0, 1] range
+    if image_dtype == np.uint8 or image_dtype == torch.uint8:
+        _image = image_tensor.float() / 255.0
+    elif image_dtype == np.uint16 or image_dtype == torch.uint16:
+        _image = image_tensor.float() / 65535.0
+    else:
+        _image = image_tensor.float()
+
+    # Apply gamma correction
+    corrected_image = torch.pow(_image, 1.0 / gamma)
+    corrected_image = torch.clamp(corrected_image, 0.0, 1.0)
+
+    # Convert back to original dtype
+    if image_dtype == np.uint8 or image_dtype == torch.uint8:
+        corrected_image = (corrected_image * 255).to(torch.uint8)
+    elif image_dtype == np.uint16 or image_dtype == torch.uint16:
+        corrected_image = (corrected_image * 65535).to(torch.uint16)
+
+    # Convert back to numpy if input was numpy
+    if is_numpy:
+        corrected_image = corrected_image.cpu().numpy()
 
     return corrected_image
 
 
 def calculate_color_mixing_matrix(
     proj_images: List[ndarray], captured_images: List[ndarray]
-) -> List[ndarray]:
+) -> ndarray:
     # Validate input images
     if len(proj_images) != len(captured_images):
         raise ValueError(
