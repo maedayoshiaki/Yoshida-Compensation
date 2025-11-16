@@ -8,8 +8,42 @@ def calculate_compensation_image(
     color_mixing_matrices: ndarray,
     dtype: np.dtype = np.float32,
 ) -> ndarray:
+    """
+    Compute a photometric compensation image using per-pixel color mixing matrices.
+    This function normalizes the input target image, applies a per-pixel 4×3 color
+    mixing matrix (including a bias term) using batched matrix multiplication on
+    CPU or GPU via PyTorch, clamps the result to the valid range [0, 1], and
+    finally converts it back to the requested output dtype.
+    Parameters
+    ----------
+    target_image : numpy.ndarray
+        Input target image of shape (H, W, 3). The dtype can be:
+        - uint8   (values in [0, 255])
+        - uint16  (values in [0, 65535])
+        - float32/float64 (assumed already in [0.0, 1.0]).
+    color_mixing_matrices : numpy.ndarray
+        Array of per-pixel color mixing matrices. It must be broadcastable or
+        reshaped to (H * W, 4, 3), where each 4×3 matrix transforms a pixel
+        [R, G, B, 1]ᵀ into a compensated RGB value.
+    dtype : numpy.dtype, optional
+        Desired dtype of the output compensation image. Supported values are
+        np.uint8, np.uint16, or a floating-point dtype such as np.float32.
+        Default is np.float32.
+    Returns
+    -------
+    numpy.ndarray
+        Compensation image of shape (H, W, 3) with values:
+        - in [0, 255] if dtype is np.uint8
+        - in [0, 65535] if dtype is np.uint16
+        - in [0.0, 1.0] for floating-point dtypes.
+    Notes
+    -----
+    - If a CUDA-capable GPU is available, computations are performed on the GPU;
+      otherwise, they fall back to CPU.
+    - The function assumes that `color_mixing_matrices` has been precomputed to
+      match the spatial resolution of `target_image`.
+    """
     height, width, _ = target_image.shape
-
     # Normalize target image
     target_dtype = target_image.dtype
     if target_dtype == np.uint8:

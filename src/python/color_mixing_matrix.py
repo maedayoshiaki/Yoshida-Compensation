@@ -138,6 +138,54 @@ def apply_inverse_gamma_correction(
 def calculate_color_mixing_matrix(
     proj_images: List[ndarray], captured_images: List[ndarray]
 ) -> ndarray:
+    """
+    Estimate a per-pixel linear color mixing transformation between projected and captured RGB images.
+    This function assumes a linear model per pixel of the form:
+        P(x, y) ≈ C(x, y) @ M(x, y)[:3, :] + M(x, y)[3, :]
+    where:
+      - P(x, y) is the projected RGB color at pixel (x, y),
+      - C(x, y) is the captured RGB color at pixel (x, y),
+      - the last row of M is a bias term (per channel),
+      - M(x, y) is a 4×3 matrix for each pixel, estimated via least-squares regression
+        over the input image set.
+    More concretely, for each pixel (x, y), the function solves:
+        [C_r C_g C_b 1] @ M_pixel ≈ [P_r P_g P_b]
+    using the normal equations with a pseudoinverse.
+    Parameters
+    ----------
+    proj_images : List[numpy.ndarray]
+        List of projected RGB images used as regression targets.
+        Each image must be a 3-channel array of shape (H, W, 3).
+        All images must share the same spatial dimensions and dtype.
+        Supported dtypes are uint8 and uint16, which are internally normalized
+        to [0, 1] as float32.
+    captured_images : List[numpy.ndarray]
+        List of corresponding captured RGB images, same length as `proj_images`.
+        Each captured image must have the same shape and dtype as the
+        corresponding projected image. Supported dtypes are uint8 and uint16,
+        which are internally normalized to [0, 1] as float32.
+    Returns
+    -------
+    numpy.ndarray
+        A 4D array of shape (H, W, 4, 3), where for each pixel (h, w),
+        `M[h, w]` is a 4×3 matrix encoding the linear color mixing model:
+        the first 3 rows correspond to a 3×3 color transform applied to the
+        captured RGB, and the last row is a bias term.
+    Raises
+    ------
+    ValueError
+        If the number of projected and captured images differs.
+        If the images do not have 3 color channels (RGB).
+        If projected and captured images do not share the same spatial dimensions.
+    Notes
+    -----
+    - Computation is performed in PyTorch and uses GPU acceleration if available.
+    - Normalization is based on the dtype of the first image in each list. All
+      images within a list are assumed to share the same dtype.
+    - The solution uses the Moore–Penrose pseudoinverse per pixel, which makes
+      it robust to poorly conditioned or rank-deficient pixel-wise design matrices.
+    """
+
     # Validate input images
     if len(proj_images) != len(captured_images):
         raise ValueError(
