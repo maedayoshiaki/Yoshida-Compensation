@@ -170,6 +170,7 @@ def main():
         window_name, PROJ_POS_X, PROJ_POS_Y
     )  # プロジェクタの位置にウィンドウを移動
 
+    os.makedirs("data/captured_images", exist_ok=True)
     for pattern in inv_gamma_patterns:
         # pattern: H x W x 3, dtype=uint8 (RGB想定)
         # OpenCV は BGR なので変換
@@ -180,11 +181,27 @@ def main():
         cv2.waitKey(200)
 
         # Capture image
-        captured_image = capture_image()
+        # captured_image = capture_image()
+
+        # TODO: For debugging without camera, read from disk
+        idx = len(captured_images)
+        captured_image = cv2.imread(
+            f"data/captured_images/captured_image_{idx:02d}.png"
+        )
+
         if captured_image is None:
             print("Failed to capture image. Exiting.")
             return
         captured_images.append(captured_image)
+        bgr_captured = cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(
+            os.path.join(
+                "data/captured_images",
+                f"captured_image_{len(captured_images) - 1:02d}.png",
+            ),
+            bgr_captured,
+        )
+        print(f"Captured and saved captured_image_{len(captured_images) - 1:02d}.png")
 
     cv2.destroyWindow(window_name)
     print("Captured all images.")

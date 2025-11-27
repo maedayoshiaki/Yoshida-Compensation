@@ -209,7 +209,7 @@ __marimo__/
 # Local
 data/**
 !data/.gitkeep
-!data/cap_patterns/.gitkeep
+!data/captured_images/.gitkeep
 !data/compensation_images/.gitkeep
 !data/inv_gamma_proj_pattern/.gitkeep
 !data/inv_gamma_proj_patterns/.gitkeep

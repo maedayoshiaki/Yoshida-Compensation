@@ -163,15 +163,16 @@ def calculate_color_mixing_matrix(
     ----------
     proj_images : List[numpy.ndarray]
         List of projected RGB images used as regression targets.
-        Each image must be a 3-channel array of shape (H, W, 3).
-        All images must share the same spatial dimensions and dtype.
+        Each image must be a 3-channel array of shape (H_proj, W_proj, 3).
+        Only the pixel at (ref_y, ref_x) is used from each image.
         Supported dtypes are uint8 and uint16, which are internally normalized
         to [0, 1] as float32.
     captured_images : List[numpy.ndarray]
         List of corresponding captured RGB images, same length as `proj_images`.
-        Each captured image must have the same shape and dtype as the
-        corresponding projected image. Supported dtypes are uint8 and uint16,
-        which are internally normalized to [0, 1] as float32.
+        Each captured image must have 3 color channels with shape (H_cap, W_cap, 3).
+        The output matrix dimensions are determined by these images.
+        Supported dtypes are uint8 and uint16, which are internally normalized
+        to [0, 1] as float32.
     ref_y : int
         Reference pixel y-coordinate (row index) in the projection images
         whose RGB value is used as the target P for all pixels.
@@ -182,7 +183,7 @@ def calculate_color_mixing_matrix(
     Returns
     -------
     numpy.ndarray
-        A 4D array of shape (H, W, 4, 3), where for each pixel (h, w),
+        A 4D array of shape (H_cap, W_cap, 4, 3), where for each pixel (h, w),
         `M[h, w]` is a 4×3 matrix encoding the linear color mixing model:
         the first 3 rows correspond to a 3×3 color transform applied to the
         captured RGB, and the last row is a bias term.
@@ -192,39 +193,48 @@ def calculate_color_mixing_matrix(
     ValueError
         If the number of projected and captured images differs.
         If the images do not have 3 color channels (RGB).
-        If projected and captured images do not share the same spatial dimensions.
-        If ref_x or ref_y are out of bounds.
+        If ref_x or ref_y are out of bounds for the projection images.
     """
     # Validate input images
     if len(proj_images) != len(captured_images):
         raise ValueError(
             "The number of projected and captured images must be the same."
         )
-    if (
-        proj_images[0].shape[2] != captured_images[0].shape[2]
-        or proj_images[0].shape[2] != 3
-    ):
-        raise ValueError("Images must have 3 color channels (RGB).")
-
-    if proj_images[0].shape != captured_images[0].shape:
-        raise ValueError("Projected and captured images must have the same dimensions.")
+    if proj_images[0].shape[2] != 3:
+        raise ValueError("Projection images must have 3 color channels (RGB).")
+    if captured_images[0].shape[2] != 3:
+        raise ValueError("Captured images must have 3 color channels (RGB).")
 
     n = len(proj_images)
-    height, width, _ = proj_images[0].shape
 
-    # 参照点の範囲チェック
-    if not (0 <= ref_y < height and 0 <= ref_x < width):
+    # Get dimensions from captured images (output size)
+    cap_height, cap_width, _ = captured_images[0].shape
+
+    # Get dimensions from projection images (for ref point validation)
+    proj_height, proj_width, _ = proj_images[0].shape
+
+    # Validate reference point against projection image bounds
+    if not (0 <= ref_y < proj_height and 0 <= ref_x < proj_width):
         raise ValueError(
             f"Reference point (ref_y={ref_y}, ref_x={ref_x}) "
-            f"is out of bounds for image size (H={height}, W={width})."
+            f"is out of bounds for projection image size (H={proj_height}, W={proj_width})."
         )
 
-    # Normalize projection images
+    # Normalize projection images and extract only reference point
     proj_dtype = proj_images[0].dtype
     if proj_dtype == np.uint8:
-        proj_images = [img.astype(np.float32) / 255.0 for img in proj_images]
+        P_ref = np.array(
+            [img[ref_y, ref_x, :].astype(np.float32) / 255.0 for img in proj_images]
+        )
     elif proj_dtype == np.uint16:
-        proj_images = [img.astype(np.float32) / 65535.0 for img in proj_images]
+        P_ref = np.array(
+            [img[ref_y, ref_x, :].astype(np.float32) / 65535.0 for img in proj_images]
+        )
+    else:
+        P_ref = np.array(
+            [img[ref_y, ref_x, :].astype(np.float32) for img in proj_images]
+        )
+    # P_ref shape: (N, 3)
 
     # Normalize captured images
     cap_dtype = captured_images[0].dtype
@@ -235,26 +245,20 @@ def calculate_color_mixing_matrix(
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Convert images to torch tensors (N, H, W, 3)
-    P_full = torch.from_numpy(np.array(proj_images)).to(
+    # Convert to torch tensors
+    P_ref_tensor = torch.from_numpy(P_ref).to(
         device=device, dtype=torch.float32
-    )
+    )  # (N, 3)
     C = torch.from_numpy(np.array(captured_images)).to(
         device=device, dtype=torch.float32
-    )
+    )  # (N, H_cap, W_cap, 3)
 
-    num_pixels = height * width
+    num_pixels = cap_height * cap_width
 
-    # --- ここが変更点 ---
-    # P は参照点 (ref_y, ref_x) のみを使う。
-    # 形状: (N, 3)
-    P_ref = P_full[:, ref_y, ref_x, :]  # (N, 3)
+    # Expand P_ref for all pixels: (N, 3) -> (N, H*W, 3)
+    P_batch = P_ref_tensor[:, None, :].expand(-1, num_pixels, -1)  # (N, H*W, 3)
 
-    # 全ピクセルに対し同じ P_ref を使うため、
-    # (N, 1, 3) -> (N, H*W, 3) にブロードキャスト
-    P_batch = P_ref[:, None, :].expand(-1, num_pixels, -1)  # (N, H*W, 3)
-
-    # C はピクセル依存
+    # Reshape captured images: (N, H_cap, W_cap, 3) -> (N, H*W, 3)
     C_batch = torch.reshape(C, (n, num_pixels, 3))  # (N, H*W, 3)
 
     # Add bias term to C_batch -> (N, H*W, 4)
@@ -273,6 +277,6 @@ def calculate_color_mixing_matrix(
     CTC_inv = torch.linalg.pinv(CTC)  # (H*W, 4, 4)
     M_pixels = torch.bmm(CTC_inv, CTP)  # (H*W, 4, 3)
 
-    M = torch.reshape(M_pixels, (height, width, 4, 3)).cpu().numpy()
+    M = torch.reshape(M_pixels, (cap_height, cap_width, 4, 3)).cpu().numpy()
 
     return M
