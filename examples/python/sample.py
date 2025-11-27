@@ -2,10 +2,11 @@ import os
 import numpy as np
 from numpy import ndarray
 import cv2
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, overload
 import rawpy
-from external.GrayCode.src.python.warp_image import PixelMapWarper
-from external.GrayCode.src.python.interpolate_c2p import load_c2p_numpy
+import torch
+from external.Graycode.src.python.warp_image_torch import PixelMapWarperTorch
+from external.Graycode.src.python.interpolate_c2p import load_c2p_numpy
 
 # capture images from camera
 from edsdk.camera_controller import CameraController
@@ -23,9 +24,10 @@ PROJ_WIDTH = 1920
 PROJ_HEIGHT = 1080
 PROJ_POS_X = 1920 + 3440  # プロジェクタの表示位置X座標
 PROJ_POS_Y = 0  # プロジェクタの表示位置Y座標
-C2P_MAP_PATH = "data/c2p_map.npy"
+C2P_MAP_PATH = "C:\\py_scripts\\CompenNeSt-plusplus\\data\\light10\\pos1\\normal\\cam\\raw\\sl\\correspondence_map.npy"
 
 
+@overload
 def center_rect(
     image: ndarray, proj_width: int, proj_height: int
 ) -> Tuple[int, int, int, int]:
@@ -45,6 +47,15 @@ def center_rect(
     img_height, img_width = image.shape[:2]
     x_start = max((img_width - proj_width) // 2, 0)
     y_start = max((img_height - proj_height) // 2, 0)
+    return x_start, y_start, proj_width, proj_height
+
+
+@overload
+def center_rect(
+    image_width: int, image_height: int, proj_width: int, proj_height: int
+) -> Tuple[int, int, int, int]:
+    x_start = max((image_width - proj_width) // 2, 0)
+    y_start = max((image_height - proj_height) // 2, 0)
     return x_start, y_start, proj_width, proj_height
 
 
@@ -83,13 +94,39 @@ def capture_image() -> Optional[ndarray]:
 
 
 def warp_image(
-    src_image: np.ndarray, pixel_map_path: str, proj_width: int, proj_height: int
+    src_image: np.ndarray,
+    pixel_map_path: str,
+    proj_width: int,
+    proj_height: int,
+    image_width: int,
+    image_height: int,
 ) -> np.ndarray:
     pixel_map = load_c2p_numpy(pixel_map_path)
-    warper = PixelMapWarper(pixel_map)
-    crop_rect = center_rect(src_image, proj_width, proj_height)
-    warped_image = warper.forward_warp(src_image, crop_rect=crop_rect)
+    warper = PixelMapWarperTorch(pixel_map)
+    crop_rect = center_rect(image_width, image_height, proj_width, proj_height)
+    src_image_tensor = torch.from_numpy(src_image).permute(2, 0, 1)
+    warped_image_tensor = warper.forward_warp(src_image_tensor, crop_rect=crop_rect)
+    warped_image = warped_image_tensor.permute(1, 2, 0).numpy()
     return warped_image
+
+
+def invwarp_image(
+    src_image: np.ndarray,
+    pixel_map_path: str,
+    proj_width: int,
+    proj_height: int,
+    cam_width: int,
+    cam_height: int,
+) -> np.ndarray:
+    pixel_map = load_c2p_numpy(pixel_map_path)
+    warper = PixelMapWarperTorch(pixel_map)
+    crop_rect = center_rect(src_image, proj_width, proj_height)
+    src_image_tensor = torch.from_numpy(src_image).permute(2, 0, 1)
+    invwarped_image_tensor = warper.backward_warp(
+        src_image_tensor, dst_size=(cam_height, cam_width), src_rect=crop_rect
+    )
+    invwarped_image = invwarped_image_tensor.permute(1, 2, 0).numpy()
+    return invwarped_image
 
 
 def main():
@@ -147,10 +184,6 @@ def main():
         if captured_image is None:
             print("Failed to capture image. Exiting.")
             return
-        # Warp captured image to projector coordinates
-        captured_image = warp_image(
-            captured_image, C2P_MAP_PATH, PROJ_WIDTH, PROJ_HEIGHT
-        )
         captured_images.append(captured_image)
 
     cv2.destroyWindow(window_name)
@@ -179,11 +212,21 @@ def main():
     os.makedirs("data/compensation_images", exist_ok=True)
     os.makedirs("data/inv_gamma_comp_images", exist_ok=True)
     for idx, target_image in enumerate(target_images):
+        invwarped_target = invwarp_image(
+            target_image, C2P_MAP_PATH, PROJ_WIDTH, PROJ_HEIGHT
+        )
         # Calculate compensation image
-        compensation_image = calculate_compensation_image(
-            target_image=target_image,
+        before_warped_compensation_image = calculate_compensation_image(
+            target_image=invwarped_target,
             color_mixing_matrices=color_mixing_matrices,
             dtype=np.dtype(np.uint8),
+        )
+        # Warp compensation image to projector view
+        compensation_image = warp_image(
+            before_warped_compensation_image,
+            C2P_MAP_PATH,
+            PROJ_WIDTH,
+            PROJ_HEIGHT,
         )
         inv_gamma_comp_image = apply_inverse_gamma_correction(
             compensation_image, gamma=2.2
