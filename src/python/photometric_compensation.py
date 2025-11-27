@@ -14,6 +14,7 @@ def calculate_compensation_image(
     mixing matrix (including a bias term) using batched matrix multiplication on
     CPU or GPU via PyTorch, clamps the result to the valid range [0, 1], and
     finally converts it back to the requested output dtype.
+
     Parameters
     ----------
     target_image : numpy.ndarray

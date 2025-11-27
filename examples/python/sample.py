@@ -108,6 +108,7 @@ def main():
     print(f"Loaded {len(target_images)} target images.")
     # Calculate and save compensation images
     os.makedirs("data/compensation_images", exist_ok=True)
+    os.makedirs("data/inv_gamma_comp_images", exist_ok=True)
     for idx, target_image in enumerate(target_images):
         # Calculate compensation image
         compensation_image = calculate_compensation_image(
@@ -115,14 +116,24 @@ def main():
             color_mixing_matrices=color_mixing_matrices,
             dtype=np.dtype(np.uint8),
         )
+        inv_gamma_comp_image = apply_inverse_gamma_correction(
+            compensation_image, gamma=2.2
+        )
 
         # compensation_image: RGB を想定 -> 保存時に BGR に変換
         bgr_comp = cv2.cvtColor(compensation_image, cv2.COLOR_RGB2BGR)
+        bgr_inv_gamma_comp = cv2.cvtColor(inv_gamma_comp_image, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
             f"data/compensation_images/compensation_image_{idx:02d}.png",
             bgr_comp,
         )
-        print(f"Saved compensation_image_{idx:02d}.png")
+        cv2.imwrite(
+            f"data/inv_gamma_comp_images/inv_gamma_comp_image_{idx:02d}.png",
+            bgr_inv_gamma_comp,
+        )
+        print(
+            f"Saved compensation_image_{idx:02d}.png and inv_gamma_comp_image_{idx:02d}.png"
+        )
 
 
 if __name__ == "__main__":
