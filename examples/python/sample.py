@@ -1,33 +1,39 @@
 import os
 import numpy as np
 from numpy import ndarray
-import PIL.Image as Image
-from PIL import ImageTk
-from tkinter import Tk, Label
+import cv2
 
+# capture images from camera
+from edsdk.camera_controller import CameraController
 
 from src.python.color_mixing_matrix import (
     generate_projection_patterns,
     apply_inverse_gamma_correction,
     calculate_color_mixing_matrix,
 )
-
 from src.python.photometric_compensation import (
     calculate_compensation_image,
 )
 
+PROJ_WIDTH = 1920
+PROJ_HEIGHT = 1080
+PROJ_POS_X = 1920 + 3440  # プロジェクタの表示位置X座標
+PROJ_POS_Y = 0  # プロジェクタの表示位置Y座標
+
 
 def Capture() -> ndarray:
-    # Placeholder function to simulate image capture
-    # In practice, this would interface with camera hardware
-    dummy_image = np.random.rand(800, 1280, 3).astype(np.float32)
-    return dummy_image
+    with CameraController() as cam:
+        cam.set_properties(av=8, tv=1 / 15, iso=100)
+        captured_images = cam.capture_numpy()
+    if captured_images is None or len(captured_images) == 0:
+        raise RuntimeError("Failed to capture image from camera.")
+    return captured_images[0]
 
 
 def main():
     # Generate Projection patterns
     linear_proj_patterns = generate_projection_patterns(
-        1280, 800, num_divisions=4, dtype=np.uint8
+        PROJ_WIDTH, PROJ_HEIGHT, num_divisions=4, dtype=np.dtype(np.uint8)
     )
     inv_gamma_patterns = []
     # Save patterns to disk
@@ -35,46 +41,51 @@ def main():
     os.makedirs("data/inv_gamma_proj_patterns", exist_ok=True)
 
     for i, pattern in enumerate(linear_proj_patterns):
-        img = Image.fromarray(pattern)
-        img.save(os.path.join("data/linear_proj_patterns", f"pattern_{i:02d}.png"))
-        # Apply inverse gamma correction to an example image
+        # pattern: H x W x 3, RGB(uint8) を想定
+        # RGB -> BGR に変換して保存（ファイル自体はどちらでもよいが一貫させる）
+        bgr_pattern = cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(
+            os.path.join("data/linear_proj_patterns", f"pattern_{i:02d}.png"),
+            bgr_pattern,
+        )
+
         inv_gamma_pattern = apply_inverse_gamma_correction(pattern, gamma=2.2)
         inv_gamma_patterns.append(inv_gamma_pattern)
-        inv_gamma_img = Image.fromarray(inv_gamma_pattern)
-        inv_gamma_img.save(
+        bgr_inv_gamma_pattern = cv2.cvtColor(inv_gamma_pattern, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(
             os.path.join(
                 "data/inv_gamma_proj_patterns", f"inv_gamma_pattern_{i:02d}.png"
-            )
+            ),
+            bgr_inv_gamma_pattern,
         )
         print(f"Saved pattern_{i:02d}.png and inv_gamma_pattern_{i:02d}.png")
 
-    # Display patterns and capture images
-    # show pattern on projector's screen and capture with camera
+    # Display patterns and capture images using OpenCV
     captured_images = []
-    root = Tk()
-    w = 1280
-    h = 800
-    x = root.winfo_screenwidth() - w  # Projector on the right
-    y = 0
-    # ウィンドウを指定モニター位置＆サイズに設定
-    root.geometry(f"{w}x{h}+{x}+{y}")
-    root.overrideredirect(True)  # 枠なし
-    root.attributes("-topmost", True)
 
-    label = Label(root)
-    label.pack(expand=True, fill="both")
+    # プロジェクタ側モニタにフルスクリーン表示するためのウィンドウ
+    window_name = "projection_window"
+    cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.moveWindow(
+        window_name, PROJ_POS_X, PROJ_POS_Y
+    )  # プロジェクタの位置にウィンドウを移動
+
     for pattern in inv_gamma_patterns:
-        img = Image.fromarray(pattern)
-        tk_img = ImageTk.PhotoImage(img)
-        label.config(image=tk_img)
-        root.update()
-        # Simulate a delay for projection stabilization
-        root.after(1)
+        # pattern: H x W x 3, dtype=uint8 (RGB想定)
+        # OpenCV は BGR なので変換
+        bgr_pattern = cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR)
+
+        cv2.imshow(window_name, bgr_pattern)
+        # プロジェクタが安定するまで短い待機（200ms）
+        cv2.waitKey(200)
+
         # Capture image
         captured_image = Capture()
         captured_images.append(captured_image)
         print("Captured an image.")
-    root.destroy()
+
+    cv2.destroyWindow(window_name)
 
     # After capturing all images, calculate color mixing matrices
     color_mixing_matrices = calculate_color_mixing_matrix(
@@ -87,24 +98,29 @@ def main():
     for img_name in os.listdir(target_image_folder_path):
         if img_name.endswith((".png", ".jpg", ".jpeg")):
             img_path = os.path.join(target_image_folder_path, img_name)
-            target_img = Image.open(img_path).convert("RGB")
-            target_img_array = np.array(target_img)
+            # BGR で読み込まれるので RGB に変換
+            bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
+            if bgr is None:
+                continue
+            target_img_array = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
             target_images.append(target_img_array)
 
     print(f"Loaded {len(target_images)} target images.")
     # Calculate and save compensation images
+    os.makedirs("data/compensation_images", exist_ok=True)
     for idx, target_image in enumerate(target_images):
         # Calculate compensation image
         compensation_image = calculate_compensation_image(
             target_image=target_image,
             color_mixing_matrices=color_mixing_matrices,
-            dtype=np.uint8,
+            dtype=np.dtype(np.uint8),
         )
 
-        # Save compensation image
-        compensation_img = Image.fromarray(compensation_image)
-        compensation_img.save(
-            f"data/compensation_images/compensation_image_{idx:02d}.png"
+        # compensation_image: RGB を想定 -> 保存時に BGR に変換
+        bgr_comp = cv2.cvtColor(compensation_image, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(
+            f"data/compensation_images/compensation_image_{idx:02d}.png",
+            bgr_comp,
         )
         print(f"Saved compensation_image_{idx:02d}.png")
 

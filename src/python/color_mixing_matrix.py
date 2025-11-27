@@ -5,7 +5,10 @@ import torch
 
 
 def generate_projection_patterns(
-    x_size: int, y_size: int, num_divisions: int = 3, dtype: np.dtype = np.uint8
+    x_size: int,
+    y_size: int,
+    num_divisions: int = 3,
+    dtype: np.dtype = np.dtype(np.uint8),
 ) -> List[ndarray]:
     """
     Generate a set of RGB projection patterns covering a discrete color grid.
@@ -15,6 +18,7 @@ def generate_projection_patterns(
     The total number of generated patterns is ``num_divisions ** 3``, where
     each channel (R, G, B) takes one of ``num_divisions`` equally spaced
     values in [0, 1].
+
     Parameters
     ----------
     x_size : int

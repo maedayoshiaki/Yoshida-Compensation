@@ -6,7 +6,7 @@ import torch
 def calculate_compensation_image(
     target_image: ndarray,
     color_mixing_matrices: ndarray,
-    dtype: np.dtype = np.float32,
+    dtype: np.dtype = np.dtype(np.float32),
 ) -> ndarray:
     """
     Compute a photometric compensation image using per-pixel color mixing matrices.
