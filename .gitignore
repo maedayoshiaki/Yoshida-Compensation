@@ -207,13 +207,11 @@ marimo/_lsp/
 __marimo__/
 
 # Local
-data/**
-!data/.gitkeep
-!data/captured_images/.gitkeep
-!data/compensation_images/.gitkeep
-!data/inv_gamma_proj_pattern/.gitkeep
-!data/inv_gamma_proj_patterns/.gitkeep
-!data/linear_proj_patterns/.gitkeep
-!data/target_images/.gitkeep
+data/**/*.png
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.bmp
+data/**/*.tiff
+!**/.gitkeep
 
 external/GrayCode
