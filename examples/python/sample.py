@@ -2,6 +2,10 @@ import os
 import numpy as np
 from numpy import ndarray
 import cv2
+from typing import List, Tuple, Optional
+import rawpy
+from external.GrayCode.src.python.warp_image import PixelMapWarper
+from external.GrayCode.src.python.interpolate_c2p import load_c2p_numpy
 
 # capture images from camera
 from edsdk.camera_controller import CameraController
@@ -19,15 +23,73 @@ PROJ_WIDTH = 1920
 PROJ_HEIGHT = 1080
 PROJ_POS_X = 1920 + 3440  # プロジェクタの表示位置X座標
 PROJ_POS_Y = 0  # プロジェクタの表示位置Y座標
+C2P_MAP_PATH = "data/c2p_map.npy"
 
 
-def Capture() -> ndarray:
-    with CameraController() as cam:
-        cam.set_properties(av=8, tv=1 / 15, iso=100)
-        captured_images = cam.capture_numpy()
-    if captured_images is None or len(captured_images) == 0:
-        raise RuntimeError("Failed to capture image from camera.")
-    return captured_images[0]
+def center_rect(
+    image: ndarray, proj_width: int, proj_height: int
+) -> Tuple[int, int, int, int]:
+    """
+    Calculate the top-left coordinates to center a rectangle of given width and height within the image.
+
+    Parameters
+    ----------
+    image : numpy.ndarray
+    proj_width : int
+    proj_height : int
+
+    Returns
+    -------
+    Tuple[x, y, width, height]
+    """
+    img_height, img_width = image.shape[:2]
+    x_start = max((img_width - proj_width) // 2, 0)
+    y_start = max((img_height - proj_height) // 2, 0)
+    return x_start, y_start, proj_width, proj_height
+
+
+def raw_to_rgb(raw_image_path: str) -> Optional[np.ndarray]:
+    try:
+        with rawpy.imread(raw_image_path) as raw:
+            rgb: np.ndarray = raw.postprocess(
+                use_camera_wb=True,
+                no_auto_bright=True,
+                output_bps=8,
+                gamma=(1, 1),
+            )
+            return rgb
+    except Exception as e:
+        print(f" Error processing RAW image {raw_image_path}: {e}")
+        return None
+
+
+def capture_image() -> Optional[ndarray]:
+    try:
+        with CameraController() as camera:
+            save_str_name = "temp_capture"
+            camera.set_properties(av="8", tv="1/15", iso="400", image_quality="LR")
+            save_paths = camera.capture(filename=save_str_name)
+
+        img = raw_to_rgb(save_paths[0])
+
+        if img is None:
+            print(" Error: Captured image is None")
+            return None
+        os.remove(save_paths[0])  # remove temporary RAW file
+        return img
+    except Exception as e:
+        print(f" Error capturing image: {e}")
+        return None
+
+
+def warp_image(
+    src_image: np.ndarray, pixel_map_path: str, proj_width: int, proj_height: int
+) -> np.ndarray:
+    pixel_map = load_c2p_numpy(pixel_map_path)
+    warper = PixelMapWarper(pixel_map)
+    crop_rect = center_rect(src_image, proj_width, proj_height)
+    warped_image = warper.forward_warp(src_image, crop_rect=crop_rect)
+    return warped_image
 
 
 def main():
@@ -81,11 +143,18 @@ def main():
         cv2.waitKey(200)
 
         # Capture image
-        captured_image = Capture()
+        captured_image = capture_image()
+        if captured_image is None:
+            print("Failed to capture image. Exiting.")
+            return
+        # Warp captured image to projector coordinates
+        captured_image = warp_image(
+            captured_image, C2P_MAP_PATH, PROJ_WIDTH, PROJ_HEIGHT
+        )
         captured_images.append(captured_image)
-        print("Captured an image.")
 
     cv2.destroyWindow(window_name)
+    print("Captured all images.")
 
     # After capturing all images, calculate color mixing matrices
     color_mixing_matrices = calculate_color_mixing_matrix(

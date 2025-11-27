@@ -140,21 +140,25 @@ def apply_inverse_gamma_correction(
 
 
 def calculate_color_mixing_matrix(
-    proj_images: List[ndarray], captured_images: List[ndarray]
+    proj_images: List[ndarray],
+    captured_images: List[ndarray],
+    ref_y: int = 0,
+    ref_x: int = 0,
 ) -> ndarray:
     """
     Estimate a per-pixel linear color mixing transformation between projected and captured RGB images.
     This function assumes a linear model per pixel of the form:
-        P(x, y) ≈ C(x, y) @ M(x, y)[:3, :] + M(x, y)[3, :]
+        P_ref(i) ≈ C(x, y, i) @ M(x, y)[:3, :] + M(x, y)[3, :]
     where:
-      - P(x, y) is the projected RGB color at pixel (x, y),
-      - C(x, y) is the captured RGB color at pixel (x, y),
+      - P_ref(i) is the projected RGB color of image i at the single reference pixel (ref_y, ref_x),
+      - C(x, y, i) is the captured RGB color at pixel (x, y) in image i,
       - the last row of M is a bias term (per channel),
       - M(x, y) is a 4×3 matrix for each pixel, estimated via least-squares regression
         over the input image set.
-    More concretely, for each pixel (x, y), the function solves:
-        [C_r C_g C_b 1] @ M_pixel ≈ [P_r P_g P_b]
-    using the normal equations with a pseudoinverse.
+    Concretely, for each pixel (x, y), and for each image i, the regression uses:
+        [C_r C_g C_b 1] @ M_pixel ≈ [P_r_ref P_g_ref P_b_ref]
+    where P_*_ref is taken only from (ref_y, ref_x).
+
     Parameters
     ----------
     proj_images : List[numpy.ndarray]
@@ -168,6 +172,13 @@ def calculate_color_mixing_matrix(
         Each captured image must have the same shape and dtype as the
         corresponding projected image. Supported dtypes are uint8 and uint16,
         which are internally normalized to [0, 1] as float32.
+    ref_y : int
+        Reference pixel y-coordinate (row index) in the projection images
+        whose RGB value is used as the target P for all pixels.
+    ref_x : int
+        Reference pixel x-coordinate (column index) in the projection images
+        whose RGB value is used as the target P for all pixels.
+
     Returns
     -------
     numpy.ndarray
@@ -175,21 +186,15 @@ def calculate_color_mixing_matrix(
         `M[h, w]` is a 4×3 matrix encoding the linear color mixing model:
         the first 3 rows correspond to a 3×3 color transform applied to the
         captured RGB, and the last row is a bias term.
+
     Raises
     ------
     ValueError
         If the number of projected and captured images differs.
         If the images do not have 3 color channels (RGB).
         If projected and captured images do not share the same spatial dimensions.
-    Notes
-    -----
-    - Computation is performed in PyTorch and uses GPU acceleration if available.
-    - Normalization is based on the dtype of the first image in each list. All
-      images within a list are assumed to share the same dtype.
-    - The solution uses the Moore–Penrose pseudoinverse per pixel, which makes
-      it robust to poorly conditioned or rank-deficient pixel-wise design matrices.
+        If ref_x or ref_y are out of bounds.
     """
-
     # Validate input images
     if len(proj_images) != len(captured_images):
         raise ValueError(
@@ -203,6 +208,16 @@ def calculate_color_mixing_matrix(
 
     if proj_images[0].shape != captured_images[0].shape:
         raise ValueError("Projected and captured images must have the same dimensions.")
+
+    n = len(proj_images)
+    height, width, _ = proj_images[0].shape
+
+    # 参照点の範囲チェック
+    if not (0 <= ref_y < height and 0 <= ref_x < width):
+        raise ValueError(
+            f"Reference point (ref_y={ref_y}, ref_x={ref_x}) "
+            f"is out of bounds for image size (H={height}, W={width})."
+        )
 
     # Normalize projection images
     proj_dtype = proj_images[0].dtype
@@ -218,21 +233,29 @@ def calculate_color_mixing_matrix(
     elif cap_dtype == np.uint16:
         captured_images = [img.astype(np.float32) / 65535.0 for img in captured_images]
 
-    n = len(proj_images)
-    height, width, _ = proj_images[0].shape
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Convert images to torch tensors (N, H, W, 3)
-    P = torch.from_numpy(np.array(proj_images)).to(device=device, dtype=torch.float32)
+    P_full = torch.from_numpy(np.array(proj_images)).to(
+        device=device, dtype=torch.float32
+    )
     C = torch.from_numpy(np.array(captured_images)).to(
         device=device, dtype=torch.float32
     )
 
     num_pixels = height * width
 
-    # reshape to (N, H*W, 3)
-    P_batch = torch.reshape(P, (n, num_pixels, 3))
-    C_batch = torch.reshape(C, (n, num_pixels, 3))
+    # --- ここが変更点 ---
+    # P は参照点 (ref_y, ref_x) のみを使う。
+    # 形状: (N, 3)
+    P_ref = P_full[:, ref_y, ref_x, :]  # (N, 3)
+
+    # 全ピクセルに対し同じ P_ref を使うため、
+    # (N, 1, 3) -> (N, H*W, 3) にブロードキャスト
+    P_batch = P_ref[:, None, :].expand(-1, num_pixels, -1)  # (N, H*W, 3)
+
+    # C はピクセル依存
+    C_batch = torch.reshape(C, (n, num_pixels, 3))  # (N, H*W, 3)
 
     # Add bias term to C_batch -> (N, H*W, 4)
     bias = torch.ones((n, num_pixels, 1), device=device, dtype=torch.float32)
