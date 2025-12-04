@@ -1,14 +1,15 @@
 import numpy as np
 from numpy import ndarray
-from typing import List
+from typing import List, Tuple
 import torch
+import psutil
 
 
 def generate_projection_patterns(
     x_size: int,
     y_size: int,
     num_divisions: int = 3,
-    dtype: np.dtype = np.dtype(np.uint8),
+    dtype: np.typing.DTypeLike = np.uint8,
 ) -> List[ndarray]:
     """
     Generate a set of RGB projection patterns covering a discrete color grid.
@@ -122,8 +123,8 @@ def apply_inverse_gamma_correction(
     else:
         _image = image_tensor.float()
 
-    # Apply gamma correction
-    corrected_image = torch.pow(_image, 1.0 / gamma)
+    # Apply inverse gamma correction
+    corrected_image = torch.pow(_image, gamma)
     corrected_image = torch.clamp(corrected_image, 0.0, 1.0)
 
     # Convert back to original dtype
@@ -139,144 +140,160 @@ def apply_inverse_gamma_correction(
     return corrected_image
 
 
-def calculate_color_mixing_matrix(
+def calc_color_mixing_matrices(
     proj_images: List[ndarray],
     captured_images: List[ndarray],
-    ref_y: int = 0,
     ref_x: int = 0,
-) -> ndarray:
+    ref_y: int = 0,
+    safety_margin: float = 0.5,
+    min_batch_size: int = 256,
+    use_gpu: bool = False,
+) -> np.ndarray:
     """
-    Estimate a per-pixel linear color mixing transformation between projected and captured RGB images.
-    This function assumes a linear model per pixel of the form:
-        P_ref(i) ≈ C(x, y, i) @ M(x, y)[:3, :] + M(x, y)[3, :]
-    where:
-      - P_ref(i) is the projected RGB color of image i at the single reference pixel (ref_y, ref_x),
-      - C(x, y, i) is the captured RGB color at pixel (x, y) in image i,
-      - the last row of M is a bias term (per channel),
-      - M(x, y) is a 4×3 matrix for each pixel, estimated via least-squares regression
-        over the input image set.
-    Concretely, for each pixel (x, y), and for each image i, the regression uses:
-        [C_r C_g C_b 1] @ M_pixel ≈ [P_r_ref P_g_ref P_b_ref]
-    where P_*_ref is taken only from (ref_y, ref_x).
+    Calculate the color mixing matrix that maps captured image colors to projected image colors.
+    P(x, y) = C(x, y) * M(x, y), where P in R^3 is projected image color,
+    C in R^4 is captured image color with bias, and M in R^(4x3) is color mixing matrix.
 
-    Parameters
-    ----------
-    proj_images : List[numpy.ndarray]
-        List of projected RGB images used as regression targets.
-        Each image must be a 3-channel array of shape (H_proj, W_proj, 3).
-        Only the pixel at (ref_y, ref_x) is used from each image.
-        Supported dtypes are uint8 and uint16, which are internally normalized
-        to [0, 1] as float32.
-    captured_images : List[numpy.ndarray]
-        List of corresponding captured RGB images, same length as `proj_images`.
-        Each captured image must have 3 color channels with shape (H_cap, W_cap, 3).
-        The output matrix dimensions are determined by these images.
-        Supported dtypes are uint8 and uint16, which are internally normalized
-        to [0, 1] as float32.
-    ref_y : int
-        Reference pixel y-coordinate (row index) in the projection images
-        whose RGB value is used as the target P for all pixels.
-    ref_x : int
-        Reference pixel x-coordinate (column index) in the projection images
-        whose RGB value is used as the target P for all pixels.
 
-    Returns
-    -------
-    numpy.ndarray
-        A 4D array of shape (H_cap, W_cap, 4, 3), where for each pixel (h, w),
-        `M[h, w]` is a 4×3 matrix encoding the linear color mixing model:
-        the first 3 rows correspond to a 3×3 color transform applied to the
-        captured RGB, and the last row is a bias term.
+    Args:
+        proj_images (List[ndarray]): projector input images (linear RGB)
+        captured_images (List[ndarray]): captured images (linear RGB)
+        ref_x (int): reference x coordinate for color sampling
+        ref_y (int): reference y coordinate for color sampling
 
-    Raises
-    ------
-    ValueError
-        If the number of projected and captured images differs.
-        If the images do not have 3 color channels (RGB).
-        If ref_x or ref_y are out of bounds for the projection images.
+    Returns:
+        np.ndarray: color mixing matrix of shape (H, W, 4, 3)
     """
-    # Validate input images
-    if len(proj_images) != len(captured_images):
-        raise ValueError(
-            "The number of projected and captured images must be the same."
-        )
-    if proj_images[0].shape[2] != 3:
-        raise ValueError("Projection images must have 3 color channels (RGB).")
-    if captured_images[0].shape[2] != 3:
-        raise ValueError("Captured images must have 3 color channels (RGB).")
 
-    n = len(proj_images)
+    device = torch.device("cuda" if torch.cuda.is_available() and use_gpu else "cpu")
+    print("device:", device)
 
-    # Get dimensions from captured images (output size)
-    cap_height, cap_width, _ = captured_images[0].shape
+    # Preprocess projection images: normalize to [0, 1]
+    norm_proj_images = []
+    for img in proj_images:
+        if img.dtype == np.uint8:
+            norm_img = img.astype(np.float32) / 255.0
+        elif img.dtype == np.uint16:
+            norm_img = img.astype(np.float32) / 65535.0
+        else:
+            norm_img = img.astype(np.float32)
+        norm_proj_images.append(norm_img)
 
-    # Get dimensions from projection images (for ref point validation)
-    proj_height, proj_width, _ = proj_images[0].shape
+    # Preprocess captured images: normalize to [0, 1]
+    norm_captured_images = []
+    for img in captured_images:
+        if img.dtype == np.uint8:
+            norm_img = img.astype(np.float32) / 255.0
+        elif img.dtype == np.uint16:
+            norm_img = img.astype(np.float32) / 65535.0
+        else:
+            norm_img = img.astype(np.float32)
+        norm_captured_images.append(norm_img)
 
-    # Validate reference point against projection image bounds
-    if not (0 <= ref_y < proj_height and 0 <= ref_x < proj_width):
-        raise ValueError(
-            f"Reference point (ref_y={ref_y}, ref_x={ref_x}) "
-            f"is out of bounds for projection image size (H={proj_height}, W={proj_width})."
-        )
+    # Preprocess captured images: transform to torch tensors (H, W, N, 4)
+    # まずは CPU 上でテンソルを作成し、バッチ毎に GPU に転送する設計にする
+    captured_tensor_cpu = torch.from_numpy(np.array(norm_captured_images)).permute(
+        1, 2, 0, 3
+    )  # Shape: (H, W, N, 3) on CPU
+    bias = torch.ones(
+        (*captured_tensor_cpu.shape[:3], 1),
+        device="cpu",
+        dtype=captured_tensor_cpu.dtype,
+    )
+    captured_tensor_cpu = torch.cat(
+        [captured_tensor_cpu, bias], dim=3
+    )  # Shape: (H, W, N, 4) on CPU
 
-    # Normalize projection images and extract only reference point
-    proj_dtype = proj_images[0].dtype
-    if proj_dtype == np.uint8:
-        P_ref = np.array(
-            [img[ref_y, ref_x, :].astype(np.float32) / 255.0 for img in proj_images]
-        )
-    elif proj_dtype == np.uint16:
-        P_ref = np.array(
-            [img[ref_y, ref_x, :].astype(np.float32) / 65535.0 for img in proj_images]
-        )
-    else:
-        P_ref = np.array(
-            [img[ref_y, ref_x, :].astype(np.float32) for img in proj_images]
-        )
-    # P_ref shape: (N, 3)
+    H, W, N, _ = captured_tensor_cpu.shape
+    num_pixels = H * W
+    # Preprocess projection images: extract reference pixel colors
+    proj_ref_colors = []
+    for img in norm_proj_images:
+        ref_color = img[ref_y, ref_x, :]  # Shape: (3,)
+        proj_ref_colors.append(ref_color)
 
-    # Normalize captured images
-    cap_dtype = captured_images[0].dtype
-    if cap_dtype == np.uint8:
-        captured_images = [img.astype(np.float32) / 255.0 for img in captured_images]
-    elif cap_dtype == np.uint16:
-        captured_images = [img.astype(np.float32) / 65535.0 for img in captured_images]
+    # 参照色を (N, 3) のテンソルに変換
+    proj_ref = torch.from_numpy(np.array(proj_ref_colors)).to(device)  # (N, 3)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # CPU / GPU メモリから安全なバッチサイズを見積もる
 
-    # Convert to torch tensors
-    P_ref_tensor = torch.from_numpy(P_ref).to(
-        device=device, dtype=torch.float32
-    )  # (N, 3)
-    C = torch.from_numpy(np.array(captured_images)).to(
-        device=device, dtype=torch.float32
-    )  # (N, H_cap, W_cap, 3)
+    def estimate_safe_batch_size(
+        num_patterns: int,
+        safety: float,
+        min_bs: int,
+        use_cuda: bool,
+    ) -> int:
+        """利用可能メモリから安全なバッチサイズ (ピクセル数) を見積もる。"""
 
-    num_pixels = cap_height * cap_width
+        # 利用可能メモリ取得（バイト）
+        if use_cuda and torch.cuda.is_available():
+            _device = torch.device("cuda")
+            stats = torch.cuda.memory_stats(_device)
+            # free = total - allocated - reserved などを単純化して近似
+            total = torch.cuda.get_device_properties(_device).total_memory
+            reserved = stats.get("reserved_bytes.all.current", 0)
+            allocated = stats.get("allocated_bytes.all.current", 0)
+            free_bytes = max(int(total - reserved - allocated), 0)
+        else:
+            vm = psutil.virtual_memory()
+            free_bytes = int(vm.available)
 
-    # Expand P_ref for all pixels: (N, 3) -> (N, H*W, 3)
-    P_batch = P_ref_tensor[:, None, :].expand(-1, num_pixels, -1)  # (N, H*W, 3)
+        # 1ピクセルあたりに必要なおおよそのメモリを見積もる
+        # captured_batch: (B, N, 4) float32 → B * N * 4 * 4 bytes
+        # cap_pinv_batch: (B, N, 4) float32 → 同上
+        # proj_ref_batch: (B, N, 3) float32 → B * N * 3 * 4 bytes
+        # cmm_batch: (B, 4, 3) float32 → B * 4 * 3 * 4 bytes
+        bytes_per_pixel = (num_patterns * 4 * 4 * 3 + num_patterns * 3 * 4) + 4 * 3 * 4
+        bytes_per_pixel = max(bytes_per_pixel, 1)
 
-    # Reshape captured images: (N, H_cap, W_cap, 3) -> (N, H*W, 3)
-    C_batch = torch.reshape(C, (n, num_pixels, 3))  # (N, H*W, 3)
+        usable_bytes = max(int(free_bytes * safety), 1)
+        max_batch = usable_bytes // bytes_per_pixel
+        if max_batch < min_bs:
+            return min_bs
+        return int(max_batch)
 
-    # Add bias term to C_batch -> (N, H*W, 4)
-    bias = torch.ones((n, num_pixels, 1), device=device, dtype=torch.float32)
-    C_batch = torch.cat([C_batch, bias], dim=2)
+    batch_size = estimate_safe_batch_size(
+        num_patterns=N,
+        safety=safety_margin,
+        min_bs=min_batch_size,
+        use_cuda=(device.type == "cuda"),
+    )
 
-    # Move pixel dimension first so we can solve per-pixel regressions in batch
-    P_pixels = P_batch.permute(1, 0, 2)  # (H*W, N, 3)
-    C_pixels = C_batch.permute(1, 0, 2)  # (H*W, N, 4)
+    batch_size = max(min_batch_size, min(batch_size, num_pixels))
+    print(f"num_pixels={num_pixels}, estimated batch_size={batch_size}")
 
-    C_pixels_T = torch.transpose(C_pixels, 1, 2)  # (H*W, 4, N)
-    CTC = torch.bmm(C_pixels_T, C_pixels)  # (H*W, 4, 4)
-    CTP = torch.bmm(C_pixels_T, P_pixels)  # (H*W, 4, 3)
+    # 結果用テンソルを CPU 上に確保
+    cmm_flat_all = torch.empty((num_pixels, 4, 3), dtype=torch.float32)
 
-    # Solve normal equations per pixel
-    CTC_inv = torch.linalg.pinv(CTC)  # (H*W, 4, 4)
-    M_pixels = torch.bmm(CTC_inv, CTP)  # (H*W, 4, 3)
+    # フラットビュー (CPU 上のまま)
+    captured_flat_all = captured_tensor_cpu.reshape(num_pixels, N, 4)
 
-    M = torch.reshape(M_pixels, (cap_height, cap_width, 4, 3)).cpu().numpy()
+    # バッチ処理
+    idx = 0
+    while idx < num_pixels:
+        end = min(idx + batch_size, num_pixels)
+        B = end - idx
 
-    return M
+        # (B, N, 4) を device に転送
+        captured_batch = captured_flat_all[idx:end].to(device)
+
+        # proj_ref を (B, N, 3) にブロードキャスト
+        proj_ref_batch = proj_ref.unsqueeze(0).expand(B, -1, -1)  # (B, N, 3)
+
+        cmm_batch = torch.linalg.lstsq(
+            captured_batch, proj_ref_batch
+        ).solution  # Shape: (B, 4, 3)
+
+        # CPU に退避
+        cmm_flat_all[idx:end] = cmm_batch.to("cpu", dtype=torch.float32)
+
+        # メモリ開放
+        del captured_batch, proj_ref_batch, cmm_batch
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+        idx = end
+
+    color_mixing_matrix = cmm_flat_all.reshape(H, W, 4, 3).numpy()
+
+    return color_mixing_matrix
