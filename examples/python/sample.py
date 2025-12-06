@@ -2,9 +2,10 @@ import os
 import numpy as np
 from numpy import ndarray
 import cv2
-from typing import List, Tuple, Optional, overload
+from typing import List, Tuple, Optional, overload, Literal
 import rawpy
 import torch
+import colour
 from external.Graycode.src.python.warp_image_torch import (
     PixelMapWarperTorch,
     AggregationMethod,
@@ -31,6 +32,7 @@ PROJ_HEIGHT = 1080
 PROJ_POS_X = 1920 + 3440  # プロジェクタの表示位置X座標
 PROJ_POS_Y = 0  # プロジェクタの表示位置Y座標
 C2P_MAP_PATH = "C:\\py_scripts\\CompenNeSt-plusplus\\data\\light10\\pos1\\normal\\cam\\raw\\sl\\correspondence_map.npy"
+RPCC_MAT_PATH = "C:\\py_scripts\\CompenNeSt-plusplus\\data\\light10\\pos1\\normal\\EOSM6Mark2_colorchercker_sunlight_20251204.npy"
 
 
 def center_rect(
@@ -41,36 +43,120 @@ def center_rect(
     return x_start, y_start, image_width, image_height
 
 
-def raw_to_rgb(raw_image_path: str) -> Optional[np.ndarray]:
-    try:
-        with rawpy.imread(raw_image_path) as raw:
-            rgb: np.ndarray = raw.postprocess(
-                use_auto_wb=False,
-                no_auto_bright=True,
-                half_size=True,
-                output_bps=8,
-                gamma=(1, 1),
-            )
-            return rgb
-    except Exception as e:
-        print(f" Error processing RAW image {raw_image_path}: {e}")
-        return None
+def raw_to_rgb(raw_bytes) -> np.ndarray:
+    with rawpy.imread(raw_bytes) as raw:
+        rgb = raw.postprocess(
+            # 1. ガンマ補正を無効化 (Linear)
+            gamma=(1, 1),
+            # 2. 自動明るさ調整を無効化 (計測値を変えないため)
+            no_auto_bright=True,
+            bright=1,
+            # 3. ビット深度を16bitにする
+            output_bps=16,
+            # 4. カメラの色空間のまま出力する
+            #    rawpy.ColorSpace.sRGB (=1) にするとsRGB変換行列がかかってしまうため、
+            #    rawpy.ColorSpace.raw (=0) を指定してセンサーの生の混ざり具合を保持する
+            output_color=rawpy.ColorSpace.raw,
+            # 5. ホワイトバランスはカメラの設定を使用する
+            use_camera_wb=True,
+            use_auto_wb=False,
+            no_auto_scale=False,  # 自動スケールは有効のままにする
+            user_sat=None,  # ハイライトクリップを行わない
+        )
+        return rgb
+    if rgb is None:
+        raise ValueError("Failed to convert RAW to RGB")
 
 
-def capture_image() -> Optional[ndarray]:
+def apply_rpcc_correction(
+    linear_image: np.ndarray,
+    RPCC_MATRIX: np.ndarray,
+    degree: Literal[1, 2, 3] = 2,
+) -> np.ndarray:
+    """
+    Apply Root-Polynomial Color Correction (RPCC) to an image.
+    (Root-Polynomial Color Correction (RPCC) を画像に適用する関数)
+
+    This function expands the RGB values using root-polynomial expansion
+    and applies the pre-computed RPCC matrix to convert camera RGB to XYZ.
+    (RGB値をルート多項式展開で拡張し、事前計算されたRPCC行列を適用して
+    カメラRGBをXYZに変換します)
+
+    Parameters
+    ----------
+    linear_image : np.ndarray
+        Linear camera image with shape (H, W, 3), values in range [0.0, 1.0].
+        (リニアカメラ画像、形状 (H, W, 3)、値の範囲は [0.0, 1.0])
+    RPCC_MATRIX : np.ndarray
+        Pre-computed RPCC transformation matrix with shape (3, N),
+        where N depends on the degree (6 for degree=2, 13 for degree=3).
+        (事前計算されたRPCC変換行列、形状 (3, N)、Nは次数に依存)
+    degree : Literal[1, 2, 3], optional
+        Polynomial degree for expansion. Default is 2.
+        - 1: Linear (R, G, B)
+        - 2: Quadratic with cross terms (R, G, B, sqrt(RG), sqrt(GB), sqrt(BR))
+        - 3: Cubic with additional terms
+        (展開の多項式次数。デフォルトは2)
+
+    Returns
+    -------
+    np.ndarray
+        Color-corrected image in XYZ color space with shape (H, W, 3),
+        values clipped to range [0.0, 1.0].
+        (XYZ色空間の補正済み画像、形状 (H, W, 3)、値は [0.0, 1.0] にクリップ)
+
+    Notes
+    -----
+    The RPCC matrix expects expanded RGB input, so this function internally
+    performs the same polynomial expansion on the image data.
+    (RPCC行列は拡張されたRGB入力を期待するため、この関数は内部で
+    画像データに対して同じ多項式展開を実行します)
+    """
+    # Expand image data: [R, G, B] -> [R, G, B, sqrt(RG), sqrt(GB), sqrt(BR)]
+    # (画像データの拡張処理)
+
+    expanded_image = colour.characterisation.polynomial_expansion_Finlayson2015(
+        linear_image, degree=degree, root_polynomial_expansion=True
+    )
+
+    print(f"Expanded Image Shape: {expanded_image.shape}")
+
+    # Matrix multiplication: XYZ = M @ Expanded_RGB
+    # (行列演算)
+    corrected_xyz = colour.algebra.vecmul(RPCC_MATRIX, expanded_image)
+
+    # Clip values to valid range (noise reduction)
+    # (有効範囲にクリップ、ノイズ対策)
+    corrected_xyz = np.clip(corrected_xyz, 0.0, 1.0)
+
+    return corrected_xyz
+
+
+def capture_image(
+    RPCC_matrix: np.ndarray | None = None, RPCC_degree: Literal[1, 2, 3] = 2
+) -> Optional[np.ndarray]:
     try:
+        imgs = []
         with CameraController() as camera:
-            save_str_name = "temp_capture"
-            camera.set_properties(av="8", tv=1 / 30, iso="100", image_quality="LR")
-            save_paths = camera.capture(filename=save_str_name)
-
-        img = raw_to_rgb(save_paths[0])
-
-        if img is None:
-            print(" Error: Captured image is None")
-            return None
-        # os.remove(save_paths[0])  # remove temporary RAW file
-        return img
+            camera.set_properties(av="8", tv="1/15", iso="400", image_quality="LR")
+            imgs = camera.capture_numpy(raw_processor=raw_to_rgb)
+            if imgs[0] is None:
+                print(" Error: Captured image is None")
+                return None
+        img = imgs[0]
+        print(f"Captured image shape: {img.shape}, dtype: {img.dtype}")
+        img = img.astype(np.float32) / 65535.0  # Normalize to [0, 1]
+        xyz_img: np.ndarray = img
+        if RPCC_matrix is not None:
+            try:
+                xyz_img = apply_rpcc_correction(img, RPCC_matrix, degree=RPCC_degree)
+            except ImportError:
+                print(" Warning: 'colour' library not found, skipping RPCC correction")
+        srgb_img = colour.XYZ_to_sRGB(xyz_img, apply_cctf_encoding=False)
+        srgb_img = np.clip(srgb_img, 0.0, 1.0)
+        srgb_img = (srgb_img * 255).astype(np.uint8)
+        img_bgr = cv2.cvtColor(srgb_img, cv2.COLOR_RGB2BGR)
+        return img_bgr
     except Exception as e:
         print(f" Error capturing image: {e}")
         return None
