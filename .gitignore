@@ -205,3 +205,15 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Local
+data/**/*.png
+data/**/*.jpg
+data/**/*.jpeg
+data/**/*.bmp
+data/**/*.tiff
+!**/.gitkeep
+
+external/GrayCode
+
+*.npy
