@@ -8,7 +8,7 @@
 - **Python** 3.13 以上
 - **uv**（パッケージマネージャ）
 - **CUDA 対応 GPU**（推奨・なくても CPU で動作可能）
-- **Canon カメラ + EDSDK**（カメラキャプチャを行う場合）
+- **カメラデバイス**（`canon_edsdk` または `opencv` バックエンド）
 
 ## セットアップ
 
@@ -49,6 +49,7 @@ Yoshida-Compensation/
 ├── pyproject.toml               # パッケージ定義・依存関係
 ├── src/python/
 │   ├── config.py                # 設定ローダー
+│   ├── camera/                  # カメラ抽象層と各バックエンド実装
 │   ├── color_mixing_matrix.py   # パターン生成・カラーミキシング行列算出
 │   └── photometric_compensation.py  # 補償画像の計算
 ├── examples/python/
@@ -78,10 +79,12 @@ pos_x = 5360    # プロジェクタウィンドウの X 位置
 pos_y = 0
 
 [camera]
+backend = "canon_edsdk" # "canon_edsdk" または "opencv"
 av = "8"
 tv = "1/15"
 iso = "400"
 image_quality = "LR"
+device_index = 0
 wait_key_ms = 200
 
 [paths]
@@ -102,7 +105,9 @@ use_gpu = true          # GPU を使用するか
 | `projector` | `gamma` | プロジェクタのガンマ値 |
 | `projector` | `width`, `height` | プロジェクタの解像度 |
 | `projector` | `pos_x`, `pos_y` | マルチディスプレイ環境でのプロジェクタウィンドウ位置 |
-| `camera` | `av`, `tv`, `iso` | カメラの撮影パラメータ |
+| `camera` | `backend` | 使用するカメラ実装（`canon_edsdk` / `opencv`） |
+| `camera` | `device_index` | OpenCVバックエンドのカメラインデックス |
+| `camera` | `av`, `tv`, `iso`, `image_quality` | Canon EDSDK バックエンドの撮影パラメータ |
 | `paths` | `c2p_map` | カメラ-プロジェクタ間のピクセル対応マップ（`.npy`） |
 | `compensation` | `num_divisions` | 色空間の分割数（パターン総数 = n³） |
 | `compensation` | `use_gpu` | GPU アクセラレーションの有効化 |

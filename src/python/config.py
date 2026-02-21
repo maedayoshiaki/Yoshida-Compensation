@@ -60,24 +60,35 @@ class CameraConfig:
     """Configuration for the camera device.
 
     Attributes:
+        backend: Camera backend implementation name.
+            ``canon_edsdk`` or ``opencv``.
+            使用するカメラバックエンド実装名。
         av: Aperture value (F-stop) as a string.
+            Used by ``canon_edsdk`` backend.
             絞り値（F値）を文字列で指定。
         tv: Shutter speed as a string (e.g., "1/15").
+            Used by ``canon_edsdk`` backend.
             シャッタースピードを文字列で指定（例: "1/15"）。
         iso: ISO sensitivity as a string.
+            Used by ``canon_edsdk`` backend.
             ISO感度を文字列で指定。
         image_quality: Image quality setting for the camera (e.g., "LR" for low-res RAW).
+            Used by ``canon_edsdk`` backend.
             カメラの画質設定（例: "LR" は低解像度RAW）。
+        device_index: Camera index for OpenCV backend.
+            OpenCV バックエンドで使用するカメラインデックス。
         wait_key_ms: Delay in milliseconds between projecting a pattern and capturing.
             パターン投影からキャプチャまでの待機時間（ミリ秒）。
 
     カメラデバイスの設定。
     """
 
+    backend: str = "canon_edsdk"
     av: str = "8"
     tv: str = "1/15"
     iso: str = "400"
     image_quality: str = "LR"
+    device_index: int = 0
     wait_key_ms: int = 200
 
 

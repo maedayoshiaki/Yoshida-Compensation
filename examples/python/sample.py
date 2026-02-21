@@ -11,10 +11,8 @@ full compensation workflow from pattern generation through final output.
 
 import os
 import numpy as np
-from numpy import ndarray
 import cv2
-from typing import List, Tuple, Optional, overload, Literal
-import rawpy
+from typing import List, Tuple, Optional, Literal
 import torch
 import colour
 from external.GrayCode.src.python.warp_image import (
@@ -25,14 +23,12 @@ from external.GrayCode.src.python.warp_image import (
 )
 from external.GrayCode.src.python.interpolate_c2p import load_c2p_numpy
 
-# capture images from camera
-from edsdk.camera_controller import CameraController
-
 from src.python.color_mixing_matrix import (
     generate_projection_patterns,
     apply_inverse_gamma_correction,
     calc_color_mixing_matrices,
 )
+from src.python.camera import CameraCaptureError, create_camera_backend
 from src.python.photometric_compensation import (
     calc_compensation_image,
 )
@@ -66,47 +62,14 @@ def center_rect(
     return x_start, y_start, image_width, image_height
 
 
-def raw_to_rgb(raw_bytes) -> np.ndarray:
-    """Convert RAW image bytes to a linear RGB numpy array.
-
-    Process RAW camera data with specific settings optimized for
-    photometric measurements: linear gamma, no auto brightness
-    adjustment, 16-bit output, and raw color space preservation.
-
-    RAW 画像バイトデータをリニア RGB の NumPy 配列に変換する。
-
-    測光測定に最適化された設定で RAW カメラデータを処理する:
-    リニアガンマ、自動明るさ調整なし、16 ビット出力、
-    RAW 色空間の保持。
-
-    Args:
-        raw_bytes: RAW image data as bytes or file-like object.
-            バイト列またはファイルライクオブジェクトとしての RAW 画像データ。
-
-    Returns:
-        Linear RGB image as numpy array with shape ``(H, W, 3)`` and
-        dtype uint16.
-        形状 ``(H, W, 3)``、dtype uint16 のリニア RGB 画像の NumPy 配列。
-
-    Raises:
-        ValueError: If the RAW to RGB conversion fails.
-            RAW から RGB への変換に失敗した場合。
-    """
-    with rawpy.imread(raw_bytes) as raw:
-        rgb = raw.postprocess(
-            gamma=(1, 1),
-            no_auto_bright=True,
-            bright=1,
-            output_bps=16,
-            output_color=rawpy.ColorSpace.raw,
-            use_camera_wb=True,
-            use_auto_wb=False,
-            no_auto_scale=False,
-            user_sat=None,
-        )
-        return rgb
-    if rgb is None:
-        raise ValueError("Failed to convert RAW to RGB")
+def linear_to_srgb(linear_rgb: np.ndarray) -> np.ndarray:
+    """Convert linear RGB values in [0, 1] to sRGB values in [0, 1]."""
+    linear_rgb = np.clip(linear_rgb, 0.0, 1.0)
+    return np.where(
+        linear_rgb <= 0.0031308,
+        12.92 * linear_rgb,
+        1.055 * np.power(linear_rgb, 1 / 2.4) - 0.055,
+    )
 
 
 def apply_rpcc_correction(
@@ -173,15 +136,14 @@ def capture_image(
 ) -> Optional[np.ndarray]:
     """Capture an image from the camera and apply color correction.
 
-    Capture a RAW image from a Canon camera using the EDSDK, convert it
-    to linear RGB, optionally apply RPCC color correction to XYZ, and
-    then convert to sRGB for output.
+    Capture one image from the configured camera backend, optionally
+    apply RPCC color correction to XYZ, and convert to display-ready
+    RGB output.
 
     カメラから画像をキャプチャし、色補正を適用する。
 
-    EDSDK を使用して Canon カメラから RAW 画像をキャプチャし、リニア RGB に
-    変換した後、オプションで RPCC 色補正を XYZ に適用し、出力用に sRGB に
-    変換する。
+    設定されたカメラバックエンドから画像をキャプチャし、必要に応じて RPCC
+    色補正を XYZ に適用した後、表示用の RGB 画像に変換する。
 
     Args:
         RPCC_matrix: Optional pre-computed RPCC transformation matrix.
@@ -193,40 +155,32 @@ def capture_image(
             RPCC 展開の多項式次数（1、2、または 3）。デフォルトは 2。
 
     Returns:
-        Captured image as BGR numpy array with shape ``(H, W, 3)`` and
+        Captured image as RGB numpy array with shape ``(H, W, 3)`` and
         dtype uint8, or ``None`` if capture fails.
-        形状 ``(H, W, 3)``、dtype uint8 の BGR NumPy 配列としての
+        形状 ``(H, W, 3)``、dtype uint8 の RGB NumPy 配列としての
         キャプチャ画像。キャプチャに失敗した場合は ``None``。
     """
     try:
-        imgs = []
         cam_cfg = get_config().camera
-        with CameraController() as camera:
-            camera.set_properties(
-                av=cam_cfg.av,
-                tv=cam_cfg.tv,
-                iso=cam_cfg.iso,
-                image_quality=cam_cfg.image_quality,
-            )
-            imgs = camera.capture_numpy(raw_processor=raw_to_rgb)
-            if imgs[0] is None:
-                return None
-        img = imgs[0]
-        img = img.astype(np.float32) / 65535.0
+        camera = create_camera_backend(cam_cfg)
+        linear_rgb = camera.capture_linear_rgb()
 
-        xyz_img: np.ndarray = img
         if RPCC_matrix is not None:
             try:
-                xyz_img = apply_rpcc_correction(img, RPCC_matrix, degree=RPCC_degree)
+                xyz_img = apply_rpcc_correction(
+                    linear_rgb, RPCC_matrix, degree=RPCC_degree
+                )
+                srgb_img = colour.XYZ_to_sRGB(xyz_img, apply_cctf_encoding=False)
             except ImportError:
-                pass
+                srgb_img = linear_to_srgb(linear_rgb)
+        else:
+            srgb_img = linear_to_srgb(linear_rgb)
 
-        srgb_img = colour.XYZ_to_sRGB(xyz_img, apply_cctf_encoding=False)
         srgb_img = np.clip(srgb_img, 0.0, 1.0)
-        srgb_img = (srgb_img * 255).astype(np.uint8)
-        img_bgr = cv2.cvtColor(srgb_img, cv2.COLOR_RGB2BGR)
-        return img_bgr
-    except Exception as e:
+        return (srgb_img * 255).astype(np.uint8)
+    except CameraCaptureError:
+        return None
+    except Exception:
         return None
 
 
