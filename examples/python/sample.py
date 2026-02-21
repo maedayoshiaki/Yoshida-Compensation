@@ -10,6 +10,7 @@ full compensation workflow from pattern generation through final output.
 """
 
 import os
+import sys
 import numpy as np
 import cv2
 from typing import List, Tuple, Optional, Literal
@@ -32,7 +33,7 @@ from src.python.camera import CameraCaptureError, create_camera_backend
 from src.python.photometric_compensation import (
     calc_compensation_image,
 )
-from src.python.config import get_config
+from src.python.config import get_config, reload_config, split_cli_config_path
 
 
 def center_rect(
@@ -312,7 +313,7 @@ def invwarp_image(
     return invwarped_image
 
 
-def main():
+def main(argv: list[str] | None = None):
     """Run the complete photometric compensation pipeline.
 
     Orchestrate the full workflow:
@@ -336,6 +337,22 @@ def main():
     5. 幾何学的ワーピングと逆ガンマ補正を適用。
     6. すべての中間結果と最終結果を保存。
     """
+    if argv is None:
+        argv = sys.argv
+
+    try:
+        clean_argv, config_path = split_cli_config_path(argv)
+    except ValueError as e:
+        print(f"Invalid CLI arguments: {e}")
+        return
+
+    if len(clean_argv) != 1:
+        print("Usage: python examples/python/sample.py [--config <config.toml>]")
+        return
+
+    if config_path is not None:
+        reload_config(config_path)
+
     cfg = get_config()
     proj = cfg.projector
     paths = cfg.paths

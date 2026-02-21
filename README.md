@@ -77,6 +77,8 @@ Yoshida-Compensation/
 
 `config.toml` を編集して、プロジェクタ・カメラ・パスなどの設定を行います。
 
+CLI で別設定を使いたい場合は、`--config <path>`（または `-c <path>`）を指定できます。
+
 ### カメラバックエンド切替
 
 - `camera.backend = "canon_edsdk"`: Canon + EDSDK を使用
@@ -157,6 +159,12 @@ wait_key_ms = 200
 uv run python examples/python/sample.py
 ```
 
+別の設定ファイルを使う場合:
+
+```bash
+uv run python examples/python/sample.py --config path/to/config.toml
+```
+
 このスクリプトは以下の処理を自動で行います:
 
 1. 投影パターンの生成（リニア＆逆ガンマ補正済み）
@@ -172,6 +180,12 @@ uv run python examples/python/sample.py
 
 ```bash
 uv run python examples/python/capture.py
+```
+
+別の設定ファイルを使う場合:
+
+```bash
+uv run python examples/python/capture.py --config path/to/config.toml
 ```
 
 ## ライブラリとしての利用
