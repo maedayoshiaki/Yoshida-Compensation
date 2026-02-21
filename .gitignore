@@ -214,6 +214,4 @@ data/**/*.bmp
 data/**/*.tiff
 !**/.gitkeep
 
-external/GrayCode
-
 *.npy
