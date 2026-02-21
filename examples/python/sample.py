@@ -17,7 +17,7 @@ from typing import List, Tuple, Optional, overload, Literal
 import rawpy
 import torch
 import colour
-from external.GrayCode.src.python.warp_image_torch import (
+from external.GrayCode.src.python.warp_image import (
     PixelMapWarperTorch,
     AggregationMethod,
     InpaintMethod,
@@ -395,9 +395,7 @@ def main():
         inv_gamma_patterns.append(inv_gamma_pattern)
         bgr_inv_gamma_pattern = cv2.cvtColor(inv_gamma_pattern, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
-            os.path.join(
-                paths.inv_gamma_pattern_dir, f"inv_gamma_pattern_{i:02d}.png"
-            ),
+            os.path.join(paths.inv_gamma_pattern_dir, f"inv_gamma_pattern_{i:02d}.png"),
             bgr_inv_gamma_pattern,
         )
 
