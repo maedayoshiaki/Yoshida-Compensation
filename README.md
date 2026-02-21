@@ -10,6 +10,11 @@
 - **CUDA 対応 GPU**（推奨・なくても CPU で動作可能）
 - **カメラデバイス**（`canon_edsdk` または `opencv` バックエンド）
 
+カメラバックエンドごとの要件:
+
+- `canon_edsdk`: Canon カメラ + EDSDK 環境、`rawpy`
+- `opencv`: OpenCV でアクセス可能な UVC/USB カメラ
+
 ## セットアップ
 
 ### 1. リポジトリのクローン
@@ -41,6 +46,8 @@ uv sync
 uv sync --extra sample
 ```
 
+`canon_edsdk` を使う場合は、この `--extra sample` に含まれる `rawpy` が必要です。
+
 ## プロジェクト構成
 
 ```text
@@ -70,6 +77,11 @@ Yoshida-Compensation/
 
 `config.toml` を編集して、プロジェクタ・カメラ・パスなどの設定を行います。
 
+### カメラバックエンド切替
+
+- `camera.backend = "canon_edsdk"`: Canon + EDSDK を使用
+- `camera.backend = "opencv"`: 汎用カメラを使用（`camera.device_index` を参照）
+
 ```toml
 [projector]
 gamma = 2.2
@@ -96,6 +108,27 @@ target_image_dir = "data/target_images"
 [compensation]
 num_divisions = 3       # パターン分割数 (パターン総数 = num_divisions^3)
 use_gpu = true          # GPU を使用するか
+```
+
+バックエンドごとの設定例:
+
+```toml
+# Canon (EDSDK)
+[camera]
+backend = "canon_edsdk"
+av = "8"
+tv = "1/15"
+iso = "400"
+image_quality = "LR"
+wait_key_ms = 200
+```
+
+```toml
+# Generic camera (OpenCV)
+[camera]
+backend = "opencv"
+device_index = 0
+wait_key_ms = 200
 ```
 
 主な設定項目:
