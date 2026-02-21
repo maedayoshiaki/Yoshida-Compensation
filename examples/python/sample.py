@@ -1,3 +1,14 @@
+"""Main sample implementation for the photometric compensation pipeline.
+
+Provides camera integration, image warping, color correction, and the
+full compensation workflow from pattern generation through final output.
+
+色補償パイプラインのメインサンプル実装。
+
+カメラ連携、画像ワーピング、色補正、およびパターン生成から最終出力までの
+完全な補償ワークフローを提供する。
+"""
+
 import os
 import numpy as np
 from numpy import ndarray
@@ -31,17 +42,24 @@ from src.python.config import get_config
 def center_rect(
     image_width: int, image_height: int, proj_width: int, proj_height: int
 ) -> Tuple[int, int, int, int]:
-    """
-    Calculate the rectangle coordinates to center an image within the projector frame.
+    """Calculate the rectangle coordinates to center an image within the projector frame.
+
+    プロジェクタフレーム内に画像を中央配置するための矩形座標を計算する。
 
     Args:
         image_width: Width of the image to be centered.
+            中央配置する画像の幅。
         image_height: Height of the image to be centered.
+            中央配置する画像の高さ。
         proj_width: Width of the projector display.
+            プロジェクタディスプレイの幅。
         proj_height: Height of the projector display.
+            プロジェクタディスプレイの高さ。
 
     Returns:
-        A tuple (x_start, y_start, width, height) representing the centered rectangle.
+        A tuple ``(x_start, y_start, width, height)`` representing the
+        centered rectangle.
+        中央配置された矩形を表すタプル ``(x_start, y_start, width, height)``。
     """
     x_start = max((proj_width - image_width) // 2, 0)
     y_start = max((proj_height - image_height) // 2, 0)
@@ -49,21 +67,30 @@ def center_rect(
 
 
 def raw_to_rgb(raw_bytes) -> np.ndarray:
-    """
-    Convert RAW image bytes to a linear RGB numpy array.
+    """Convert RAW image bytes to a linear RGB numpy array.
 
-    This function processes RAW camera data with specific settings optimized
-    for photometric measurements: linear gamma, no auto brightness adjustment,
-    16-bit output, and raw color space preservation.
+    Process RAW camera data with specific settings optimized for
+    photometric measurements: linear gamma, no auto brightness
+    adjustment, 16-bit output, and raw color space preservation.
+
+    RAW 画像バイトデータをリニア RGB の NumPy 配列に変換する。
+
+    測光測定に最適化された設定で RAW カメラデータを処理する:
+    リニアガンマ、自動明るさ調整なし、16 ビット出力、
+    RAW 色空間の保持。
 
     Args:
         raw_bytes: RAW image data as bytes or file-like object.
+            バイト列またはファイルライクオブジェクトとしての RAW 画像データ。
 
     Returns:
-        Linear RGB image as numpy array with shape (H, W, 3) and dtype uint16.
+        Linear RGB image as numpy array with shape ``(H, W, 3)`` and
+        dtype uint16.
+        形状 ``(H, W, 3)``、dtype uint16 のリニア RGB 画像の NumPy 配列。
 
     Raises:
         ValueError: If the RAW to RGB conversion fails.
+            RAW から RGB への変換に失敗した場合。
     """
     with rawpy.imread(raw_bytes) as raw:
         rgb = raw.postprocess(
@@ -87,28 +114,45 @@ def apply_rpcc_correction(
     RPCC_MATRIX: np.ndarray,
     degree: Literal[1, 2, 3] = 2,
 ) -> np.ndarray:
-    """
-    Apply Root-Polynomial Color Correction (RPCC) to an image.
+    """Apply Root-Polynomial Color Correction (RPCC) to an image.
 
-    This function expands the RGB values using root-polynomial expansion
-    and applies the pre-computed RPCC matrix to convert camera RGB to XYZ.
+    Expand the RGB values using root-polynomial expansion and apply the
+    pre-computed RPCC matrix to convert camera RGB to XYZ color space.
+
+    画像にルート多項式色補正（RPCC）を適用する。
+
+    ルート多項式展開を用いて RGB 値を拡張し、事前計算された RPCC 行列を
+    適用してカメラ RGB を XYZ 色空間に変換する。
 
     Args:
-        linear_image: Linear camera image with shape (H, W, 3), values in range [0.0, 1.0].
-        RPCC_MATRIX: Pre-computed RPCC transformation matrix with shape (3, N),
-            where N depends on the degree (6 for degree=2, 13 for degree=3).
+        linear_image: Linear camera image with shape ``(H, W, 3)``,
+            values in range [0.0, 1.0].
+            形状 ``(H, W, 3)``、値の範囲 [0.0, 1.0] のリニアカメラ画像。
+        RPCC_MATRIX: Pre-computed RPCC transformation matrix with shape
+            ``(3, N)``, where *N* depends on the degree (6 for degree=2,
+            13 for degree=3).
+            形状 ``(3, N)`` の事前計算された RPCC 変換行列。*N* は次数に
+            依存する（degree=2 で 6、degree=3 で 13）。
         degree: Polynomial degree for expansion. Default is 2.
-            - 1: Linear (R, G, B)
-            - 2: Quadratic with cross terms (R, G, B, sqrt(RG), sqrt(GB), sqrt(BR))
-            - 3: Cubic with additional terms
+            多項式展開の次数。デフォルトは 2。
+
+            - 1: Linear (R, G, B) / リニア
+            - 2: Quadratic with cross terms / 交差項付き二次
+              ``(R, G, B, sqrt(RG), sqrt(GB), sqrt(BR))``
+            - 3: Cubic with additional terms / 追加項付き三次
 
     Returns:
-        Color-corrected image in XYZ color space with shape (H, W, 3),
-        values clipped to range [0.0, 1.0].
+        Color-corrected image in XYZ color space with shape
+        ``(H, W, 3)``, values clipped to range [0.0, 1.0].
+        形状 ``(H, W, 3)``、値が [0.0, 1.0] にクリップされた
+        XYZ 色空間の色補正済み画像。
 
     Notes:
-        The RPCC matrix expects expanded RGB input, so this function internally
-        performs the same polynomial expansion on the image data.
+        The RPCC matrix expects expanded RGB input, so this function
+        internally performs the same polynomial expansion on the image
+        data.
+        RPCC 行列は展開された RGB 入力を想定しているため、この関数は
+        内部的に画像データに対して同じ多項式展開を行う。
     """
     # Expand image data: [R, G, B] -> [R, G, B, sqrt(RG), sqrt(GB), sqrt(BR)]
     expanded_image = colour.characterisation.polynomial_expansion_Finlayson2015(
@@ -127,21 +171,32 @@ def apply_rpcc_correction(
 def capture_image(
     RPCC_matrix: np.ndarray | None = None, RPCC_degree: Literal[1, 2, 3] = 2
 ) -> Optional[np.ndarray]:
-    """
-    Capture an image from the camera and apply color correction.
+    """Capture an image from the camera and apply color correction.
 
-    This function captures a RAW image from a Canon camera using the EDSDK,
-    converts it to linear RGB, optionally applies RPCC color correction to XYZ,
-    and then converts to sRGB for output.
+    Capture a RAW image from a Canon camera using the EDSDK, convert it
+    to linear RGB, optionally apply RPCC color correction to XYZ, and
+    then convert to sRGB for output.
+
+    カメラから画像をキャプチャし、色補正を適用する。
+
+    EDSDK を使用して Canon カメラから RAW 画像をキャプチャし、リニア RGB に
+    変換した後、オプションで RPCC 色補正を XYZ に適用し、出力用に sRGB に
+    変換する。
 
     Args:
         RPCC_matrix: Optional pre-computed RPCC transformation matrix.
             If provided, color correction will be applied.
-        RPCC_degree: Polynomial degree for RPCC expansion (1, 2, or 3). Default is 2.
+            オプションの事前計算された RPCC 変換行列。指定された場合、
+            色補正が適用される。
+        RPCC_degree: Polynomial degree for RPCC expansion (1, 2, or 3).
+            Default is 2.
+            RPCC 展開の多項式次数（1、2、または 3）。デフォルトは 2。
 
     Returns:
-        Captured image as BGR numpy array with shape (H, W, 3) and dtype uint8,
-        or None if capture fails.
+        Captured image as BGR numpy array with shape ``(H, W, 3)`` and
+        dtype uint8, or ``None`` if capture fails.
+        形状 ``(H, W, 3)``、dtype uint8 の BGR NumPy 配列としての
+        キャプチャ画像。キャプチャに失敗した場合は ``None``。
     """
     try:
         imgs = []
@@ -183,22 +238,38 @@ def warp_image(
     image_width: int,
     image_height: int,
 ) -> np.ndarray:
-    """
-    Warp an image from camera view to projector view using a pixel correspondence map.
+    """Warp an image from camera view to projector view using a pixel correspondence map.
 
-    This function performs forward warping to transform an image captured by the camera
-    into the projector's coordinate system using pre-computed camera-to-projector mapping.
+    Perform forward warping to transform an image captured by the camera
+    into the projector's coordinate system using pre-computed
+    camera-to-projector mapping.
+
+    ピクセル対応マップを使用してカメラビューからプロジェクタビューに画像をワーピングする。
+
+    事前計算されたカメラ-プロジェクタ間マッピングを使用して、カメラで
+    キャプチャされた画像をプロジェクタの座標系に順方向ワーピングで変換する。
 
     Args:
-        src_image: Source image in camera coordinates with shape (H, W, 3).
-        pixel_map_path: Path to the camera-to-projector correspondence map (.npy file).
+        src_image: Source image in camera coordinates with shape
+            ``(H, W, 3)``.
+            形状 ``(H, W, 3)`` のカメラ座標系のソース画像。
+        pixel_map_path: Path to the camera-to-projector correspondence
+            map (``.npy`` file).
+            カメラ-プロジェクタ対応マップのパス（``.npy`` ファイル）。
         proj_width: Width of the projector display.
+            プロジェクタディスプレイの幅。
         proj_height: Height of the projector display.
+            プロジェクタディスプレイの高さ。
         image_width: Width of the target image region.
+            目標画像領域の幅。
         image_height: Height of the target image region.
+            目標画像領域の高さ。
 
     Returns:
-        Warped image in projector coordinates with shape (proj_height, proj_width, 3).
+        Warped image in projector coordinates with shape
+        ``(proj_height, proj_width, 3)``.
+        形状 ``(proj_height, proj_width, 3)`` のプロジェクタ座標系の
+        ワーピング済み画像。
     """
     pixel_map = load_c2p_numpy(pixel_map_path)
     warper = PixelMapWarperTorch(pixel_map)
@@ -223,22 +294,38 @@ def invwarp_image(
     cam_width: int,
     cam_height: int,
 ) -> np.ndarray:
-    """
-    Inverse warp an image from projector view to camera view.
+    """Inverse warp an image from projector view to camera view.
 
-    This function performs backward warping to transform an image from projector
-    coordinates into the camera's coordinate system using pre-computed mapping.
+    Perform backward warping to transform an image from projector
+    coordinates into the camera's coordinate system using pre-computed
+    mapping.
+
+    プロジェクタビューからカメラビューに画像を逆ワーピングする。
+
+    事前計算されたマッピングを使用して、プロジェクタ座標系の画像を
+    カメラの座標系に逆方向ワーピングで変換する。
 
     Args:
-        src_image: Source image in projector coordinates with shape (H, W, 3).
-        pixel_map_path: Path to the camera-to-projector correspondence map (.npy file).
+        src_image: Source image in projector coordinates with shape
+            ``(H, W, 3)``.
+            形状 ``(H, W, 3)`` のプロジェクタ座標系のソース画像。
+        pixel_map_path: Path to the camera-to-projector correspondence
+            map (``.npy`` file).
+            カメラ-プロジェクタ対応マップのパス（``.npy`` ファイル）。
         proj_width: Width of the projector display.
+            プロジェクタディスプレイの幅。
         proj_height: Height of the projector display.
+            プロジェクタディスプレイの高さ。
         cam_width: Width of the camera image.
+            カメラ画像の幅。
         cam_height: Height of the camera image.
+            カメラ画像の高さ。
 
     Returns:
-        Inverse warped image in camera coordinates with shape (cam_height, cam_width, 3).
+        Inverse warped image in camera coordinates with shape
+        ``(cam_height, cam_width, 3)``.
+        形状 ``(cam_height, cam_width, 3)`` のカメラ座標系の
+        逆ワーピング済み画像。
     """
     pixel_map = load_c2p_numpy(pixel_map_path)
     warper = PixelMapWarperTorch(pixel_map)
@@ -257,16 +344,28 @@ def invwarp_image(
 
 
 def main():
-    """
-    Main function for photometric compensation pipeline.
+    """Run the complete photometric compensation pipeline.
 
-    This function orchestrates the complete photometric compensation workflow:
-    1. Generate and save projection patterns (linear and inverse gamma corrected)
-    2. Display patterns on projector and capture camera responses
-    3. Calculate color mixing matrices from captured images
-    4. Load target images and compute compensation images
-    5. Apply geometric warping and inverse gamma correction
-    6. Save all intermediate and final results
+    Orchestrate the full workflow:
+
+    1. Generate and save projection patterns (linear and inverse gamma
+       corrected).
+    2. Display patterns on projector and capture camera responses.
+    3. Calculate color mixing matrices from captured images.
+    4. Load target images and compute compensation images.
+    5. Apply geometric warping and inverse gamma correction.
+    6. Save all intermediate and final results.
+
+    色補償パイプラインの完全な実行。
+
+    以下のワークフロー全体を統括する:
+
+    1. 投影パターンの生成と保存（リニアおよび逆ガンマ補正済み）。
+    2. プロジェクタにパターンを表示し、カメラ応答をキャプチャ。
+    3. キャプチャ画像からカラーミキシング行列を計算。
+    4. 目標画像を読み込み、補償画像を計算。
+    5. 幾何学的ワーピングと逆ガンマ補正を適用。
+    6. すべての中間結果と最終結果を保存。
     """
     cfg = get_config()
     proj = cfg.projector

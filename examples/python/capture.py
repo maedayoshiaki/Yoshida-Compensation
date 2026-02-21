@@ -1,3 +1,14 @@
+"""Simple manual capture and warp example script.
+
+Captures an image from the camera, applies geometric warping to
+projector coordinates, and saves both the raw and warped results.
+
+手動キャプチャおよびワーピングのサンプルスクリプト。
+
+カメラから画像をキャプチャし、プロジェクタ座標系への幾何学的ワーピングを
+適用して、元画像とワーピング済み画像の両方を保存する。
+"""
+
 from examples.python.sample import capture_image, warp_image
 from src.python.config import get_config
 import cv2
