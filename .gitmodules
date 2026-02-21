@@ -1,0 +1,3 @@
+[submodule "external/GrayCode"]
+	path = external/GrayCode
+	url = https://github.com/youme-town/GrayCode.git
