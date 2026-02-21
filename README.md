@@ -79,6 +79,16 @@ Yoshida-Compensation/
 
 CLI で別設定を使いたい場合は、`--config <path>`（または `-c <path>`）を指定できます。
 
+`config.toml` が未作成の場合は、Python からデフォルト設定ファイルを生成できます。
+
+```python
+from src.python.config import generate_config_file
+
+generate_config_file()  # プロジェクトルートに config.toml を生成
+```
+
+既存ファイルを上書きしたい場合は `generate_config_file(overwrite=True)` を使用してください。
+
 ### カメラバックエンド切替
 
 - `camera.backend = "canon_edsdk"`: Canon + EDSDK を使用
@@ -199,7 +209,7 @@ from src.python.color_mixing_matrix import (
     calc_color_mixing_matrices,
 )
 from src.python.photometric_compensation import calc_compensation_image
-from src.python.config import get_config
+from src.python.config import get_config, generate_config_file
 ```
 
 ## 開発
