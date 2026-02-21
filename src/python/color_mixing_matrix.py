@@ -1,14 +1,16 @@
 import numpy as np
 from numpy import ndarray
-from typing import List, Tuple
+from typing import List, Optional
 import torch
 import psutil
+
+from src.python.config import get_config
 
 
 def generate_projection_patterns(
     x_size: int,
     y_size: int,
-    num_divisions: int = 3,
+    num_divisions: Optional[int] = None,
     dtype: np.typing.DTypeLike = np.uint8,
 ) -> List[ndarray]:
     """
@@ -43,6 +45,8 @@ def generate_projection_patterns(
         a solid-color pattern representing one combination in the RGB grid.
     """
 
+    if num_divisions is None:
+        num_divisions = get_config().compensation.num_divisions
     num_divisions = max(2, num_divisions)
     patterns = []
     for r in range(num_divisions):  # R, G, B channels
@@ -69,7 +73,7 @@ def generate_projection_patterns(
 
 def apply_inverse_gamma_correction(
     image: ndarray | torch.Tensor,
-    gamma: float = 2.2,
+    gamma: Optional[float] = None,
     device: str | torch.device = "cuda",
 ) -> ndarray | torch.Tensor:
     """
@@ -123,6 +127,9 @@ def apply_inverse_gamma_correction(
     else:
         _image = image_tensor.float()
 
+    if gamma is None:
+        gamma = get_config().compensation.gamma_correction.default_gamma
+
     # Apply inverse gamma correction
     corrected_image = torch.pow(_image, gamma)
     corrected_image = torch.clamp(corrected_image, 0.0, 1.0)
@@ -145,9 +152,9 @@ def calc_color_mixing_matrices(
     captured_images: List[ndarray],
     ref_x: int = 0,
     ref_y: int = 0,
-    safety_margin: float = 0.5,
-    min_batch_size: int = 256,
-    use_gpu: bool = False,
+    safety_margin: Optional[float] = None,
+    min_batch_size: Optional[int] = None,
+    use_gpu: Optional[bool] = None,
 ) -> np.ndarray:
     """
     Calculate the color mixing matrix that maps captured image colors to projected image colors.
@@ -164,6 +171,14 @@ def calc_color_mixing_matrices(
     Returns:
         np.ndarray: color mixing matrix of shape (H, W, 4, 3)
     """
+
+    cfg = get_config().compensation
+    if safety_margin is None:
+        safety_margin = cfg.safety_margin
+    if min_batch_size is None:
+        min_batch_size = cfg.min_batch_size
+    if use_gpu is None:
+        use_gpu = cfg.use_gpu
 
     device = torch.device("cuda" if torch.cuda.is_available() and use_gpu else "cpu")
     print("device:", device)

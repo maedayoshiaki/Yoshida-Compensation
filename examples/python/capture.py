@@ -1,6 +1,9 @@
 from examples.python.sample import capture_image, warp_image
+from src.python.config import get_config
 import cv2
 import os
+
+cfg = get_config()
 
 captured_image = capture_image()
 if captured_image is None:
@@ -14,9 +17,9 @@ cv2.imwrite(
 
 warped_image = warp_image(
     captured_image,
-    "C:\\py_scripts\\CompenNeSt-plusplus\\data\\light10\\pos1\\normal\\cam\\raw\\sl\\correspondence_map.npy",
-    1920,
-    1080,
+    cfg.paths.c2p_map,
+    cfg.projector.width,
+    cfg.projector.height,
     512,
     512,
 )

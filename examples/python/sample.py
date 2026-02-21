@@ -6,13 +6,13 @@ from typing import List, Tuple, Optional, overload, Literal
 import rawpy
 import torch
 import colour
-from external.Graycode.src.python.warp_image_torch import (
+from external.GrayCode.src.python.warp_image_torch import (
     PixelMapWarperTorch,
     AggregationMethod,
     InpaintMethod,
     SplatMethod,
 )
-from external.Graycode.src.python.interpolate_c2p import load_c2p_numpy
+from external.GrayCode.src.python.interpolate_c2p import load_c2p_numpy
 
 # capture images from camera
 from edsdk.camera_controller import CameraController
@@ -25,14 +25,7 @@ from src.python.color_mixing_matrix import (
 from src.python.photometric_compensation import (
     calc_compensation_image,
 )
-
-PROJ_GAMMA = 2.1
-PROJ_WIDTH = 1920
-PROJ_HEIGHT = 1080
-PROJ_POS_X = 1920 + 3440
-PROJ_POS_Y = 0
-C2P_MAP_PATH = "C:\\py_scripts\\CompenNeSt-plusplus\\data\\light10\\pos1\\normal\\cam\\raw\\sl\\correspondence_map.npy"
-RPCC_MAT_PATH = "C:\\py_scripts\\CompenNeSt-plusplus\\data\\light10\\pos1\\normal\\EOSM6Mark2_colorchercker_sunlight_20251204.npy"
+from src.python.config import get_config
 
 
 def center_rect(
@@ -152,8 +145,14 @@ def capture_image(
     """
     try:
         imgs = []
+        cam_cfg = get_config().camera
         with CameraController() as camera:
-            camera.set_properties(av="8", tv="1/15", iso="400", image_quality="LR")
+            camera.set_properties(
+                av=cam_cfg.av,
+                tv=cam_cfg.tv,
+                iso=cam_cfg.iso,
+                image_quality=cam_cfg.image_quality,
+            )
             imgs = camera.capture_numpy(raw_processor=raw_to_rgb)
             if imgs[0] is None:
                 return None
@@ -269,32 +268,36 @@ def main():
     5. Apply geometric warping and inverse gamma correction
     6. Save all intermediate and final results
     """
+    cfg = get_config()
+    proj = cfg.projector
+    paths = cfg.paths
+
     # Generate projection patterns
     linear_proj_patterns = generate_projection_patterns(
-        PROJ_WIDTH, PROJ_HEIGHT, num_divisions=3, dtype=np.dtype(np.uint8)
+        proj.width, proj.height, dtype=np.dtype(np.uint8)
     )
     inv_gamma_patterns = []
 
     # Create output directories
-    os.makedirs("data/linear_proj_patterns", exist_ok=True)
-    os.makedirs("data/inv_gamma_proj_patterns", exist_ok=True)
+    os.makedirs(paths.linear_pattern_dir, exist_ok=True)
+    os.makedirs(paths.inv_gamma_pattern_dir, exist_ok=True)
 
     # Save patterns to disk
     for i, pattern in enumerate(linear_proj_patterns):
         bgr_pattern = cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
-            os.path.join("data/linear_proj_patterns", f"pattern_{i:02d}.png"),
+            os.path.join(paths.linear_pattern_dir, f"pattern_{i:02d}.png"),
             bgr_pattern,
         )
 
         inv_gamma_pattern = apply_inverse_gamma_correction(
-            pattern, gamma=1 / PROJ_GAMMA
+            pattern, gamma=1 / proj.gamma
         )
         inv_gamma_patterns.append(inv_gamma_pattern)
         bgr_inv_gamma_pattern = cv2.cvtColor(inv_gamma_pattern, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
             os.path.join(
-                "data/inv_gamma_proj_patterns", f"inv_gamma_pattern_{i:02d}.png"
+                paths.inv_gamma_pattern_dir, f"inv_gamma_pattern_{i:02d}.png"
             ),
             bgr_inv_gamma_pattern,
         )
@@ -306,13 +309,13 @@ def main():
     window_name = "projection_window"
     cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    cv2.moveWindow(window_name, PROJ_POS_X, PROJ_POS_Y)
+    cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
 
-    os.makedirs("data/captured_images", exist_ok=True)
+    os.makedirs(paths.captured_image_dir, exist_ok=True)
     for pattern in inv_gamma_patterns:
         bgr_pattern = cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR)
         cv2.imshow(window_name, bgr_pattern)
-        cv2.waitKey(200)
+        cv2.waitKey(cfg.camera.wait_key_ms)
 
         captured_image = capture_image()
         if captured_image is None:
@@ -322,7 +325,7 @@ def main():
         bgr_captured = cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
             os.path.join(
-                "data/captured_images",
+                paths.captured_image_dir,
                 f"captured_image_{len(captured_images) - 1:02d}.png",
             ),
             bgr_captured,
@@ -338,10 +341,9 @@ def main():
 
     # Load target images
     target_images = []
-    target_image_folder_path = "data/target_images"
-    for img_name in os.listdir(target_image_folder_path):
+    for img_name in os.listdir(paths.target_image_dir):
         if img_name.endswith((".png", ".jpg", ".jpeg")):
-            img_path = os.path.join(target_image_folder_path, img_name)
+            img_path = os.path.join(paths.target_image_dir, img_name)
             bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
             if bgr is None:
                 continue
@@ -349,8 +351,8 @@ def main():
             target_images.append(target_img_array)
 
     # Calculate and save compensation images
-    os.makedirs("data/compensation_images", exist_ok=True)
-    os.makedirs("data/inv_gamma_comp_images", exist_ok=True)
+    os.makedirs(paths.compensation_image_dir, exist_ok=True)
+    os.makedirs(paths.inv_gamma_comp_dir, exist_ok=True)
     CAM_WIDTH = captured_images[0].shape[1]
     CAM_HEIGHT = captured_images[0].shape[0]
 
@@ -358,9 +360,9 @@ def main():
         # Inverse warp target image to camera coordinates
         invwarped_target = invwarp_image(
             target_image,
-            C2P_MAP_PATH,
-            PROJ_WIDTH,
-            PROJ_HEIGHT,
+            paths.c2p_map,
+            proj.width,
+            proj.height,
             CAM_WIDTH,
             CAM_HEIGHT,
         )
@@ -375,9 +377,9 @@ def main():
         # Warp compensation image to projector coordinates
         compensation_image = warp_image(
             before_warped_compensation_image,
-            C2P_MAP_PATH,
-            PROJ_WIDTH,
-            PROJ_HEIGHT,
+            paths.c2p_map,
+            proj.width,
+            proj.height,
             target_image.shape[1],
             target_image.shape[0],
         )
@@ -387,7 +389,7 @@ def main():
 
         # Apply inverse gamma correction for projector display
         inv_gamma_comp_image = apply_inverse_gamma_correction(
-            compensation_image, gamma=1 / PROJ_GAMMA
+            compensation_image, gamma=1 / proj.gamma
         )
 
         if isinstance(inv_gamma_comp_image, torch.Tensor):
@@ -397,11 +399,17 @@ def main():
         bgr_comp = cv2.cvtColor(compensation_image, cv2.COLOR_RGB2BGR)
         bgr_inv_gamma_comp = cv2.cvtColor(inv_gamma_comp_image, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
-            f"data/compensation_images/compensation_image_{idx:02d}.png",
+            os.path.join(
+                paths.compensation_image_dir,
+                f"compensation_image_{idx:02d}.png",
+            ),
             bgr_comp,
         )
         cv2.imwrite(
-            f"data/inv_gamma_comp_images/inv_gamma_comp_image_{idx:02d}.png",
+            os.path.join(
+                paths.inv_gamma_comp_dir,
+                f"inv_gamma_comp_image_{idx:02d}.png",
+            ),
             bgr_inv_gamma_comp,
         )
 
