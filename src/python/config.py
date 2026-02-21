@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import re
 import tomllib
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from fractions import Fraction
+from math import isfinite
 from pathlib import Path
 from typing import Optional, Sequence
 
@@ -283,6 +284,89 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
         paths=_build_section(PathsConfig, data, "paths"),
         compensation=_build_section(CompensationConfig, data, "compensation"),
     )
+
+
+def _format_toml_value(value: object) -> str:
+    """Format a Python value as an inline TOML literal.
+
+    Python の値を TOML リテラル文字列に整形する。
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("TOML does not support NaN or Infinity.")
+        return repr(value)
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    raise TypeError(f"Unsupported TOML value type: {type(value)!r}")
+
+
+def _serialize_config_toml(config: AppConfig) -> str:
+    """Serialize :class:`AppConfig` to TOML text.
+
+    :class:`AppConfig` を TOML テキストへシリアライズする。
+    """
+    sections = [
+        ("projector", asdict(config.projector)),
+        ("camera", asdict(config.camera)),
+        ("paths", asdict(config.paths)),
+        ("compensation", asdict(config.compensation)),
+    ]
+
+    lines: list[str] = []
+    for section_name, section_values in sections:
+        lines.append(f"[{section_name}]")
+        for key, value in section_values.items():
+            lines.append(f"{key} = {_format_toml_value(value)}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def generate_config_file(
+    config_path: Optional[Path] = None,
+    config: Optional[AppConfig] = None,
+    overwrite: bool = False,
+) -> Path:
+    """Generate a TOML config file from an :class:`AppConfig`.
+
+    ``config`` が未指定の場合はデフォルト設定で ``config.toml`` を生成する。
+    既存ファイルに上書きするには ``overwrite=True`` を指定する。
+
+    Args:
+        config_path: Output TOML path. Defaults to project-root ``config.toml``.
+            出力先 TOML パス。デフォルトはプロジェクトルートの ``config.toml``。
+        config: Source configuration object. Defaults to :class:`AppConfig`.
+            出力元設定オブジェクト。デフォルトは :class:`AppConfig`。
+        overwrite: Whether to overwrite when the file already exists.
+            既存ファイルがある場合に上書きするか。
+
+    Returns:
+        The path to the generated TOML file.
+        生成された TOML ファイルのパス。
+
+    Raises:
+        FileExistsError: If target file exists and ``overwrite`` is ``False``.
+            出力先ファイルが存在し ``overwrite=False`` の場合。
+    """
+    if config_path is None:
+        config_path = _DEFAULT_CONFIG_PATH
+    if config is None:
+        config = AppConfig()
+
+    if config_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Config file already exists: {config_path}. "
+            "Set overwrite=True to replace it."
+        )
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(_serialize_config_toml(config), encoding="utf-8")
+    return config_path
 
 
 # ── Module-level singleton ───────────────────────────────────────────
