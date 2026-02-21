@@ -1,7 +1,7 @@
 # Yoshida-Compensation Project Configuration
 
 [projector]
-gamma = 2.1
+gamma = 2.2
 width = 1920
 height = 1080
 pos_x = 5360            # プロジェクタウィンドウの X 位置 (1920 + 3440)
@@ -28,7 +28,4 @@ inv_gamma_comp_dir = "data/inv_gamma_comp_images"
 num_divisions = 3               # パターン生成の分割数
 safety_margin = 0.5             # バッチサイズ推定時の安全マージン
 min_batch_size = 256            # 最小バッチサイズ
-use_gpu = false                 # 色混合行列計算で GPU を使用するか
-
-[compensation.gamma_correction]
-default_gamma = 2.2             # apply_inverse_gamma_correction のデフォルトガンマ値
+use_gpu = true                 # 色混合行列計算で GPU を使用するか

@@ -128,7 +128,7 @@ def apply_inverse_gamma_correction(
         _image = image_tensor.float()
 
     if gamma is None:
-        gamma = get_config().compensation.gamma_correction.default_gamma
+        gamma = get_config().projector.gamma
 
     # Apply inverse gamma correction
     corrected_image = torch.pow(_image, gamma)

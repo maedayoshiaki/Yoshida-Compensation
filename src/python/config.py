@@ -54,19 +54,11 @@ class PathsConfig:
 
 
 @dataclass(frozen=True)
-class GammaCorrectionConfig:
-    default_gamma: float = 2.2
-
-
-@dataclass(frozen=True)
 class CompensationConfig:
     num_divisions: int = 3
     safety_margin: float = 0.5
     min_batch_size: int = 256
     use_gpu: bool = False
-    gamma_correction: GammaCorrectionConfig = field(
-        default_factory=GammaCorrectionConfig
-    )
 
 
 # ── Top-level config container ───────────────────────────────────────
@@ -128,29 +120,11 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
     with open(config_path, "rb") as f:
         data = dict(tomllib.load(f))
 
-    # Build compensation section specially (has nested 'gamma_correction')
-    comp_data = dict(data.get("compensation", {}))
-    gc_data = comp_data.pop("gamma_correction", {})
-
-    comp_valid = {
-        f.name for f in CompensationConfig.__dataclass_fields__.values()
-    } - {"gamma_correction"}
-    comp_filtered = {
-        k: _parse_number(v) for k, v in comp_data.items() if k in comp_valid
-    }
-
-    gc_valid = {f.name for f in GammaCorrectionConfig.__dataclass_fields__.values()}
-    gc_filtered = {k: _parse_number(v) for k, v in gc_data.items() if k in gc_valid}
-
-    comp_cfg = CompensationConfig(
-        gamma_correction=GammaCorrectionConfig(**gc_filtered), **comp_filtered
-    )
-
     return AppConfig(
         projector=_build_section(ProjectorConfig, data, "projector"),
         camera=_build_section(CameraConfig, data, "camera"),
         paths=_build_section(PathsConfig, data, "paths"),
-        compensation=comp_cfg,
+        compensation=_build_section(CompensationConfig, data, "compensation"),
     )
 
 
