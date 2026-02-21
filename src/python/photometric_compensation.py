@@ -1,3 +1,15 @@
+"""Photometric compensation image calculation module.
+
+Provides functionality to compute compensation images using per-pixel
+color mixing matrices and PyTorch-based batch processing with GPU
+acceleration.
+
+色補償画像計算モジュール。
+
+ピクセルごとのカラーミキシング行列と PyTorch ベースのバッチ処理
+（GPU アクセラレーション対応）を用いた補償画像の計算機能を提供する。
+"""
+
 import numpy as np
 from numpy import ndarray
 import torch
@@ -8,25 +20,40 @@ def calc_compensation_image(
     color_mixing_matrices: ndarray,
     dtype: np.typing.DTypeLike = np.float32,
 ) -> ndarray:
-    """
-    Calculate a compensation image using color mixing matrices.
+    """Calculate a compensation image using color mixing matrices.
 
-    This function applies photometric compensation by transforming the target image
-    through pixel-wise color mixing matrices. It supports batch processing using
-    PyTorch for GPU acceleration when available.
+    Apply photometric compensation by transforming the target image
+    through pixel-wise color mixing matrices. Uses batch processing
+    via PyTorch for GPU acceleration when available.
+
+    カラーミキシング行列を用いて補償画像を計算する。
+
+    ピクセルごとのカラーミキシング行列を通じて目標画像に色補償を適用する。
+    GPU が利用可能な場合は PyTorch によるバッチ処理で高速化を行う。
 
     Args:
-        target_image: Input target image with shape (H, W, 3).
-            Supports uint8 (0-255), uint16 (0-65535), or float (0.0-1.0) formats.
-        color_mixing_matrices: Color mixing matrices with shape (H, W, 4, 3).
-            Each pixel has a 4x3 matrix that transforms [R, G, B, 1] to [R', G', B'].
-        dtype: Output data type. Defaults to np.float32.
+        target_image: Input target image with shape ``(H, W, 3)``.
+            Supports uint8 (0-255), uint16 (0-65535), or float (0.0-1.0)
+            formats.
+            形状 ``(H, W, 3)`` の入力目標画像。uint8 (0-255)、
+            uint16 (0-65535)、または float (0.0-1.0) 形式に対応。
+        color_mixing_matrices: Color mixing matrices with shape
+            ``(H, W, 4, 3)``. Each pixel has a 4x3 matrix that transforms
+            ``[R, G, B, 1]`` to ``[R', G', B']``.
+            形状 ``(H, W, 4, 3)`` のカラーミキシング行列。各ピクセルは
+            ``[R, G, B, 1]`` を ``[R', G', B']`` に変換する 4x3 行列を持つ。
+        dtype: Output data type. Defaults to ``np.float32``.
             If uint8, output is scaled to 0-255.
             If uint16, output is scaled to 0-65535.
+            出力データ型。デフォルトは ``np.float32``。
+            uint8 の場合は 0-255、uint16 の場合は 0-65535 にスケーリング。
 
     Returns:
-        Compensation image with shape (H, W, 3) and the specified dtype.
-        Values are clamped to the valid range [0, 1] before scaling.
+        Compensation image with shape ``(H, W, 3)`` and the specified
+        *dtype*. Values are clamped to the valid range [0, 1] before
+        scaling.
+        形状 ``(H, W, 3)`` で指定された *dtype* の補償画像。
+        スケーリング前に値は有効範囲 [0, 1] にクランプされる。
     """
     height, width, _ = target_image.shape
 
