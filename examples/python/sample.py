@@ -63,7 +63,22 @@ def center_rect(
 
 
 def linear_to_srgb(linear_rgb: np.ndarray) -> np.ndarray:
-    """Convert linear RGB values in [0, 1] to sRGB values in [0, 1]."""
+    """Convert linear RGB values in [0, 1] to sRGB values in [0, 1].
+
+    Apply the standard piecewise sRGB transfer function.
+
+    範囲 [0, 1] のリニア RGB を sRGB に変換する。
+
+    標準の区分的 sRGB 伝達関数を適用する。
+
+    Args:
+        linear_rgb: Linear RGB image array.
+            リニア RGB 画像配列。
+
+    Returns:
+        sRGB image array in range [0, 1].
+            範囲 [0, 1] の sRGB 画像配列。
+    """
     linear_rgb = np.clip(linear_rgb, 0.0, 1.0)
     return np.where(
         linear_rgb <= 0.0031308,
