@@ -113,6 +113,8 @@ wait_key_ms = 200
 
 [paths]
 c2p_map = ""                              # C2P 対応マップ (.npy)
+p2c_map = ""                              # P2C 対応マップ (.npy)
+warp_method = "c2p"                       # "c2p" または "p2c"
 rpcc_matrix = ""                          # RPCC 行列 (.npy)
 target_image_dir = "data/target_images"
 # ... 他のパスはデフォルト値あり
@@ -154,6 +156,8 @@ wait_key_ms = 200
 | `camera` | `device_index` | OpenCVバックエンドのカメラインデックス |
 | `camera` | `av`, `tv`, `iso`, `image_quality` | Canon EDSDK バックエンドの撮影パラメータ |
 | `paths` | `c2p_map` | カメラ-プロジェクタ間のピクセル対応マップ（`.npy`） |
+| `paths` | `p2c_map` | プロジェクタ-カメラ間のピクセル対応マップ（`.npy`） |
+| `paths` | `warp_method` | ワーピング時に使う対応方向（`c2p` / `p2c`） |
 | `compensation` | `num_divisions` | 色空間の分割数（パターン総数 = n³） |
 | `compensation` | `use_gpu` | GPU アクセラレーションの有効化 |
 
@@ -162,7 +166,7 @@ wait_key_ms = 200
 ### 補償パイプラインの実行
 
 1. `data/target_images/` に目標画像（`.png` / `.jpg`）を配置します。
-2. `config.toml` の `paths.c2p_map` にカメラ-プロジェクタ対応マップのパスを設定します。
+2. `config.toml` で `paths.warp_method` を `c2p` または `p2c` に設定し、対応する `paths.c2p_map` / `paths.p2c_map` を指定します。
 3. 以下のコマンドで補償パイプラインを実行します。
 
 ```bash

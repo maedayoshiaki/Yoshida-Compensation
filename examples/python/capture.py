@@ -14,7 +14,7 @@ import sys
 
 import cv2
 
-from examples.python.sample import capture_image, warp_image
+from examples.python.sample import capture_image, resolve_warp_settings, warp_image
 from src.python.config import get_config, reload_config, split_cli_config_path
 
 
@@ -46,6 +46,11 @@ def main(argv: list[str] | None = None) -> None:
         reload_config(config_path)
 
     cfg = get_config()
+    try:
+        warp_method, pixel_map_path = resolve_warp_settings(cfg.paths)
+    except ValueError as e:
+        print(f"Invalid warp config: {e}")
+        raise SystemExit(1)
 
     captured_image = capture_image()
     if captured_image is None:
@@ -60,11 +65,12 @@ def main(argv: list[str] | None = None) -> None:
 
     warped_image = warp_image(
         captured_image,
-        cfg.paths.c2p_map,
+        pixel_map_path,
         cfg.projector.width,
         cfg.projector.height,
         512,
         512,
+        warp_method=warp_method,
     )
 
     os.makedirs("data/manual_capture/with_warp", exist_ok=True)

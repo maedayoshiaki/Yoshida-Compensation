@@ -100,6 +100,10 @@ class PathsConfig:
     Attributes:
         c2p_map: Path to the camera-to-projector pixel correspondence map.
             カメラ-プロジェクタ間のピクセル対応マップのパス。
+        p2c_map: Path to the projector-to-camera pixel correspondence map.
+            プロジェクタ-カメラ間のピクセル対応マップのパス。
+        warp_method: Correspondence direction used by sample scripts.
+            ``"c2p"`` または ``"p2c"`` を指定。
         rpcc_matrix: Path to the RPCC (Root-Polynomial Color Correction) matrix file.
             RPCC（ルート多項式色補正）行列ファイルのパス。
         target_image_dir: Directory containing target images for compensation.
@@ -119,6 +123,8 @@ class PathsConfig:
     """
 
     c2p_map: str = ""
+    p2c_map: str = ""
+    warp_method: str = "c2p"
     rpcc_matrix: str = ""
     target_image_dir: str = "data/target_images"
     linear_pattern_dir: str = "data/linear_proj_patterns"

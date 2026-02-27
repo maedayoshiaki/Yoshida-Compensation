@@ -18,6 +18,8 @@ wait_key_ms = 200       # パターン表示後の待機時間 (ms)
 
 [paths]
 c2p_map = ""            # C2P correspondence map (.npy)
+p2c_map = ""            # P2C correspondence map (.npy)
+warp_method = "c2p"     # "c2p" | "p2c"
 rpcc_matrix = ""        # RPCC matrix (.npy)
 target_image_dir = "data/target_images"
 linear_pattern_dir = "data/linear_proj_patterns"

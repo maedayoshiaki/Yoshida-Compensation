@@ -13,7 +13,7 @@ import os
 import sys
 import numpy as np
 import cv2
-from typing import List, Tuple, Optional, Literal
+from typing import List, Tuple, Optional, Literal, cast
 import torch
 import colour
 from external.GrayCode.src.python.warp_image import (
@@ -23,6 +23,7 @@ from external.GrayCode.src.python.warp_image import (
     SplatMethod,
 )
 from external.GrayCode.src.python.interpolate_c2p import load_c2p_numpy
+from external.GrayCode.src.python.interpolate_p2c import load_p2c_numpy_array
 
 from src.python.color_mixing_matrix import (
     generate_projection_patterns,
@@ -33,7 +34,29 @@ from src.python.camera import CameraCaptureError, create_camera_backend
 from src.python.photometric_compensation import (
     calc_compensation_image,
 )
-from src.python.config import get_config, reload_config, split_cli_config_path
+from src.python.config import (
+    PathsConfig,
+    get_config,
+    reload_config,
+    split_cli_config_path,
+)
+
+
+WarpMethod = Literal["c2p", "p2c"]
+
+
+def resolve_warp_settings(paths: PathsConfig) -> tuple[WarpMethod, str]:
+    """Resolve warp method and map path from configuration."""
+    warp_method_raw = paths.warp_method.strip().lower()
+    if warp_method_raw not in ("c2p", "p2c"):
+        raise ValueError("Invalid `paths.warp_method`. Use \"c2p\" or \"p2c\".")
+
+    warp_method = cast(WarpMethod, warp_method_raw)
+    map_path = paths.c2p_map if warp_method == "c2p" else paths.p2c_map
+    if map_path.strip() == "":
+        key = "paths.c2p_map" if warp_method == "c2p" else "paths.p2c_map"
+        raise ValueError(f"`{key}` is empty. Set a valid .npy path.")
+    return warp_method, map_path
 
 
 def center_rect(
@@ -207,6 +230,7 @@ def warp_image(
     proj_height: int,
     image_width: int,
     image_height: int,
+    warp_method: WarpMethod = "c2p",
 ) -> np.ndarray:
     """Warp an image from camera view to projector view using a pixel correspondence map.
 
@@ -223,9 +247,8 @@ def warp_image(
         src_image: Source image in camera coordinates with shape
             ``(H, W, 3)``.
             形状 ``(H, W, 3)`` のカメラ座標系のソース画像。
-        pixel_map_path: Path to the camera-to-projector correspondence
-            map (``.npy`` file).
-            カメラ-プロジェクタ対応マップのパス（``.npy`` ファイル）。
+        pixel_map_path: Path to the correspondence map (``.npy`` file).
+            対応マップ（``.npy`` ファイル）のパス。
         proj_width: Width of the projector display.
             プロジェクタディスプレイの幅。
         proj_height: Height of the projector display.
@@ -234,6 +257,8 @@ def warp_image(
             目標画像領域の幅。
         image_height: Height of the target image region.
             目標画像領域の高さ。
+        warp_method: Correspondence direction (``"c2p"`` or ``"p2c"``).
+            対応の向き（``"c2p"`` または ``"p2c"``）。
 
     Returns:
         Warped image in projector coordinates with shape
@@ -241,17 +266,31 @@ def warp_image(
         形状 ``(proj_height, proj_width, 3)`` のプロジェクタ座標系の
         ワーピング済み画像。
     """
-    pixel_map = load_c2p_numpy(pixel_map_path)
-    warper = PixelMapWarperTorch(pixel_map)
     crop_rect = center_rect(image_width, image_height, proj_width, proj_height)
     src_image_tensor = torch.from_numpy(src_image).permute(2, 0, 1)
-    warped_image_tensor = warper.forward_warp(
-        src_image_tensor,
-        splat_method=SplatMethod.BILINEAR,
-        crop_rect=crop_rect,
-        inpaint=InpaintMethod.NONE,
-        aggregation=AggregationMethod.MEAN,
-    )
+    if warp_method == "c2p":
+        pixel_map = load_c2p_numpy(pixel_map_path)
+        warper = PixelMapWarperTorch(pixel_map)
+        warped_image_tensor = warper.forward_warp(
+            src_image_tensor,
+            splat_method=SplatMethod.BILINEAR,
+            crop_rect=crop_rect,
+            inpaint=InpaintMethod.NONE,
+            aggregation=AggregationMethod.MEAN,
+        )
+    elif warp_method == "p2c":
+        pixel_map = load_p2c_numpy_array(pixel_map_path)
+        warper = PixelMapWarperTorch(pixel_map)
+        full_warped = warper.backward_warp(
+            src_image_tensor,
+            dst_size=(proj_width, proj_height),
+            inpaint=InpaintMethod.NONE,
+        )
+        cx, cy, cw, ch = crop_rect
+        warped_image_tensor = full_warped[:, cy : cy + ch, cx : cx + cw]
+    else:
+        raise ValueError("warp_method must be 'c2p' or 'p2c'.")
+
     warped_image = warped_image_tensor.permute(1, 2, 0).numpy()
     return warped_image
 
@@ -263,6 +302,7 @@ def invwarp_image(
     proj_height: int,
     cam_width: int,
     cam_height: int,
+    warp_method: WarpMethod = "c2p",
 ) -> np.ndarray:
     """Inverse warp an image from projector view to camera view.
 
@@ -279,9 +319,8 @@ def invwarp_image(
         src_image: Source image in projector coordinates with shape
             ``(H, W, 3)``.
             形状 ``(H, W, 3)`` のプロジェクタ座標系のソース画像。
-        pixel_map_path: Path to the camera-to-projector correspondence
-            map (``.npy`` file).
-            カメラ-プロジェクタ対応マップのパス（``.npy`` ファイル）。
+        pixel_map_path: Path to the correspondence map (``.npy`` file).
+            対応マップ（``.npy`` ファイル）のパス。
         proj_width: Width of the projector display.
             プロジェクタディスプレイの幅。
         proj_height: Height of the projector display.
@@ -290,6 +329,8 @@ def invwarp_image(
             カメラ画像の幅。
         cam_height: Height of the camera image.
             カメラ画像の高さ。
+        warp_method: Correspondence direction (``"c2p"`` or ``"p2c"``).
+            対応の向き（``"c2p"`` または ``"p2c"``）。
 
     Returns:
         Inverse warped image in camera coordinates with shape
@@ -297,18 +338,33 @@ def invwarp_image(
         形状 ``(cam_height, cam_width, 3)`` のカメラ座標系の
         逆ワーピング済み画像。
     """
-    pixel_map = load_c2p_numpy(pixel_map_path)
-    warper = PixelMapWarperTorch(pixel_map)
     src_rect = center_rect(
         src_image.shape[1], src_image.shape[0], proj_width, proj_height
     )
     src_image_tensor = torch.from_numpy(src_image).permute(2, 0, 1)
-    invwarped_image_tensor = warper.backward_warp(
-        src_image_tensor,
-        dst_size=(cam_width, cam_height),
-        src_rect=src_rect,
-        inpaint=InpaintMethod.NONE,
-    )
+    if warp_method == "c2p":
+        pixel_map = load_c2p_numpy(pixel_map_path)
+        warper = PixelMapWarperTorch(pixel_map)
+        invwarped_image_tensor = warper.backward_warp(
+            src_image_tensor,
+            dst_size=(cam_width, cam_height),
+            src_rect=src_rect,
+            inpaint=InpaintMethod.NONE,
+        )
+    elif warp_method == "p2c":
+        pixel_map = load_p2c_numpy_array(pixel_map_path)
+        warper = PixelMapWarperTorch(pixel_map)
+        invwarped_image_tensor = warper.forward_warp(
+            src_image_tensor,
+            dst_size=(cam_width, cam_height),
+            src_offset=(src_rect[0], src_rect[1]),
+            splat_method=SplatMethod.BILINEAR,
+            inpaint=InpaintMethod.NONE,
+            aggregation=AggregationMethod.MEAN,
+        )
+    else:
+        raise ValueError("warp_method must be 'c2p' or 'p2c'.")
+
     invwarped_image = invwarped_image_tensor.permute(1, 2, 0).numpy()
     return invwarped_image
 
@@ -356,6 +412,11 @@ def main(argv: list[str] | None = None):
     cfg = get_config()
     proj = cfg.projector
     paths = cfg.paths
+    try:
+        warp_method, pixel_map_path = resolve_warp_settings(paths)
+    except ValueError as e:
+        print(f"Invalid warp config: {e}")
+        return
 
     # Generate projection patterns
     linear_proj_patterns = generate_projection_patterns(
@@ -443,11 +504,12 @@ def main(argv: list[str] | None = None):
         # Inverse warp target image to camera coordinates
         invwarped_target = invwarp_image(
             target_image,
-            paths.c2p_map,
+            pixel_map_path,
             proj.width,
             proj.height,
             CAM_WIDTH,
             CAM_HEIGHT,
+            warp_method=warp_method,
         )
 
         # Calculate compensation image
@@ -460,11 +522,12 @@ def main(argv: list[str] | None = None):
         # Warp compensation image to projector coordinates
         compensation_image = warp_image(
             before_warped_compensation_image,
-            paths.c2p_map,
+            pixel_map_path,
             proj.width,
             proj.height,
             target_image.shape[1],
             target_image.shape[0],
+            warp_method=warp_method,
         )
 
         if compensation_image is None or compensation_image.size == 0:
