@@ -11,10 +11,14 @@ projector coordinates, and saves both the raw and warped results.
 
 import os
 import sys
+from pathlib import Path
 
 import cv2
 
 from examples.python.sample import capture_image, resolve_warp_settings, warp_image
+from external.GrayCode.src.python.config import (
+    reload_config as reload_graycode_config,
+)
 from src.python.config import get_config, reload_config, split_cli_config_path
 
 
@@ -42,8 +46,13 @@ def main(argv: list[str] | None = None) -> None:
         print("Usage: python examples/python/capture.py [--config <config.toml>]")
         return
 
-    if config_path is not None:
-        reload_config(config_path)
+    default_config_path = Path(__file__).resolve().parents[2] / "config.toml"
+    effective_config_path = (
+        config_path if config_path is not None else default_config_path
+    )
+    # Yoshida config is the single source of truth. Mirror the same path to GrayCode.
+    reload_config(effective_config_path)
+    reload_graycode_config(effective_config_path)
 
     cfg = get_config()
     try:

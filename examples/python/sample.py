@@ -11,6 +11,7 @@ full compensation workflow from pattern generation through final output.
 
 import os
 import sys
+from pathlib import Path
 import numpy as np
 import cv2
 from typing import List, Tuple, Optional, Literal, cast
@@ -24,6 +25,9 @@ from external.GrayCode.src.python.warp_image import (
 )
 from external.GrayCode.src.python.interpolate_c2p import load_c2p_numpy
 from external.GrayCode.src.python.interpolate_p2c import load_p2c_numpy_array
+from external.GrayCode.src.python.config import (
+    reload_config as reload_graycode_config,
+)
 
 from src.python.color_mixing_matrix import (
     generate_projection_patterns,
@@ -406,8 +410,13 @@ def main(argv: list[str] | None = None):
         print("Usage: python examples/python/sample.py [--config <config.toml>]")
         return
 
-    if config_path is not None:
-        reload_config(config_path)
+    default_config_path = Path(__file__).resolve().parents[2] / "config.toml"
+    effective_config_path = (
+        config_path if config_path is not None else default_config_path
+    )
+    # Yoshida config is the single source of truth. Mirror the same path to GrayCode.
+    reload_config(effective_config_path)
+    reload_graycode_config(effective_config_path)
 
     cfg = get_config()
     proj = cfg.projector
