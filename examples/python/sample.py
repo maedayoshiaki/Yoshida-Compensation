@@ -101,12 +101,15 @@ def center_rect(
 
     Returns:
         A tuple ``(x_start, y_start, width, height)`` representing the
-        centered rectangle.
+        centered rectangle. When the image is larger than the projector,
+        the returned width/height are clamped to the projector frame.
         中央配置された矩形を表すタプル ``(x_start, y_start, width, height)``。
     """
-    x_start = max((proj_width - image_width) // 2, 0)
-    y_start = max((proj_height - image_height) // 2, 0)
-    return x_start, y_start, image_width, image_height
+    crop_width = min(image_width, proj_width)
+    crop_height = min(image_height, proj_height)
+    x_start = max((proj_width - crop_width) // 2, 0)
+    y_start = max((proj_height - crop_height) // 2, 0)
+    return x_start, y_start, crop_width, crop_height
 
 
 def _create_warper(

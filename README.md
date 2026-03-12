@@ -205,6 +205,28 @@ uv run python examples/python/capture.py
 uv run python examples/python/capture.py --config path/to/config.toml
 ```
 
+### ワーピングのデバッグ画像を保存
+
+`sample.py` の warping 周りだけを切り出して確認したい場合は、以下を実行します。
+
+```bash
+uv run python examples/python/debug_warp_outputs.py
+```
+
+別の設定ファイルを使う場合:
+
+```bash
+uv run python examples/python/debug_warp_outputs.py --config path/to/config.toml
+```
+
+このスクリプトは `data/debug_warp_outputs_DEBUG_ONLY/` に以下を保存します。
+
+1. 元画像
+2. プロジェクタ上の中央配置領域
+3. `sample.py` が補償計算前に使う画像
+4. camera -> projector / projector -> camera のワープ結果
+5. ラウンドトリップ結果と `report.json`
+
 ## ライブラリとしての利用
 
 `src/python/` 内のモジュールを直接インポートして利用することもできます。
