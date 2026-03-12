@@ -9,6 +9,7 @@ full compensation workflow from pattern generation through final output.
 完全な補償ワークフローを提供する。
 """
 
+import json
 import os
 import sys
 import traceback
@@ -49,6 +50,15 @@ from src.python.config import (
 
 WarpMethod = Literal["c2p", "p2c"]
 TargetImageSpace = Literal["camera", "projector"]
+WARP_DEBUG_DIR = Path("data") / "sample_warp_debug_DEBUG_ONLY"
+WARP_DEBUG_README = """# DEBUG ONLY
+
+This folder stores warp-debug artifacts emitted by `examples/python/sample.py`.
+
+- Generated automatically during normal sample execution
+- Safe to delete and regenerate
+- Not intended as final pipeline output
+"""
 
 
 def resolve_warp_settings(paths: PathsConfig) -> tuple[WarpMethod, str]:
@@ -110,6 +120,124 @@ def center_rect(
     x_start = max((proj_width - crop_width) // 2, 0)
     y_start = max((proj_height - crop_height) // 2, 0)
     return x_start, y_start, crop_width, crop_height
+
+
+def _sanitize_debug_name(name: str) -> str:
+    stem = Path(name).stem
+    sanitized = "".join(
+        ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in stem
+    ).strip("_")
+    return sanitized or "target"
+
+
+def _coerce_rgb_uint8_for_debug(image: np.ndarray) -> np.ndarray:
+    """Convert arbitrary RGB arrays into uint8 for debug image output."""
+    rgb = np.asarray(image)
+    if rgb.ndim != 3 or rgb.shape[2] != 3:
+        raise ValueError("Debug image output requires shape (H, W, 3).")
+
+    if rgb.dtype == np.uint8:
+        return rgb
+
+    rgb = np.nan_to_num(rgb.astype(np.float32, copy=False), copy=False)
+    if rgb.size > 0 and float(np.nanmax(rgb)) <= 1.0:
+        rgb = rgb * 255.0
+    return np.clip(rgb, 0.0, 255.0).astype(np.uint8)
+
+
+def _save_rgb_debug_image(path: Path, image: np.ndarray) -> None:
+    """Save an RGB image for debugging."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rgb = _coerce_rgb_uint8_for_debug(image)
+    cv2.imwrite(str(path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR))
+
+
+def _write_warp_debug_readme(debug_dir: Path) -> None:
+    """Create the marker README for the debug-only warp folder."""
+    (debug_dir / "README.md").write_text(WARP_DEBUG_README, encoding="utf-8")
+
+
+def _write_warp_debug_session(
+    debug_dir: Path,
+    warp_method: WarpMethod,
+    target_image_space: TargetImageSpace,
+    pixel_map_path: str,
+    proj_width: int,
+    proj_height: int,
+) -> None:
+    """Persist run-level metadata for warp debugging."""
+    session = {
+        "warp_method": warp_method,
+        "target_image_space": target_image_space,
+        "pixel_map_path": pixel_map_path,
+        "projector_size": {
+            "width": proj_width,
+            "height": proj_height,
+        },
+    }
+    (debug_dir / "session.json").write_text(
+        json.dumps(session, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def _warp_debug_target_dir(debug_dir: Path, target_idx: int, target_name: str) -> Path:
+    """Return the per-target warp-debug directory."""
+    target_dir = debug_dir / f"{target_idx:02d}_{_sanitize_debug_name(target_name)}"
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return target_dir
+
+
+def _projector_region_preview(
+    proj_width: int,
+    proj_height: int,
+    image_width: int,
+    image_height: int,
+) -> np.ndarray:
+    """Visualize the centered projector region used by warping."""
+    preview = np.zeros((proj_height, proj_width, 3), dtype=np.uint8)
+    x, y, w, h = center_rect(image_width, image_height, proj_width, proj_height)
+    if w > 0 and h > 0:
+        cv2.rectangle(
+            preview,
+            (x, y),
+            (x + w - 1, y + h - 1),
+            (0, 255, 0),
+            2,
+        )
+    return preview
+
+
+def _save_warp_debug_bundle(
+    target_dir: Path,
+    step_index: int,
+    stage_name: str,
+    src_image: np.ndarray,
+    warped_image: np.ndarray,
+    proj_width: int,
+    proj_height: int,
+    region_image_width: int,
+    region_image_height: int,
+) -> list[str]:
+    """Save input, output, and placement-region previews for one warp step."""
+    base_name = f"{step_index:02d}_{stage_name}"
+    saved_files = [
+        f"{base_name}_input.png",
+        f"{base_name}_output.png",
+        f"{base_name}_region.png",
+    ]
+    _save_rgb_debug_image(target_dir / saved_files[0], src_image)
+    _save_rgb_debug_image(target_dir / saved_files[1], warped_image)
+    _save_rgb_debug_image(
+        target_dir / saved_files[2],
+        _projector_region_preview(
+            proj_width,
+            proj_height,
+            region_image_width,
+            region_image_height,
+        ),
+    )
+    return saved_files
 
 
 def _create_warper(
@@ -645,16 +773,63 @@ def main(argv: list[str] | None = None):
             if bgr is None:
                 continue
             target_img_array = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            target_images.append(target_img_array)
+            target_images.append((img_name, target_img_array))
 
     # Calculate and save compensation images
     os.makedirs(paths.compensation_image_dir, exist_ok=True)
     os.makedirs(paths.inv_gamma_comp_dir, exist_ok=True)
+    WARP_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    _write_warp_debug_readme(WARP_DEBUG_DIR)
+    _write_warp_debug_session(
+        WARP_DEBUG_DIR,
+        warp_method,
+        target_image_space,
+        pixel_map_path,
+        proj.width,
+        proj.height,
+    )
     cam_width = captured_images[0].shape[1]
     cam_height = captured_images[0].shape[0]
     compensation_space = compensation_space_from_warp_method(warp_method)
 
-    for idx, target_image in enumerate(target_images):
+    for idx, (target_name, target_image) in enumerate(target_images):
+        target_debug_dir = _warp_debug_target_dir(WARP_DEBUG_DIR, idx, target_name)
+        target_crop_rect = center_rect(
+            target_image.shape[1],
+            target_image.shape[0],
+            proj.width,
+            proj.height,
+        )
+        target_exceeds_projector = (
+            target_image.shape[1] > proj.width or target_image.shape[0] > proj.height
+        )
+        _save_rgb_debug_image(target_debug_dir / "00_original_target.png", target_image)
+        _save_rgb_debug_image(
+            target_debug_dir / "00_original_target_region.png",
+            _projector_region_preview(
+                proj.width,
+                proj.height,
+                target_image.shape[1],
+                target_image.shape[0],
+            ),
+        )
+        debug_metadata: dict[str, object] = {
+            "target_name": target_name,
+            "target_image_space": target_image_space,
+            "compensation_space": compensation_space,
+            "target_shape": list(target_image.shape),
+            "target_crop_rect": list(target_crop_rect),
+            "target_exceeds_projector": target_exceeds_projector,
+            "warps": [],
+        }
+        if target_exceeds_projector:
+            print(
+                "Warp debug warning: "
+                f"target '{target_name}' exceeds projector size and will be clamped "
+                f"to crop_rect={target_crop_rect}.",
+                file=sys.stderr,
+            )
+        warp_debug_step = 1
         compensation_target_image = prepare_target_image_for_compensation(
             target_image,
             target_image_space,
@@ -665,6 +840,33 @@ def main(argv: list[str] | None = None):
             cam_height,
             warp_method,
         )
+        if target_image_space != compensation_space:
+            prepare_stage_name = (
+                "prepare_target_projector_to_camera"
+                if target_image_space == "projector"
+                else "prepare_target_camera_to_projector"
+            )
+            saved_files = _save_warp_debug_bundle(
+                target_debug_dir,
+                warp_debug_step,
+                prepare_stage_name,
+                target_image,
+                compensation_target_image,
+                proj.width,
+                proj.height,
+                target_image.shape[1],
+                target_image.shape[0],
+            )
+            debug_metadata["warps"].append(
+                {
+                    "stage": prepare_stage_name,
+                    "crop_rect": list(target_crop_rect),
+                    "input_shape": list(target_image.shape),
+                    "output_shape": list(compensation_target_image.shape),
+                    "saved_files": saved_files,
+                }
+            )
+            warp_debug_step += 1
 
         if compensation_space == "camera":
             _ensure_matching_spatial_shape(
@@ -685,6 +887,26 @@ def main(argv: list[str] | None = None):
                 target_image.shape[1],
                 target_image.shape[0],
                 warp_method=warp_method,
+            )
+            saved_files = _save_warp_debug_bundle(
+                target_debug_dir,
+                warp_debug_step,
+                "final_compensation_camera_to_projector",
+                before_warped_compensation_image,
+                compensation_image,
+                proj.width,
+                proj.height,
+                target_image.shape[1],
+                target_image.shape[0],
+            )
+            debug_metadata["warps"].append(
+                {
+                    "stage": "final_compensation_camera_to_projector",
+                    "crop_rect": list(target_crop_rect),
+                    "input_shape": list(before_warped_compensation_image.shape),
+                    "output_shape": list(compensation_image.shape),
+                    "saved_files": saved_files,
+                }
             )
         else:
             warped_color_mixing_matrices = warp_color_mixing_matrices_to_projector(
@@ -709,6 +931,11 @@ def main(argv: list[str] | None = None):
 
         if compensation_image is None or compensation_image.size == 0:
             return
+
+        (target_debug_dir / "metadata.json").write_text(
+            json.dumps(debug_metadata, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
         # Apply inverse gamma correction for projector display
         inv_gamma_comp_image = apply_inverse_gamma_correction(
@@ -735,6 +962,8 @@ def main(argv: list[str] | None = None):
             ),
             bgr_inv_gamma_comp,
         )
+
+    print(f"Warp debug images saved to: {WARP_DEBUG_DIR}")
 
 
 if __name__ == "__main__":

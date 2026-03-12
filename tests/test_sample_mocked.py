@@ -44,6 +44,13 @@ def _save_rgb_image(path: Path, image: np.ndarray) -> None:
     cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
 
+def _load_rgb_image(path: Path) -> np.ndarray:
+    bgr = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise RuntimeError(f"Failed to read image: {path}")
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+
+
 def _save_identity_p2c_map(path: Path, width: int, height: int) -> None:
     rows = []
     for y in range(height):
@@ -380,6 +387,102 @@ def test_sample_inverse_warps_projector_target_for_c2p(
     assert len(calc_calls) == 1
     assert np.array_equal(calc_calls[0], camera_space_target)
     assert len(warp_calls) == 1
+
+
+def test_sample_saves_warp_debug_images_during_normal_run(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    width, height = 4, 3
+    data_dir = tmp_path / "data"
+    target_dir = data_dir / "target_images"
+    target_image = np.full((height, width, 3), 23, dtype=np.uint8)
+    camera_space_target = np.full((height, width, 3), 61, dtype=np.uint8)
+    before_warped_compensation = np.full((height, width, 3), 88, dtype=np.uint8)
+    final_warped_compensation = np.full((height, width, 3), 123, dtype=np.uint8)
+    _save_rgb_image(target_dir / "target.png", target_image)
+
+    config_path = tmp_path / "config.toml"
+    _write_config(
+        config_path,
+        width=width,
+        height=height,
+        warp_method="c2p",
+        target_image_space="projector",
+        c2p_map="maps/c2p.npy",
+    )
+
+    monkeypatch.chdir(tmp_path)
+    _stub_window_calls(monkeypatch)
+    monkeypatch.setattr(
+        sample,
+        "generate_projection_patterns",
+        lambda *args, **kwargs: [np.zeros((height, width, 3), dtype=np.uint8)],
+    )
+    monkeypatch.setattr(
+        sample,
+        "apply_inverse_gamma_correction",
+        lambda image, gamma=None: image,
+    )
+    monkeypatch.setattr(
+        sample,
+        "capture_image",
+        lambda: np.zeros((height, width, 3), dtype=np.uint8),
+    )
+
+    color_mixing_matrices = np.ones((height, width, 4, 3), dtype=np.float32)
+    monkeypatch.setattr(
+        sample,
+        "calc_color_mixing_matrices",
+        lambda *args, **kwargs: color_mixing_matrices,
+    )
+    monkeypatch.setattr(
+        sample,
+        "invwarp_image",
+        lambda *args, **kwargs: camera_space_target,
+    )
+    monkeypatch.setattr(
+        sample,
+        "calc_compensation_image",
+        lambda *args, **kwargs: before_warped_compensation,
+    )
+    monkeypatch.setattr(
+        sample,
+        "warp_image",
+        lambda *args, **kwargs: final_warped_compensation,
+    )
+    monkeypatch.setattr(
+        sample,
+        "warp_color_mixing_matrices_to_projector",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("c2p should not warp color mixing matrices")
+        ),
+    )
+
+    sample.main(["sample.py", "--config", str(config_path)])
+
+    debug_dir = data_dir / "sample_warp_debug_DEBUG_ONLY"
+    target_debug_dir = debug_dir / "00_target"
+
+    assert (debug_dir / "README.md").exists()
+    assert (debug_dir / "session.json").exists()
+    assert (target_debug_dir / "metadata.json").exists()
+    assert (target_debug_dir / "00_original_target.png").exists()
+    assert (
+        target_debug_dir / "01_prepare_target_projector_to_camera_output.png"
+    ).exists()
+    assert (
+        target_debug_dir / "02_final_compensation_camera_to_projector_output.png"
+    ).exists()
+
+    saved_prepare = _load_rgb_image(
+        target_debug_dir / "01_prepare_target_projector_to_camera_output.png"
+    )
+    saved_final = _load_rgb_image(
+        target_debug_dir / "02_final_compensation_camera_to_projector_output.png"
+    )
+    assert np.array_equal(saved_prepare, camera_space_target)
+    assert np.array_equal(saved_final, final_warped_compensation)
 
 
 def test_sample_uses_projector_space_compensation_for_p2c(
