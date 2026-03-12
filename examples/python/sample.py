@@ -11,6 +11,7 @@ full compensation workflow from pattern generation through final output.
 
 import os
 import sys
+import traceback
 from pathlib import Path
 import numpy as np
 import cv2
@@ -309,9 +310,13 @@ def capture_image(
 
         srgb_img = np.clip(srgb_img, 0.0, 1.0)
         return (srgb_img * 255).astype(np.uint8)
-    except CameraCaptureError:
+    except CameraCaptureError as exc:
+        print(f"Camera capture failed: {exc}", file=sys.stderr)
+        traceback.print_exc()
         return None
-    except Exception:
+    except Exception as exc:
+        print(f"Unexpected error during capture: {exc}", file=sys.stderr)
+        traceback.print_exc()
         return None
 
 
@@ -607,6 +612,7 @@ def main(argv: list[str] | None = None):
 
         captured_image = capture_image()
         if captured_image is None:
+            print("Aborting pipeline because image capture failed.", file=sys.stderr)
             return
 
         captured_images.append(captured_image)

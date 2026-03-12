@@ -162,6 +162,25 @@ def test_sample_runs_with_mocked_camera_and_projector(tmp_path, monkeypatch) -> 
     assert (data_dir / "inv_gamma_comp_images" / "inv_gamma_comp_image_00.png").exists()
 
 
+def test_capture_image_reports_camera_errors(monkeypatch, capsys) -> None:
+    class FailingCamera:
+        def capture_linear_rgb(self) -> np.ndarray:
+            raise sample.CameraCaptureError("raw develop failed")
+
+    monkeypatch.setattr(
+        sample,
+        "get_config",
+        lambda: types.SimpleNamespace(camera=types.SimpleNamespace()),
+    )
+    monkeypatch.setattr(sample, "create_camera_backend", lambda cfg: FailingCamera())
+
+    image = sample.capture_image()
+    stderr = capsys.readouterr().err
+
+    assert image is None
+    assert "Camera capture failed: raw develop failed" in stderr
+
+
 def test_sample_uses_camera_space_compensation_for_c2p(
     tmp_path,
     monkeypatch,
