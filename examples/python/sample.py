@@ -90,6 +90,75 @@ def center_rect(
     return x_start, y_start, image_width, image_height
 
 
+def _create_warper(
+    pixel_map_path: str,
+    warp_method: WarpMethod,
+) -> PixelMapWarperTorch:
+    """Load the configured correspondence map and return a warper."""
+    if warp_method == "c2p":
+        pixel_map = load_c2p_numpy(pixel_map_path)
+    elif warp_method == "p2c":
+        pixel_map = load_p2c_numpy_array(pixel_map_path)
+    else:
+        raise ValueError("warp_method must be 'c2p' or 'p2c'.")
+
+    return PixelMapWarperTorch(pixel_map)
+
+
+def _warp_camera_array_to_projector(
+    src_array: np.ndarray,
+    pixel_map_path: str,
+    proj_width: int,
+    proj_height: int,
+    image_width: int,
+    image_height: int,
+    warp_method: WarpMethod,
+) -> np.ndarray:
+    """Warp an array from camera coordinates into projector coordinates."""
+    if src_array.ndim < 3:
+        raise ValueError("src_array must have shape (H, W, ...).")
+
+    crop_rect = center_rect(image_width, image_height, proj_width, proj_height)
+    src_shape = src_array.shape
+    src_tensor = torch.from_numpy(src_array.reshape(src_shape[0], src_shape[1], -1))
+    src_tensor = src_tensor.permute(2, 0, 1)
+    warper = _create_warper(pixel_map_path, warp_method)
+
+    if warp_method == "c2p":
+        warped_tensor = warper.forward_warp(
+            src_tensor,
+            dst_size=(proj_width, proj_height),
+            splat_method=SplatMethod.BILINEAR,
+            crop_rect=crop_rect,
+            inpaint=InpaintMethod.NONE,
+            aggregation=AggregationMethod.MEAN,
+        )
+    else:
+        full_warped = warper.backward_warp(
+            src_tensor,
+            dst_size=(proj_width, proj_height),
+            inpaint=InpaintMethod.NONE,
+        )
+        cx, cy, cw, ch = crop_rect
+        warped_tensor = full_warped[:, cy : cy + ch, cx : cx + cw]
+
+    warped_array = warped_tensor.permute(1, 2, 0).numpy()
+    return warped_array.reshape(crop_rect[3], crop_rect[2], *src_shape[2:])
+
+
+def _ensure_matching_spatial_shape(
+    image: np.ndarray,
+    color_mixing_matrices: np.ndarray,
+    context: str,
+) -> None:
+    """Validate that the compensation inputs share the same spatial size."""
+    if image.shape[:2] != color_mixing_matrices.shape[:2]:
+        raise ValueError(
+            f"{context}: target_image shape {image.shape[:2]} does not match "
+            f"color_mixing_matrices shape {color_mixing_matrices.shape[:2]}."
+        )
+
+
 def linear_to_srgb(linear_rgb: np.ndarray) -> np.ndarray:
     """Convert linear RGB values in [0, 1] to sRGB values in [0, 1].
 
@@ -270,33 +339,42 @@ def warp_image(
         形状 ``(proj_height, proj_width, 3)`` のプロジェクタ座標系の
         ワーピング済み画像。
     """
-    crop_rect = center_rect(image_width, image_height, proj_width, proj_height)
-    src_image_tensor = torch.from_numpy(src_image).permute(2, 0, 1)
-    if warp_method == "c2p":
-        pixel_map = load_c2p_numpy(pixel_map_path)
-        warper = PixelMapWarperTorch(pixel_map)
-        warped_image_tensor = warper.forward_warp(
-            src_image_tensor,
-            splat_method=SplatMethod.BILINEAR,
-            crop_rect=crop_rect,
-            inpaint=InpaintMethod.NONE,
-            aggregation=AggregationMethod.MEAN,
-        )
-    elif warp_method == "p2c":
-        pixel_map = load_p2c_numpy_array(pixel_map_path)
-        warper = PixelMapWarperTorch(pixel_map)
-        full_warped = warper.backward_warp(
-            src_image_tensor,
-            dst_size=(proj_width, proj_height),
-            inpaint=InpaintMethod.NONE,
-        )
-        cx, cy, cw, ch = crop_rect
-        warped_image_tensor = full_warped[:, cy : cy + ch, cx : cx + cw]
-    else:
-        raise ValueError("warp_method must be 'c2p' or 'p2c'.")
+    return _warp_camera_array_to_projector(
+        src_image,
+        pixel_map_path,
+        proj_width,
+        proj_height,
+        image_width,
+        image_height,
+        warp_method,
+    )
 
-    warped_image = warped_image_tensor.permute(1, 2, 0).numpy()
-    return warped_image
+
+def warp_color_mixing_matrices_to_projector(
+    color_mixing_matrices: np.ndarray,
+    pixel_map_path: str,
+    proj_width: int,
+    proj_height: int,
+    image_width: int,
+    image_height: int,
+    warp_method: WarpMethod = "p2c",
+) -> np.ndarray:
+    """Warp camera-space color mixing matrices into projector coordinates."""
+    if color_mixing_matrices.ndim != 4 or color_mixing_matrices.shape[2:] != (4, 3):
+        raise ValueError(
+            "color_mixing_matrices must have shape (H, W, 4, 3)."
+        )
+
+    warped = _warp_camera_array_to_projector(
+        color_mixing_matrices,
+        pixel_map_path,
+        proj_width,
+        proj_height,
+        image_width,
+        image_height,
+        warp_method,
+    )
+    return warped.astype(color_mixing_matrices.dtype, copy=False)
 
 
 def invwarp_image(
@@ -506,38 +584,57 @@ def main(argv: list[str] | None = None):
     # Calculate and save compensation images
     os.makedirs(paths.compensation_image_dir, exist_ok=True)
     os.makedirs(paths.inv_gamma_comp_dir, exist_ok=True)
-    CAM_WIDTH = captured_images[0].shape[1]
-    CAM_HEIGHT = captured_images[0].shape[0]
 
     for idx, target_image in enumerate(target_images):
-        # Inverse warp target image to camera coordinates
-        invwarped_target = invwarp_image(
-            target_image,
-            pixel_map_path,
-            proj.width,
-            proj.height,
-            CAM_WIDTH,
-            CAM_HEIGHT,
-            warp_method=warp_method,
-        )
-
-        # Calculate compensation image
-        before_warped_compensation_image = calc_compensation_image(
-            target_image=invwarped_target,
-            color_mixing_matrices=color_mixing_matrices,
-            dtype=np.uint8,
-        )
-
-        # Warp compensation image to projector coordinates
-        compensation_image = warp_image(
-            before_warped_compensation_image,
-            pixel_map_path,
-            proj.width,
-            proj.height,
-            target_image.shape[1],
-            target_image.shape[0],
-            warp_method=warp_method,
-        )
+        if warp_method == "c2p":
+            _ensure_matching_spatial_shape(
+                target_image,
+                color_mixing_matrices,
+                "c2p compensation",
+            )
+            before_warped_compensation_image = calc_compensation_image(
+                target_image=target_image,
+                color_mixing_matrices=color_mixing_matrices,
+                dtype=np.uint8,
+            )
+            compensation_image = warp_image(
+                before_warped_compensation_image,
+                pixel_map_path,
+                proj.width,
+                proj.height,
+                target_image.shape[1],
+                target_image.shape[0],
+                warp_method=warp_method,
+            )
+        else:
+            warped_target_image = warp_image(
+                target_image,
+                pixel_map_path,
+                proj.width,
+                proj.height,
+                target_image.shape[1],
+                target_image.shape[0],
+                warp_method=warp_method,
+            )
+            warped_color_mixing_matrices = warp_color_mixing_matrices_to_projector(
+                color_mixing_matrices,
+                pixel_map_path,
+                proj.width,
+                proj.height,
+                target_image.shape[1],
+                target_image.shape[0],
+                warp_method=warp_method,
+            )
+            _ensure_matching_spatial_shape(
+                warped_target_image,
+                warped_color_mixing_matrices,
+                "p2c compensation",
+            )
+            compensation_image = calc_compensation_image(
+                target_image=warped_target_image,
+                color_mixing_matrices=warped_color_mixing_matrices,
+                dtype=np.uint8,
+            )
 
         if compensation_image is None or compensation_image.size == 0:
             return
