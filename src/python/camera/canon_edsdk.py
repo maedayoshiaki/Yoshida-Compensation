@@ -27,6 +27,16 @@ def _srgb_to_linear(rgb: np.ndarray) -> np.ndarray:
     )
 
 
+def _linear_to_srgb(rgb: np.ndarray) -> np.ndarray:
+    """Convert linear RGB image values to sRGB."""
+    threshold = 0.0031308
+    return np.where(
+        rgb <= threshold,
+        rgb * 12.92,
+        1.055 * np.power(rgb, 1.0 / 2.4) - 0.055,
+    )
+
+
 def _image_quality_looks_raw(image_quality: str) -> bool:
     """Best-effort check whether the configured quality includes RAW data."""
     return "R" in image_quality.strip().upper()
@@ -118,6 +128,19 @@ def _raw_to_linear_rgb(raw_bytes: bytes) -> np.ndarray:
     if rgb is None:
         raise CameraCaptureError("RAW conversion failed for canon_edsdk backend.")
     return np.clip(rgb.astype(np.float32) / 65535.0, 0.0, 1.0)
+
+
+def capture_srgb_uint8(camera_controller, image_quality: str) -> np.ndarray:
+    """Capture one still image and return it as RGB uint8 regardless of RAW/JPEG mode."""
+    raw_processor = _raw_to_linear_rgb if _image_quality_looks_raw(image_quality) else None
+    images = camera_controller.capture_numpy(raw_processor=raw_processor)
+
+    if not images or images[0] is None:
+        raise CameraCaptureError("No image returned from canon_edsdk backend.")
+
+    linear_rgb = _normalize_capture_output(images[0], image_quality)
+    srgb = _linear_to_srgb(linear_rgb)
+    return np.clip(srgb * 255.0, 0.0, 255.0).astype(np.uint8)
 
 
 class CanonEdsdkCamera(CameraBackend):

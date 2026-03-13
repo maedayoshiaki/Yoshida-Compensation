@@ -1,118 +1,182 @@
-import glob
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Tuple, List
 
 import cv2
 import numpy as np
 
 
-# ========= 設定 =========
-IMAGEDIR = Path("data/chess_captured")
-
-# 「内側コーナー数」（横, 縦）※あなたの設定
-CHECKERBOARD: Tuple[int, int] = (10, 7)
-
-# 1マスのサイズ（mm）
-SQUARE_SIZE: float = 19.0
-
-# 失敗が多い場合は SB を試す
-USE_SB: bool = True
-# ========================
+@dataclass(frozen=True)
+class CalibrationConfig:
+    image_dir: Path = Path("data/chess_captured")
+    checkerboard: tuple[int, int] = (10, 7)
+    square_size_mm: float = 19.0
+    use_sb_detector: bool = True
+    min_required_images: int = 8
+    image_pattern: str = "chess_*.png"
 
 
-def calibrate_from_dir(image_dir: Path) -> tuple[float, np.ndarray, np.ndarray, float]:
-    paths = sorted(glob.glob(str(image_dir / "chess_*.png")))
-    if len(paths) == 0:
-        raise FileNotFoundError(f"No images found in: {image_dir}")
+@dataclass(frozen=True)
+class CalibrationResult:
+    rms: float
+    camera_matrix: np.ndarray
+    distortion: np.ndarray
+    mean_reprojection_error_px: float
+    used_images: int
+    total_images: int
 
-    # 3D点（Z=0平面）
-    objp = np.zeros((CHECKERBOARD[0] * CHECKERBOARD[1], 3), np.float32)
-    objp[:, :2] = np.mgrid[0:CHECKERBOARD[0], 0:CHECKERBOARD[1]].T.reshape(-1, 2)
-    objp *= SQUARE_SIZE
 
-    objpoints: List[np.ndarray] = []
-    imgpoints: List[np.ndarray] = []
+CONFIG = CalibrationConfig()
+
+
+def list_input_images(config: CalibrationConfig) -> list[Path]:
+    return sorted(config.image_dir.glob(config.image_pattern))
+
+
+def build_object_points(config: CalibrationConfig) -> np.ndarray:
+    cols, rows = config.checkerboard
+    object_points = np.zeros((cols * rows, 3), np.float32)
+    object_points[:, :2] = np.mgrid[0:cols, 0:rows].T.reshape(-1, 2)
+    object_points *= config.square_size_mm
+    return object_points
+
+
+def detect_corners(image: np.ndarray, config: CalibrationConfig) -> np.ndarray | None:
+    """Detect checkerboard corners and return them as float32 points."""
+    if config.use_sb_detector and hasattr(cv2, "findChessboardCornersSB"):
+        found, corners = cv2.findChessboardCornersSB(image, config.checkerboard)
+        if found:
+            return corners.astype(np.float32)
+        return None
 
     criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 30, 1e-6)
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH + cv2.CALIB_CB_NORMALIZE_IMAGE
+    found, corners = cv2.findChessboardCorners(image, config.checkerboard, flags)
+    if not found:
+        return None
+    return cv2.cornerSubPix(image, corners, (11, 11), (-1, -1), criteria)
 
-    img_size = None
-    used = 0
 
-    for f in paths:
-        img = cv2.imread(f, cv2.IMREAD_GRAYSCALE)
-        if img is None:
-            print(f"[skip] could not read: {f}")
+def collect_calibration_points(
+    image_paths: list[Path],
+    config: CalibrationConfig,
+) -> tuple[list[np.ndarray], list[np.ndarray], tuple[int, int]]:
+    """Load images and collect matching 3D/2D points for calibration."""
+    object_points_template = build_object_points(config)
+    object_points_list: list[np.ndarray] = []
+    image_points_list: list[np.ndarray] = []
+    image_size: tuple[int, int] | None = None
+
+    for image_path in image_paths:
+        image = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        if image is None:
+            print(f"[skip] could not read: {image_path}")
             continue
 
-        if img_size is None:
-            img_size = (img.shape[1], img.shape[0])  # (w, h)
+        if image_size is None:
+            image_size = (image.shape[1], image.shape[0])
 
-        if USE_SB and hasattr(cv2, "findChessboardCornersSB"):
-            found, corners = cv2.findChessboardCornersSB(img, CHECKERBOARD)
-            if not found:
-                print(f"[skip] corners not found: {Path(f).name}")
-                continue
-            corners2 = corners.astype(np.float32)
-        else:
-            found, corners = cv2.findChessboardCorners(img, CHECKERBOARD, flags)
-            if not found:
-                print(f"[skip] corners not found: {Path(f).name}")
-                continue
-            corners2 = cv2.cornerSubPix(img, corners, (11, 11), (-1, -1), criteria)
+        corners = detect_corners(image, config)
+        if corners is None:
+            print(f"[skip] corners not found: {image_path.name}")
+            continue
 
-        objpoints.append(objp)
-        imgpoints.append(corners2)
-        used += 1
+        object_points_list.append(object_points_template.copy())
+        image_points_list.append(corners)
 
-    print(f"Detected corners in {used}/{len(paths)} images.")
-    if used < 8:
+    if image_size is None:
+        raise RuntimeError("No readable images were found for calibration.")
+
+    return object_points_list, image_points_list, image_size
+
+
+def compute_mean_reprojection_error(
+    object_points: list[np.ndarray],
+    image_points: list[np.ndarray],
+    rvecs: tuple[np.ndarray, ...],
+    tvecs: tuple[np.ndarray, ...],
+    camera_matrix: np.ndarray,
+    distortion: np.ndarray,
+) -> float:
+    total_error_sq = 0.0
+    total_points = 0
+
+    for object_set, image_set, rvec, tvec in zip(object_points, image_points, rvecs, tvecs):
+        projected_points, _ = cv2.projectPoints(object_set, rvec, tvec, camera_matrix, distortion)
+        error = cv2.norm(image_set, projected_points, cv2.NORM_L2)
+        total_error_sq += error * error
+        total_points += len(object_set)
+
+    return float(np.sqrt(total_error_sq / total_points))
+
+
+def calibrate_from_dir(config: CalibrationConfig) -> CalibrationResult:
+    image_paths = list_input_images(config)
+    if not image_paths:
+        raise FileNotFoundError(f"No images found in: {config.image_dir}")
+
+    object_points, image_points, image_size = collect_calibration_points(image_paths, config)
+    used_images = len(object_points)
+    total_images = len(image_paths)
+
+    print(f"Detected corners in {used_images}/{total_images} images.")
+    if used_images < config.min_required_images:
         raise RuntimeError(
-            "有効画像が少なすぎます（目安8枚以上、できれば15枚以上）。"
-            " チェッカーボードの構造（外周が欠けていないか）と撮影条件を見直してください。"
+            "Not enough valid calibration images. Capture more views with varied angles and positions."
         )
 
-    rms, K, dist, rvecs, tvecs = cv2.calibrateCamera(objpoints, imgpoints, img_size, None, None)
-
-    # 平均再投影誤差
-    total_err2 = 0.0
-    total_points = 0
-    for i in range(len(objpoints)):
-        proj, _ = cv2.projectPoints(objpoints[i], rvecs[i], tvecs[i], K, dist)
-        err = cv2.norm(imgpoints[i], proj, cv2.NORM_L2)
-        n = len(objpoints[i])
-        total_err2 += err * err
-        total_points += n
-    mean_reproj_err = float(np.sqrt(total_err2 / total_points))
-
-    return float(rms), K, dist, mean_reproj_err
-
-
-def save_results(out_dir: Path, K: np.ndarray, dist: np.ndarray) -> None:
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    npz_path = out_dir / "camera_calib.npz"
-    np.savez(
-        str(npz_path),
-        K=K,
-        dist=dist,
-        checkerboard=np.array(CHECKERBOARD, dtype=np.int32),
-        square_size=float(SQUARE_SIZE),
+    rms, camera_matrix, distortion, rvecs, tvecs = cv2.calibrateCamera(
+        object_points,
+        image_points,
+        image_size,
+        None,
+        None,
     )
-    print(f"Saved: {npz_path.name}")
+    mean_error = compute_mean_reprojection_error(
+        object_points,
+        image_points,
+        tuple(rvecs),
+        tuple(tvecs),
+        camera_matrix,
+        distortion,
+    )
+
+    return CalibrationResult(
+        rms=float(rms),
+        camera_matrix=camera_matrix,
+        distortion=distortion,
+        mean_reprojection_error_px=mean_error,
+        used_images=used_images,
+        total_images=total_images,
+    )
+
+
+def save_results(config: CalibrationConfig, result: CalibrationResult) -> None:
+    config.image_dir.mkdir(parents=True, exist_ok=True)
+    output_path = config.image_dir / "camera_calib.npz"
+    np.savez(
+        str(output_path),
+        K=result.camera_matrix,
+        dist=result.distortion,
+        checkerboard=np.array(config.checkerboard, dtype=np.int32),
+        square_size=float(config.square_size_mm),
+    )
+    print(f"Saved: {output_path.name}")
 
 
 def main() -> None:
-    print(f"Input dir: {IMAGEDIR.resolve()}")
-    rms, K, dist, mean_err = calibrate_from_dir(IMAGEDIR)
+    config = CONFIG
+    print(f"Input dir: {config.image_dir.resolve()}")
+
+    result = calibrate_from_dir(config)
 
     print("\n=== Result ===")
-    print(f"RMS (OpenCV)           : {rms:.6f}")
-    print(f"Mean reproj error (px) : {mean_err:.6f}")
-    print("\nCamera Matrix K:\n", K)
-    print("\nDistortion coeffs:\n", dist.ravel())
+    print(f"Used images             : {result.used_images}/{result.total_images}")
+    print(f"RMS (OpenCV)            : {result.rms:.6f}")
+    print(f"Mean reproj error (px)  : {result.mean_reprojection_error_px:.6f}")
+    print("\nCamera Matrix K:\n", result.camera_matrix)
+    print("\nDistortion coeffs:\n", result.distortion.ravel())
 
-    save_results(IMAGEDIR, K, dist)
+    save_results(config, result)
     print("\nDone.")
 
 

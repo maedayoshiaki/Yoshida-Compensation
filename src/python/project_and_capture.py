@@ -21,7 +21,8 @@ from src.python.config import get_config, reload_config, split_cli_config_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-INPUT_IMAGE_PATH = Path("data/inv_gamma_comp_images/inv_gamma_comp_image_00.png")
+# INPUT_IMAGE_PATH = Path("data/inv_gamma_comp_images/inv_gamma_comp_image_03.png")
+INPUT_IMAGE_PATH = Path("data/sample_warp_debug_DEBUG_ONLY/03_metal/01_prepare_target_camera_to_projector_output.png")
 OUTPUT_DIR = PROJECT_ROOT / "data" / "perceived"
 WINDOW_NAME = "Projection"
 
