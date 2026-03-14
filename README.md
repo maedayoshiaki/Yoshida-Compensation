@@ -207,7 +207,10 @@ uv run python examples/python/capture.py --config path/to/config.toml
 
 `sample.py` を通常実行すると、ワーピング確認用の画像が
 `data/sample_warp_debug_DEBUG_ONLY/` に自動保存されます。
-このフォルダはデバッグ専用です。
+このフォルダはデバッグ専用で、`sample.py` 実行のたびに再生成されます。
+
+ワーピングだけを行った中間画像は
+`data/sample_warp_debug_DEBUG_ONLY/warp_only_targets/` に集約保存されます。
 
 保存内容:
 

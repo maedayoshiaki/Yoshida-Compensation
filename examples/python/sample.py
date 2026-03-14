@@ -11,6 +11,7 @@ full compensation workflow from pattern generation through final output.
 
 import json
 import os
+import shutil
 import sys
 import traceback
 from pathlib import Path
@@ -51,6 +52,8 @@ from src.python.config import (
 WarpMethod = Literal["c2p", "p2c"]
 TargetImageSpace = Literal["camera", "projector"]
 WARP_DEBUG_DIR = Path("data") / "sample_warp_debug_DEBUG_ONLY"
+WARP_ONLY_GROUP_DIRNAME = "warp_only_targets"
+SUPPORTED_TARGET_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 WARP_DEBUG_README = """# DEBUG ONLY
 
 This folder stores warp-debug artifacts emitted by `examples/python/sample.py`.
@@ -157,6 +160,25 @@ def _write_warp_debug_readme(debug_dir: Path) -> None:
     (debug_dir / "README.md").write_text(WARP_DEBUG_README, encoding="utf-8")
 
 
+def _reset_debug_output_dir(debug_dir: Path) -> None:
+    """Clear previous debug artifacts so each run regenerates them from scratch."""
+    if debug_dir.exists():
+        for child in debug_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    debug_dir.mkdir(parents=True, exist_ok=True)
+
+
+def _clear_generated_pngs(output_dir: Path, pattern: str) -> None:
+    """Remove previously generated PNG outputs matching the given pattern."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    for path in output_dir.glob(pattern):
+        if path.is_file():
+            path.unlink()
+
+
 def _write_warp_debug_session(
     debug_dir: Path,
     warp_method: WarpMethod,
@@ -186,6 +208,13 @@ def _warp_debug_target_dir(debug_dir: Path, target_idx: int, target_name: str) -
     target_dir = debug_dir / f"{target_idx:02d}_{_sanitize_debug_name(target_name)}"
     target_dir.mkdir(parents=True, exist_ok=True)
     return target_dir
+
+
+def _warp_only_group_dir(debug_dir: Path) -> Path:
+    """Return the folder that groups warp-only outputs across targets."""
+    group_dir = debug_dir / WARP_ONLY_GROUP_DIRNAME
+    group_dir.mkdir(parents=True, exist_ok=True)
+    return group_dir
 
 
 def _projector_region_preview(
@@ -238,6 +267,36 @@ def _save_warp_debug_bundle(
         ),
     )
     return saved_files
+
+
+def _save_grouped_warp_only_image(
+    group_dir: Path,
+    target_idx: int,
+    target_name: str,
+    stage_name: str,
+    warped_image: np.ndarray,
+) -> str:
+    """Save a warp-only image into the grouped warp-output folder."""
+    file_name = (
+        f"{target_idx:02d}_{_sanitize_debug_name(target_name)}_{stage_name}.png"
+    )
+    _save_rgb_debug_image(group_dir / file_name, warped_image)
+    return file_name
+
+
+def _load_target_images(target_dir: str) -> list[tuple[str, np.ndarray]]:
+    """Load target images in a deterministic order."""
+    target_images: list[tuple[str, np.ndarray]] = []
+    for img_name in sorted(os.listdir(target_dir), key=str.casefold):
+        if not img_name.lower().endswith(SUPPORTED_TARGET_IMAGE_SUFFIXES):
+            continue
+        img_path = os.path.join(target_dir, img_name)
+        bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            continue
+        target_img_array = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        target_images.append((img_name, target_img_array))
+    return target_images
 
 
 def _create_warper(
@@ -765,20 +824,14 @@ def main(argv: list[str] | None = None):
     np.save("data/color_mixing_matrices.npy", color_mixing_matrices)
 
     # Load target images
-    target_images = []
-    for img_name in os.listdir(paths.target_image_dir):
-        if img_name.endswith((".png", ".jpg", ".jpeg")):
-            img_path = os.path.join(paths.target_image_dir, img_name)
-            bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
-            if bgr is None:
-                continue
-            target_img_array = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-            target_images.append((img_name, target_img_array))
+    target_images = _load_target_images(paths.target_image_dir)
 
     # Calculate and save compensation images
-    os.makedirs(paths.compensation_image_dir, exist_ok=True)
-    os.makedirs(paths.inv_gamma_comp_dir, exist_ok=True)
-    WARP_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
+    compensation_output_dir = Path(paths.compensation_image_dir)
+    inv_gamma_output_dir = Path(paths.inv_gamma_comp_dir)
+    _clear_generated_pngs(compensation_output_dir, "compensation_image_*.png")
+    _clear_generated_pngs(inv_gamma_output_dir, "inv_gamma_comp_image_*.png")
+    _reset_debug_output_dir(WARP_DEBUG_DIR)
     _write_warp_debug_readme(WARP_DEBUG_DIR)
     _write_warp_debug_session(
         WARP_DEBUG_DIR,
@@ -788,6 +841,7 @@ def main(argv: list[str] | None = None):
         proj.width,
         proj.height,
     )
+    grouped_warp_only_dir = _warp_only_group_dir(WARP_DEBUG_DIR)
     cam_width = captured_images[0].shape[1]
     cam_height = captured_images[0].shape[0]
     compensation_space = compensation_space_from_warp_method(warp_method)
@@ -866,6 +920,14 @@ def main(argv: list[str] | None = None):
                     "saved_files": saved_files,
                 }
             )
+            grouped_warp_only_file = _save_grouped_warp_only_image(
+                grouped_warp_only_dir,
+                idx,
+                target_name,
+                prepare_stage_name,
+                compensation_target_image,
+            )
+            debug_metadata["grouped_warp_only_file"] = grouped_warp_only_file
             warp_debug_step += 1
 
         if compensation_space == "camera":
@@ -949,17 +1011,11 @@ def main(argv: list[str] | None = None):
         bgr_comp = cv2.cvtColor(compensation_image, cv2.COLOR_RGB2BGR)
         bgr_inv_gamma_comp = cv2.cvtColor(inv_gamma_comp_image, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
-            os.path.join(
-                paths.compensation_image_dir,
-                f"compensation_image_{idx:02d}.png",
-            ),
+            str(compensation_output_dir / f"compensation_image_{idx:02d}.png"),
             bgr_comp,
         )
         cv2.imwrite(
-            os.path.join(
-                paths.inv_gamma_comp_dir,
-                f"inv_gamma_comp_image_{idx:02d}.png",
-            ),
+            str(inv_gamma_output_dir / f"inv_gamma_comp_image_{idx:02d}.png"),
             bgr_inv_gamma_comp,
         )
 
