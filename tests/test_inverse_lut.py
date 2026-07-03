@@ -21,9 +21,10 @@ def test_inverse_lut_config_defaults():
     assert cfg.inverse_lut.source == "both"
     assert cfg.inverse_lut.lut_resolution == 256
     assert abs(cfg.inverse_lut.reference_region - 0.2) < 1e-9
-    assert abs(cfg.inverse_lut.trust_low - 10 / 255) < 1e-9
-    assert abs(cfg.inverse_lut.trust_high - 245 / 255) < 1e-9
+    assert cfg.inverse_lut.trust_low == 10.0
+    assert cfg.inverse_lut.trust_high == 245.0
     assert cfg.inverse_lut.hdr_enabled is False
+    assert cfg.inverse_lut.hdr_max_stops == 3
     assert cfg.inverse_lut.inverse_lut_path == "data/inverse_lut.npz"
 
 
@@ -36,9 +37,10 @@ num_levels = 9
 source = "gray"
 lut_resolution = 128
 reference_region = 0.5
-trust_low = 0.05
-trust_high = 0.9
+trust_low = 12
+trust_high = 250
 hdr_enabled = true
+hdr_max_stops = 5
 inverse_lut_path = "data/custom_lut.npz"
 """.strip(),
         encoding="utf-8",
@@ -47,7 +49,10 @@ inverse_lut_path = "data/custom_lut.npz"
     assert cfg.inverse_lut.num_levels == 9
     assert cfg.inverse_lut.source == "gray"
     assert cfg.inverse_lut.lut_resolution == 128
+    assert cfg.inverse_lut.trust_low == 12
+    assert cfg.inverse_lut.trust_high == 250
     assert cfg.inverse_lut.hdr_enabled is True
+    assert cfg.inverse_lut.hdr_max_stops == 5
     assert cfg.inverse_lut.inverse_lut_path == "data/custom_lut.npz"
     reload_config(_REPO_ROOT / "config.toml")  # 後続テストのため既定に戻す
 
@@ -161,25 +166,47 @@ def test_run_calibration_capture_projects_and_measures(monkeypatch):
     assert np.allclose(data.measurements[0].measured_rgb, 0.5)  # gray black は 3ch 記録
 
 
-def test_capture_hdr_linear_stub_single_exposure():
+def test_capture_hdr_linear_single_exposure_when_disabled():
     called = {"n": 0}
 
-    def once():
+    def capture_at(scale):
         called["n"] += 1
         return np.full((4, 4, 3), 0.3, dtype=np.float32)
 
-    frame = ilut.capture_hdr_linear(once, enabled=False)
+    frame = ilut.capture_hdr_linear(capture_at, enabled=False)
     assert called["n"] == 1
     assert np.allclose(frame, 0.3)
+
+
+def test_capture_hdr_linear_recovers_saturated_and_crushed():
+    # true[0] は基準露光で飽和、true[2] は黒潰れ
+    true = np.array([[[1.2, 0.5, 0.02]]], dtype=np.float32)
+
+    def capture_at(scale):
+        return np.clip(true * scale, 0.0, 1.0).astype(np.float32)
+
+    out = ilut.capture_hdr_linear(
+        capture_at, enabled=True, trust_low=10, trust_high=245, max_stops=3
+    )
+    assert abs(out[0, 0, 0] - 1.2) < 0.05    # 露光短縮で飽和を回復
+    assert abs(out[0, 0, 1] - 0.5) < 0.02    # 中間はそのまま
+    assert abs(out[0, 0, 2] - 0.02) < 0.005  # 露光延長で黒潰れを回復
+
+
+def test_scale_shutter_tv():
+    assert ilut.scale_shutter_tv("1/15", 0.5) == "1/30"   # 露光半分
+    assert ilut.scale_shutter_tv("1/15", 2.0) == "1/8"    # 露光倍
+    assert ilut.scale_shutter_tv("1/15", 1.0) == "1/15"
+    assert ilut.scale_shutter_tv("2", 0.5) == "1"
 
 
 # ── Task 5: build ────────────────────────────────────────────────────
 
 
 def _build_from_synth(gammas, black, num_levels=17, white=0.9, **kwargs):
-    # 設定に依存しないよう信頼境界と解像度を明示（既定と同値）
-    kwargs.setdefault("trust_low", 10 / 255)
-    kwargs.setdefault("trust_high", 245 / 255)
+    # 設定に依存しないよう信頼境界(8bit画素値)と解像度を明示（既定と同値）
+    kwargs.setdefault("trust_low", 10)
+    kwargs.setdefault("trust_high", 245)
     kwargs.setdefault("lut_resolution", 256)
     samples = ilut.generate_calibration_patterns(6, 6, num_levels=num_levels, dtype=np.uint8)
 
@@ -223,7 +250,7 @@ def test_build_inverse_lut_excludes_saturated_knots():
         )
     data = ilut.CalibrationData(measurements=measurements, meta={})
     lut = ilut.build_inverse_lut(
-        data, source="gray", lut_resolution=64, trust_low=0.039, trust_high=0.95
+        data, source="gray", lut_resolution=64, trust_low=10, trust_high=242
     )
     # 飽和ノットを除外しても NaN なし・単調・[0,1]・黒引きが保たれる。
     # 白は飽和値(0.99)ではなく信頼できる最上位(p=0.8)で正規化されるため上限は ~0.8。

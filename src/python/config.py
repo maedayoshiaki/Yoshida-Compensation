@@ -177,13 +177,16 @@ class InverseLutConfig:
         reference_region: Central fraction of the captured frame averaged
             into one measurement (0.0-1.0).
             1計測に集約する撮影フレーム中央領域の割合（0.0〜1.0）。
-        trust_low: Lower trustworthy bound on measured values ([0,1]).
-            Values at or below are treated as unreliable/saturated.
-            計測値の信頼下限（[0,1]）。以下は非信頼/サチュ扱い。
-        trust_high: Upper trustworthy bound on measured values ([0,1]).
-            計測値の信頼上限（[0,1]）。以上は非信頼/サチュ扱い。
-        hdr_enabled: Whether to use the (provisional) simple HDR capture.
-            簡易HDR撮影（仮実装）を使うか。
+        trust_low: Lower trustworthy bound as an 8-bit pixel value (0-255).
+            Values at or below are treated as unreliable/crushed.
+            信頼下限（8bit画素値 0〜255）。以下は非信頼/黒潰れ扱い。
+        trust_high: Upper trustworthy bound as an 8-bit pixel value (0-255).
+            Values at or above are treated as unreliable/saturated.
+            信頼上限（8bit画素値 0〜255）。以上は非信頼/サチュ扱い。
+        hdr_enabled: Whether to use the simple HDR bracket capture.
+            簡易HDRブラケット撮影を使うか。
+        hdr_max_stops: Max exposure stops to bracket in each direction.
+            各方向にブラケットする最大露光段数。
         inverse_lut_path: Output path for the saved inverse LUT (.npz).
             保存する逆LUT（.npz）の出力先パス。
 
@@ -194,9 +197,10 @@ class InverseLutConfig:
     source: str = "both"
     lut_resolution: int = 256
     reference_region: float = 0.2
-    trust_low: float = 10.0 / 255.0
-    trust_high: float = 245.0 / 255.0
+    trust_low: float = 10.0
+    trust_high: float = 245.0
     hdr_enabled: bool = False
+    hdr_max_stops: int = 3
     inverse_lut_path: str = "data/inverse_lut.npz"
 
 

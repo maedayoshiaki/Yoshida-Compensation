@@ -16,7 +16,8 @@ correction; it is channel-independent and global (not per-pixel).
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass, field
+import sys
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable, List, Optional, Sequence, Tuple
 
@@ -297,47 +298,123 @@ def measure_calibration_samples(
 # ── Capture orchestration (HDR provisional) ──────────────────────────
 
 
-def capture_hdr_linear(
-    capture_once_fn: Callable[[], np.ndarray],
-    *,
-    enabled: bool = False,
-    trust_low: float = 10.0 / 255.0,
-    trust_high: float = 245.0 / 255.0,
-) -> np.ndarray:
-    """Capture a linear frame, optionally via simple HDR (provisional).
+def scale_shutter_tv(tv: str, scale: float) -> str:
+    """Scale a Canon shutter-speed (``tv``) string by an exposure factor.
 
-    リニアフレームを撮影する（任意で簡易 HDR、仮実装）。
+    Canon シャッタースピード（``tv``）文字列を露光係数でスケールする。
 
-    Currently returns a single exposure regardless of ``enabled``.
+    ``scale = 0.5`` halves the exposure time (faster shutter);
+    ``scale = 2.0`` doubles it. Accepts fraction strings like ``"1/15"``
+    or decimals like ``"0.5"``. Best-effort formatting; EDSDK-accepted
+    values should be validated on the device.
 
-    TODO(HDR): When enabled, bracket exposures — if a pixel saturates
-    (>= trust_high) halve the exposure time and double the pixel value;
-    if it is crushed (<= trust_low) double the exposure time and halve
-    the pixel value; mask untrustworthy pixels per exposure and merge.
-    Requires switching the Canon ``tv`` per shot (temporary config
-    override).
-
-    TODO(HDR): 有効時は露光ブラケット — サチる (>= trust_high) なら
-    露光時間を半分・画素値 2 倍、黒潰れ (<= trust_low) なら露光時間を
-    倍・画素値 1/2。露光ごとに非信頼画素をマスクしてマージする。
-    ショットごとに Canon ``tv`` を切り替える（config 一時上書き）必要がある。
+    ``scale = 0.5`` は露光時間を半分（速いシャッター）、``scale = 2.0`` は
+    倍にする。``"1/15"`` のような分数や ``"0.5"`` の小数を受け付ける。
+    整形はベストエフォートで、EDSDK が受理する値かは実機で要確認。
 
     Args:
-        capture_once_fn: Callable returning one linear RGB frame.
-            1 枚のリニア RGB フレームを返す callable。
-        enabled: Whether HDR bracketing is enabled (currently no-op).
-            HDR ブラケットを有効にするか（現状は無効動作）。
-        trust_low: Lower trustworthy bound (reserved for HDR).
-            信頼下限（HDR 用に予約）。
-        trust_high: Upper trustworthy bound (reserved for HDR).
-            信頼上限（HDR 用に予約）。
+        tv: Base shutter-speed string. 基準シャッタースピード文字列。
+        scale: Exposure-time multiplier. 露光時間の倍率。
 
     Returns:
-        Linear RGB frame of shape (H, W, 3).
-            形状 (H, W, 3) のリニア RGB フレーム。
+        The scaled shutter-speed string.
+            スケール後のシャッタースピード文字列。
     """
-    # NOTE: Provisional single-exposure implementation. See TODO(HDR).
-    return capture_once_fn()
+    text = str(tv).strip()
+    if "/" in text:
+        numerator, denominator = text.split("/", 1)
+        seconds = float(numerator) / float(denominator)
+    else:
+        seconds = float(text)
+    new_seconds = seconds * float(scale)
+    if new_seconds <= 0.0:
+        return text
+    if new_seconds < 1.0:
+        return f"1/{int(round(1.0 / new_seconds))}"
+    if abs(new_seconds - round(new_seconds)) < 1e-6:
+        return str(int(round(new_seconds)))
+    return f"{new_seconds:.1f}"
+
+
+def capture_hdr_linear(
+    capture_at_fn: Callable[[float], np.ndarray],
+    *,
+    enabled: bool = False,
+    trust_low: float = 10.0,
+    trust_high: float = 245.0,
+    max_stops: int = 3,
+) -> np.ndarray:
+    """Capture a linear frame, optionally via simple exposure-bracket HDR.
+
+    リニアフレームを撮影する（任意で簡易な露光ブラケット HDR）。
+
+    With ``enabled=False`` this simply returns the base exposure
+    ``capture_at_fn(1.0)``. With ``enabled=True`` it brackets exposures:
+    where the base pixel saturates (>= ``trust_high``) it shortens the
+    exposure (``scale`` 0.5, 0.25, ...) and rescales the pixel by
+    ``1/scale``; where the base pixel is crushed (<= ``trust_low``) it
+    lengthens the exposure (``scale`` 2, 4, ...) and rescales by
+    ``1/scale``. Trustworthy pixels replace untrustworthy ones, extending
+    dynamic range in base-exposure linear units (values may exceed 1.0).
+
+    ``enabled=False`` では基準露光 ``capture_at_fn(1.0)`` をそのまま返す。
+    ``enabled=True`` では露光をブラケットする: 基準画素がサチる
+    (>= ``trust_high``) 箇所は露光を短く（``scale`` 0.5, 0.25, ...）して
+    画素を ``1/scale`` 倍、黒潰れ (<= ``trust_low``) 箇所は露光を長く
+    （``scale`` 2, 4, ...）して ``1/scale`` 倍する。信頼できる画素で
+    非信頼画素を置き換え、基準露光のリニア単位でダイナミックレンジを
+    拡張する（値は 1.0 を超え得る）。
+
+    Args:
+        capture_at_fn: Callable mapping an exposure ``scale`` to a linear
+            RGB frame (H, W, 3) in [0, 1].
+            露光 ``scale`` をリニア RGB フレーム (H, W, 3)[0, 1] に写す callable。
+        enabled: Whether to bracket exposures.
+            露光ブラケットを行うか。
+        trust_low: Lower trustworthy bound as an 8-bit pixel value (0-255).
+            信頼下限（8bit画素値 0〜255）。
+        trust_high: Upper trustworthy bound as an 8-bit pixel value (0-255).
+            信頼上限（8bit画素値 0〜255）。
+        max_stops: Max exposure stops to bracket in each direction.
+            各方向にブラケットする最大露光段数。
+
+    Returns:
+        Merged linear RGB frame of shape (H, W, 3).
+            マージされたリニア RGB フレーム (H, W, 3)。
+    """
+    base = np.asarray(capture_at_fn(1.0), dtype=np.float32)
+    if not enabled:
+        return base
+
+    low = float(trust_low) / 255.0
+    high = float(trust_high) / 255.0
+    result = base.copy()
+
+    # Saturated pixels: shorten exposure until they come below trust_high.
+    scale = 1.0
+    raw = base
+    for _ in range(int(max_stops)):
+        if not np.any(raw >= high):
+            break
+        scale *= 0.5
+        raw = np.asarray(capture_at_fn(scale), dtype=np.float32)
+        recovered = raw / scale
+        mask = (result >= high) & (raw <= high)
+        result = np.where(mask, recovered, result)
+
+    # Crushed pixels: lengthen exposure until they rise above trust_low.
+    scale = 1.0
+    raw = base
+    for _ in range(int(max_stops)):
+        if not np.any(raw <= low):
+            break
+        scale *= 2.0
+        raw = np.asarray(capture_at_fn(scale), dtype=np.float32)
+        recovered = raw / scale
+        mask = (result <= low) & (raw >= low)
+        result = np.where(mask, recovered, result)
+
+    return result.astype(np.float32)
 
 
 def run_calibration_capture(
@@ -380,6 +457,19 @@ def run_calibration_capture(
     if camera_backend is None:
         camera_backend = create_camera_backend(cfg.camera)
 
+    # Simple HDR needs per-shot exposure control. Only the Canon backend
+    # supports scaling the shutter (tv); otherwise fall back to single exposure.
+    hdr_enabled = ilut_cfg.hdr_enabled
+    backend_name = cfg.camera.backend.strip().lower()
+    if hdr_enabled and backend_name != "canon_edsdk":
+        print(
+            "inverse_lut: HDR enabled but backend "
+            f"'{cfg.camera.backend}' does not support exposure scaling; "
+            "falling back to single exposure.",
+            file=sys.stderr,
+        )
+        hdr_enabled = False
+
     if show_window:
         proj = cfg.projector
         cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
@@ -387,18 +477,25 @@ def run_calibration_capture(
         cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
 
     def capture_fn(sample: CalibrationSample) -> np.ndarray:
-        def once() -> np.ndarray:
+        def capture_at(scale: float) -> np.ndarray:
             if show_window:
                 bgr = cv2.cvtColor(sample.image, cv2.COLOR_RGB2BGR)
                 cv2.imshow(window_name, bgr)
                 cv2.waitKey(cfg.camera.wait_key_ms)
-            return camera_backend.capture_linear_rgb()
+            if scale == 1.0:
+                return camera_backend.capture_linear_rgb()
+            # HDR bracket: rebuild the backend with a scaled shutter speed.
+            scaled_camera_cfg = replace(
+                cfg.camera, tv=scale_shutter_tv(cfg.camera.tv, scale)
+            )
+            return create_camera_backend(scaled_camera_cfg).capture_linear_rgb()
 
         return capture_hdr_linear(
-            once,
-            enabled=ilut_cfg.hdr_enabled,
+            capture_at,
+            enabled=hdr_enabled,
             trust_low=ilut_cfg.trust_low,
             trust_high=ilut_cfg.trust_high,
+            max_stops=ilut_cfg.hdr_max_stops,
         )
 
     try:
@@ -410,7 +507,7 @@ def run_calibration_capture(
             cv2.destroyWindow(window_name)
 
     data.meta["source"] = ilut_cfg.source
-    data.meta["hdr_enabled"] = ilut_cfg.hdr_enabled
+    data.meta["hdr_enabled"] = hdr_enabled
     return data
 
 
@@ -565,10 +662,12 @@ def build_inverse_lut(
             "both" / "channel_ramp" / "gray"。既定は設定から。
         lut_resolution: Number of LUT entries. Default from config.
             LUT エントリ数。既定は設定から。
-        trust_low: Lower trustworthy bound. Default from config.
-            信頼下限。既定は設定から。
-        trust_high: Upper trustworthy bound. Default from config.
-            信頼上限。既定は設定から。
+        trust_low: Lower trustworthy bound as an 8-bit pixel value (0-255).
+            Default from config.
+            信頼下限（8bit画素値 0〜255）。既定は設定から。
+        trust_high: Upper trustworthy bound as an 8-bit pixel value (0-255).
+            Default from config.
+            信頼上限（8bit画素値 0〜255）。既定は設定から。
 
     Returns:
         The built :class:`InverseLut`.
@@ -579,6 +678,11 @@ def build_inverse_lut(
     lut_resolution = cfg.lut_resolution if lut_resolution is None else int(lut_resolution)
     trust_low = cfg.trust_low if trust_low is None else float(trust_low)
     trust_high = cfg.trust_high if trust_high is None else float(trust_high)
+
+    # 8-bit pixel-value bounds -> normalized [0, 1] for comparison with
+    # linear measured values.
+    trust_low_norm = trust_low / 255.0
+    trust_high_norm = trust_high / 255.0
 
     t_grid = np.linspace(0.0, 1.0, lut_resolution)
     lut = np.zeros((3, lut_resolution), dtype=np.float32)
@@ -591,7 +695,7 @@ def build_inverse_lut(
             continue
         agg_inputs, agg_values = _aggregate_by_level(inputs, values)
         lut_c, knot = _build_channel_lut(
-            agg_inputs, agg_values, t_grid, trust_low, trust_high
+            agg_inputs, agg_values, t_grid, trust_low_norm, trust_high_norm
         )
         lut[channel] = lut_c.astype(np.float32)
         knots.append(knot)
