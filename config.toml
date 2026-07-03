@@ -34,3 +34,13 @@ num_divisions = 3               # パターン生成の分割数
 safety_margin = 0.5             # バッチサイズ推定時の安全マージン
 min_batch_size = 256            # 最小バッチサイズ
 use_gpu = true                 # 色混合行列計算で GPU を使用するか
+
+[inverse_lut]
+num_levels = 17                 # 各ランプ（グレー / 単独チャンネル）の階調数
+source = "both"                 # "both" | "channel_ramp" | "gray"
+lut_resolution = 256            # 密な [0,1] 逆LUT のエントリ数
+reference_region = 0.2          # 計測に使う中央領域の割合
+trust_low = 0.0392156862745098  # 信頼下限（≈10/255）
+trust_high = 0.9607843137254902 # 信頼上限（≈245/255）
+hdr_enabled = false             # 簡易HDR（仮実装）
+inverse_lut_path = "data/inverse_lut.npz"

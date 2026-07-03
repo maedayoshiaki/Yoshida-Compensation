@@ -163,6 +163,43 @@ class CompensationConfig:
     use_gpu: bool = False
 
 
+@dataclass(frozen=True)
+class InverseLutConfig:
+    """Configuration for the measured inverse LUT (projector linearization).
+
+    Attributes:
+        num_levels: Number of gradation points per ramp (gray and per-channel).
+            各ランプ（グレー / 単独チャンネル）の階調数。
+        source: Curve-building source. One of "both", "channel_ramp", "gray".
+            曲線構築ソース。"both" / "channel_ramp" / "gray"。
+        lut_resolution: Number of entries in the dense [0,1] inverse LUT.
+            密な [0,1] 逆LUTのエントリ数。
+        reference_region: Central fraction of the captured frame averaged
+            into one measurement (0.0-1.0).
+            1計測に集約する撮影フレーム中央領域の割合（0.0〜1.0）。
+        trust_low: Lower trustworthy bound on measured values ([0,1]).
+            Values at or below are treated as unreliable/saturated.
+            計測値の信頼下限（[0,1]）。以下は非信頼/サチュ扱い。
+        trust_high: Upper trustworthy bound on measured values ([0,1]).
+            計測値の信頼上限（[0,1]）。以上は非信頼/サチュ扱い。
+        hdr_enabled: Whether to use the (provisional) simple HDR capture.
+            簡易HDR撮影（仮実装）を使うか。
+        inverse_lut_path: Output path for the saved inverse LUT (.npz).
+            保存する逆LUT（.npz）の出力先パス。
+
+    測定ベース逆LUT（プロジェクタ線形化）の設定。
+    """
+
+    num_levels: int = 17
+    source: str = "both"
+    lut_resolution: int = 256
+    reference_region: float = 0.2
+    trust_low: float = 10.0 / 255.0
+    trust_high: float = 245.0 / 255.0
+    hdr_enabled: bool = False
+    inverse_lut_path: str = "data/inverse_lut.npz"
+
+
 # ── Top-level config container ───────────────────────────────────────
 
 
@@ -192,6 +229,7 @@ class AppConfig:
     camera: CameraConfig = field(default_factory=CameraConfig)
     paths: PathsConfig = field(default_factory=PathsConfig)
     compensation: CompensationConfig = field(default_factory=CompensationConfig)
+    inverse_lut: InverseLutConfig = field(default_factory=InverseLutConfig)
 
 
 # ── Loading logic ────────────────────────────────────────────────────
@@ -292,6 +330,7 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
         camera=_build_section(CameraConfig, data, "camera"),
         paths=_build_section(PathsConfig, data, "paths"),
         compensation=_build_section(CompensationConfig, data, "compensation"),
+        inverse_lut=_build_section(InverseLutConfig, data, "inverse_lut"),
     )
 
 
@@ -324,6 +363,7 @@ def _serialize_config_toml(config: AppConfig) -> str:
         ("camera", asdict(config.camera)),
         ("paths", asdict(config.paths)),
         ("compensation", asdict(config.compensation)),
+        ("inverse_lut", asdict(config.inverse_lut)),
     ]
 
     lines: list[str] = []
