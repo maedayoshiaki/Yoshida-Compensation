@@ -21,7 +21,8 @@
 ### 既存パイプラインとの関係
 
 - 既存の `calc_color_mixing_matrices`（ピクセルごと 4×3 アフィン）は **別系統**であり本設計では変更しない。
-- 既存 `generate_projection_patterns` は **流用**する（後述）。
+- パターン生成は既存 `generate_projection_patterns`（n³ グリッド）は **流用しない**。
+  本 LUT は 1D ランプ掃引なので専用の軽量生成器を新設する（§3）。
 - `sample.py` の色補償撮影は **逆ガンマ済みパターン**を投影し `capture_image()`（sRGB uint8）で
   撮影する。本 LUT は目的が異なるため、この撮影データは再利用しない（§4 参照）。
 
@@ -30,10 +31,10 @@
 新規 `src/python/inverse_lut.py`:
 
 ```
-generate_calibration_patterns()   # 粗い混合グリッド ∪ 細かいグレーランプ（生成器は既存流用）
+generate_calibration_patterns()   # グレーランプ ＋ 各チャンネル単独ランプ
         ↓  生パターン投影 ＆ リニア撮影（中央領域平均, 簡易HDR=仮実装）
-run_calibration_capture()  →  CalibrationData（(入力RGB, 計測RGB) の対の集合）
-        ↓  入力レベルで周辺平均 → 黒引き・白正規化 → 単調化 → 反転
+run_calibration_capture()  →  CalibrationData（(入力RGB, 計測値, 記録チャンネル) の集合）
+        ↓  入力レベルで集約 → 黒引き・白正規化 → 単調化 → 反転
 build_inverse_lut()  →  InverseLut（(3, lut_resolution) の密LUT + ノット + メタ）
         ↓
 apply_inverse_lut(image, lut)      # 逆ガンマ補正のドロップイン代替
@@ -47,30 +48,28 @@ save_inverse_lut / load_inverse_lut  (npz)
 
 ### 主要データ構造
 
-- `CalibrationSample`: `input_rgb: tuple[float,float,float]`（[0,1]）, `image: np.ndarray`, `kind: str`（"grid"|"gray"|"channel"）。
-- `CalibrationMeasurement`: `input_rgb: (3,)`, `measured_rgb: (3,)`（リニア [0,1]）。
+- `CalibrationSample`: `input_rgb: tuple[float,float,float]`（[0,1]）, `image: np.ndarray`,
+  `kind: str`（"gray"|"channel"）, `recorded_channels: tuple[int,...]`。
+- `CalibrationMeasurement`: `input_rgb: (3,)`, `measured_rgb: (3,)`（リニア [0,1]、未記録は NaN）,
+  `recorded_channels: tuple[int,...]`, `kind: str`。
 - `CalibrationData`: `measurements: list[CalibrationMeasurement]` + メタ（reference_region, 露光条件など）。
-- `InverseLut`: `lut: np.ndarray (3, R)`（[0,1]）, `t_grid: np.ndarray (R,)`, `knots: list[(p_i, n_i) per ch]`, `meta: dict`。
+- `InverseLut`: `lut: np.ndarray (3, R)`（[0,1]）, `t_grid: np.ndarray (R,)`,
+  `knots: list[(p_i, n_i) per ch]`, `meta: dict`。
 
-## 3. キャリブレーションのサンプリング
+## 3. キャリブレーションのサンプリング（生成画像）
 
-`num_divisions^3` グリッドは **グレー（対角 (v,v,v)）・単独チャンネル（軸 (v,0,0) 等）・
-混合（内部 (0.25,0,0.5) 等）を全て内包**する。よって専用生成器は作らず、既存
-`color_mixing_matrix.generate_projection_patterns(width, height, num_divisions)` を流用する。
+以下の **2 系統**の 1D ランプを生成する（`num_levels` 既定 **17** 点、[0,1] を等間隔、
+投影直前に 8bit 量子化）。
 
-サンプリング対象 = **粗い混合グリッド ∪ 細かいグレーランプ**:
+1. **グレーランプ**: `(v,v,v)`, 例 `(0,0,0),(15,15,15),(31,31,31),…,(255,255,255)`。
+   1 回のグレー掃引で 3 チャンネル同時に駆動する。
+2. **各チャンネル単独ランプ**: `(v,0,0)` / `(0,v,0)` / `(0,0,v)`、
+   例 `(0,0,0),(15,0,0),…,(255,0,0)`（G, B も同様）。各チャンネルを単独で掃引する。
 
-- **粗い混合グリッド**: `generate_projection_patterns(w, h, grid_divisions)`。`grid_divisions`
-  既定 **3**（= 27 枚）。軸（単独チャンネル）＋混合を粗く網羅し、周辺平均のロバスト性を供給。
-- **細かいグレーランプ**: `(v,v,v)`, `v ∈ {i/(gray_levels-1)}`。`gray_levels` 既定 **17**。
-  1 回のグレー掃引で **R/G/B 各チャンネルの応答曲線を細かく取得**できる（クロストーク
-  非考慮の前提下では camera_c は projector_c 入力のみに依存）。これが主・高解像度データ。
-- **単独ランプ（任意）**: `use_channel_ramps` 既定 `false`。粗い単独点はグリッド軸で足りるため。
-- 入力 RGB が完全一致するパターンは重複除去 → **合計 約 41 枚**（HDR 仮実装 = 1 露光なら 41 撮影）。
+- 全黒 `(0,0,0)` は全系統に現れるため、**同一投影画像は 1 回だけ撮影**する（計測は系統ごとに
+  導出）。distinct な投影数 ≈ `1 + (num_levels-1) * 4` = **約 65**（`num_levels=17` のとき）。
 
-グリッド解像度を上げると `grid_divisions^3` で撮影枚数が増える点に注意（config で調整可能）。
-
-## 4. 撮影・計測（正しさの要）
+## 4. 撮影・計測 / 保管方法（正しさの要）
 
 - **生パターン（逆ガンマ非適用）を投影**する。逆ガンマを先に掛けると測っているのは「既に
   線形化された出力」になり、`g` を打ち消す情報が消える（＝逆ガンマの代替を作れない）。
@@ -80,36 +79,45 @@ save_inverse_lut / load_inverse_lut  (npz)
   （グローバル LUT のため）。
 - 投影ウィンドウは `sample.py` 流儀（`namedWindow`/`WINDOW_FULLSCREEN`/`moveWindow(pos_x,pos_y)`/
   `waitKey(wait_key_ms)`）を踏襲。
-- **信頼レンジ**: 計測値（[0,1] 換算）の `≤ trust_low`（既定 10/255 ≈ 0.039）/
-  `≥ trust_high`（既定 245/255 ≈ 0.961）はサチュ/非信頼として **構築時に除外**（config 可）。
+
+### 保管方法（記録するチャンネル）
+
+- **グレーランプ**: カメラの **r, g, b の全チャンネル**を記録（`recorded_channels=(0,1,2)`）。
+- **各チャンネル単独ランプ**: **投影しているチャンネルのみ**を記録
+  （R ランプ → camera R のみ、`recorded_channels=(0,)`。G, B も同様）。未記録チャンネルは NaN。
+
+### 信頼レンジ
+
+- 計測値（[0,1] 換算）の `≤ trust_low`（既定 10/255 ≈ 0.039）/ `≥ trust_high`（既定 245/255 ≈ 0.961）
+  はサチュ/非信頼として **構築時に除外**（config 可）。
 
 ### 簡易 HDR（仮実装）
 
 - インターフェースだけ用意し、当面は **単一露光**（`hdr_enabled=false`）。
 - 将来のブラケット仕様は TODO コメントで明示: サチる→ tv 半分・画素値 2 倍、黒潰れ→
-  tv 倍・画素値 1/2、信頼レンジ外をマスクして露光間でマージ。
-- Canon の `tv` をショットごとに切り替える方式（config を一時上書き）を想定するが、
-  今回は骨組みのみ。
+  tv 倍・画素値 1/2、信頼レンジ外をマスクして露光間でマージ。Canon の `tv` をショットごとに
+  切り替える方式（config を一時上書き）を想定するが、今回は骨組みのみ。
 
 ## 5. LUT 構築（核心）
 
-チャンネル種別に依存しない周辺集約で構築する。チャンネル `c` ごと:
+チャンネル `c` ごとに、`c` を **記録しているすべての計測**から `(入力[c], 計測[c])` を集める。
 
-1. **周辺集約**: 全撮影から `(入力[c], 計測[c])` を収集し、**入力レベルでグルーピングして
-   平均** → ノット `(p_i, m_i)`。グレー（細）とグリッド（粗）の観測が自然に統合される。
+- `source="both"`（既定）: グレーランプ ＋ 単独ランプ `c` の両方を使う
+  （クロストーク非考慮の前提下では両者は同じ量を測るため、点数が増えてロバストになる）。
+- `source="channel_ramp"`: 単独ランプ `c` のみ。`source="gray"`: グレーランプのみ。
+
+構築手順:
+
+1. **集約**: 収集した `(入力[c], 計測[c])` を **入力レベルでグルーピングして平均** →
+   ノット `(p_i, m_i)`。全黒など重複入力は平均で 1 点に。
 2. **黒引き・白正規化**: `m0 = m(0)`（黒/環境光）, `m_white = m(最大入力)`。
    `n_i = (m_i − m0) / (m_white − m0)` → `n(0)=0, n(最大)=1`。
    これで「0,0,0 でカメラ 10 なら LUT 値は 0」要件を黒引きで満たす。
-   `m_white − m0 ≤ 0`（縮退）の場合はエラー/警告し恒等 LUT にフォールバック。
+   `m_white − m0 ≤ 0`（縮退）の場合は警告し恒等 LUT にフォールバック。
 3. **単調化**: 非減少に補正（`scipy` 利用: PCHIP または等調回帰）。信頼レンジ外の点は除外済み。
    有効ノットが 2 点未満なら恒等にフォールバックし警告。
 4. **反転**: 一様 `t` グリッド（`lut_resolution` 既定 256）に対し
    `L_c(t) = interp(t; xp=n_i, fp=p_i)`。**[0,1] で保持**、プロジェクタ入力直前で 8bit 量子化。
-
-### 構築ソースの選択（config）
-
-`source` 既定 `"marginal"`（上記 §5.1、全撮影を周辺集約）。代替として `"channel_ramp"`
-（軸のみ）/`"gray"`（グレーのみ）を選べる。既定は網羅サンプルを最大活用する `"marginal"`。
 
 ## 6. LUT 適用
 
@@ -126,10 +134,8 @@ save_inverse_lut / load_inverse_lut  (npz)
 
 | キー | 既定 | 説明 |
 | --- | --- | --- |
-| `grid_divisions` | `3` | 粗い混合グリッドの分割数（`generate_projection_patterns` に渡す） |
-| `gray_levels` | `17` | 細かいグレーランプの階調数 |
-| `use_channel_ramps` | `false` | 単独チャンネルランプを追加するか |
-| `source` | `"marginal"` | 曲線構築ソース（`marginal`/`channel_ramp`/`gray`） |
+| `num_levels` | `17` | 各ランプ（グレー / 単独）の階調数 |
+| `source` | `"both"` | 曲線構築ソース（`both`/`channel_ramp`/`gray`） |
 | `lut_resolution` | `256` | 逆 LUT の密グリッド解像度 |
 | `reference_region` | `0.2` | 計測に使う中央領域の割合 |
 | `trust_low` | `0.039` | 信頼下限（≈10/255 未満は除外） |
@@ -147,9 +153,10 @@ save_inverse_lut / load_inverse_lut  (npz)
 - **黒引き**: `m(0) > 0`（例 10/255）でも `L(0)=0` になる。
 - **単調性**: 生成 LUT が非減少。
 - **サチュ除外**: `≤trust_low` / `≥trust_high` の点が構築から除外される。
-- **統合**: グレー（細）＋グリッド（粗）の観測が周辺集約に反映される。
+- **保管方法**: グレーは r,g,b を記録、単独ランプは投影チャンネルのみ記録（他は NaN）。
+- **ソース統合**: `source="both"` でグレー＋単独ランプの観測が集約に反映される。
 - **チャンネル独立性**: R/G/B で別々の γ を与えて各々復元できる。
-- **save/load 往復**、**パターン枚数/重複除去**、**中央領域平均**。
+- **save/load 往復**、**パターン枚数/全黒の重複除去**、**中央領域平均**。
 - 撮影は「リニアフレームを返す callable」をモックして HW 非依存に。既存
   `tests/test_sample_mocked.py` の `monkeypatch`/`tmp_path` 流儀に合わせる。
 
@@ -158,9 +165,10 @@ save_inverse_lut / load_inverse_lut  (npz)
 - `sample.py` / 補償パイプラインへの組み込み（今回はしない）。
 - ピクセルごと LUT（グローバルのみ）。
 - 本格 HDR マージ（仮実装のみ）。
+- 混合色（n³ グリッド）サンプリング（グレー＋単独ランプのみ）。
 - カメラ↔プロジェクタ間の幾何ワープ（無関係）。
 
 ## 10. 撮影枚数の見積り
 
-既定（`grid_divisions=3` の 27 枚 + `gray_levels=17`、重複除去）で **約 41 パターン**。
-`grid_divisions` は 3 乗で効くため、コスト調整は主にこの値で行う。
+`num_levels=17` で **約 65 パターン**（グレー 17 + 単独 R/G/B 各 17、全黒重複を除去）。
+`num_levels` を変えると線形に増減する。
