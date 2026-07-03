@@ -86,17 +86,21 @@ save_inverse_lut / load_inverse_lut  (npz)
 - **各チャンネル単独ランプ**: **投影しているチャンネルのみ**を記録
   （R ランプ → camera R のみ、`recorded_channels=(0,)`。G, B も同様）。未記録チャンネルは NaN。
 
-### 信頼レンジ
+### 信頼レンジ（8bit画素値で Config 可）
 
-- 計測値（[0,1] 換算）の `≤ trust_low`（既定 10/255 ≈ 0.039）/ `≥ trust_high`（既定 245/255 ≈ 0.961）
-  はサチュ/非信頼として **構築時に除外**（config 可）。
+- `≤ trust_low`（既定 **10**）/ `≥ trust_high`（既定 **245**）を **8bit画素値(0-255)** で指定し、
+  黒潰れ/サチュ/非信頼として扱う。構築時はこの範囲外の点を除外し、HDR撮影では露光段の選択に用いる
+  （`[inverse_lut]` の `trust_low`/`trust_high`。内部でリニア[0,1]比較用に /255 変換）。
 
-### 簡易 HDR（仮実装）
+### 簡易 HDR（実装済み）
 
-- インターフェースだけ用意し、当面は **単一露光**（`hdr_enabled=false`）。
-- 将来のブラケット仕様は TODO コメントで明示: サチる→ tv 半分・画素値 2 倍、黒潰れ→
-  tv 倍・画素値 1/2、信頼レンジ外をマスクして露光間でマージ。Canon の `tv` をショットごとに
-  切り替える方式（config を一時上書き）を想定するが、今回は骨組みのみ。
+- `capture_hdr_linear` は露光ブラケット＋マージを実装: 基準露光でサチる (≥ trust_high) 画素は露光を
+  短く（scale 0.5, 0.25…）して画素値を `1/scale` 倍、黒潰れ (≤ trust_low) 画素は露光を長く
+  （scale 2, 4…）して `1/scale` 倍。信頼できる画素で非信頼画素を置換し、基準露光リニア単位で
+  ダイナミックレンジを拡張する（値は 1.0 超も可、白正規化で吸収）。段数は `hdr_max_stops`（既定 3）。
+- 露光制御は Canon の `tv` を段ごとにスケール（`scale_shutter_tv`）して実現。`hdr_enabled=true` かつ
+  Canon バックエンド時のみ有効化し、非対応バックエンドは警告して単一露光にフォールバック。
+  マージ計算と tv スケール式は単体テスト済み。**Canon の tv 切替は実機での受理値検証が必要。**
 
 ## 5. LUT 構築（核心）
 
@@ -138,9 +142,10 @@ save_inverse_lut / load_inverse_lut  (npz)
 | `source` | `"both"` | 曲線構築ソース（`both`/`channel_ramp`/`gray`） |
 | `lut_resolution` | `256` | 逆 LUT の密グリッド解像度 |
 | `reference_region` | `0.2` | 計測に使う中央領域の割合 |
-| `trust_low` | `0.039` | 信頼下限（≈10/255 未満は除外） |
-| `trust_high` | `0.961` | 信頼上限（≈245/255 超は除外） |
-| `hdr_enabled` | `false` | 簡易 HDR（仮実装） |
+| `trust_low` | `10` | 信頼下限（8bit画素値, ≤は非信頼/黒潰れ） |
+| `trust_high` | `245` | 信頼上限（8bit画素値, ≥は非信頼/サチュ） |
+| `hdr_enabled` | `false` | 簡易HDRブラケット撮影 |
+| `hdr_max_stops` | `3` | 各方向の最大露光段数 |
 | `inverse_lut_path` | `"data/inverse_lut.npz"` | LUT 保存先 |
 
 - LUT は npz（`lut`, `t_grid`, ノット, メタ）で保存/読込。
@@ -164,7 +169,7 @@ save_inverse_lut / load_inverse_lut  (npz)
 
 - `sample.py` / 補償パイプラインへの組み込み（今回はしない）。
 - ピクセルごと LUT（グローバルのみ）。
-- 本格 HDR マージ（仮実装のみ）。
+- 高度な HDR（位置ずれ/ゴースト補正、トーンマッピング等）。簡易な露光ブラケット＋マージのみ。
 - 混合色（n³ グリッド）サンプリング（グレー＋単独ランプのみ）。
 - カメラ↔プロジェクタ間の幾何ワープ（無関係）。
 
