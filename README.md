@@ -12,7 +12,7 @@
 
 カメラバックエンドごとの要件:
 
-- `canon_edsdk`: Canon カメラ + EDSDK 環境、`rawpy`
+- `canon_edsdk`: Canon カメラ + EDSDK 環境、`rawpy`・`pywin32`（詳細は「Canon EDSDK バックエンドのセットアップ」）
 - `opencv`: OpenCV でアクセス可能な UVC/USB カメラ
 
 ## セットアップ
@@ -46,7 +46,23 @@ uv sync
 uv sync --extra sample
 ```
 
-`canon_edsdk` を使う場合は、この `--extra sample` に含まれる `rawpy` が必要です。
+`canon_edsdk` を使う場合は、この `--extra sample` に含まれる `rawpy`・`pywin32` が必要です。
+加えて、以下の「Canon EDSDK バックエンドのセットアップ」を参照してください。
+
+### Canon EDSDK バックエンドのセットアップ
+
+`camera.backend = "canon_edsdk"` で実機撮影を行うには、`--extra sample` の依存に加えて次の 2 点が必要です。
+
+1. **`raw_processor` 対応の edsdk ビルド**
+   `src/python/camera/canon_edsdk.py` は `camera.capture_numpy(raw_processor=...)`（RAW バイトをその場でリニア RGB へ現像するフック）を使います。PyPI 版など汎用の `edsdk` はこの引数を持たず、最初の 1 枚で
+   `TypeError: capture_numpy() got an unexpected keyword argument 'raw_processor'` になります。
+   `raw_processor` 対応の [edsdk-python](https://github.com/youme-town/edsdk-python)（`develop`）を導入してください。64bit import lib が無い環境では新規ビルドできないため、リポジトリ同梱のビルド済み `edsdk/`（`.pyd` 含む）を venv の `site-packages/edsdk/` へ配置し、Canon 専有 DLL（`EDSDK.dll` / `EdsImage.dll`）をパッケージ内に置くか `EDSDK_PYTHON_DLL_DIR` で指定します。
+
+2. **`pywin32`（`pythoncom`）**
+   edsdk は `pythoncom.PumpWaitingMessages()` で SDK のオブジェクトイベントをポンプします。`pywin32` が無いとポンプが no-op になり、**シャッターは切れるのに画像がホストへ転送されず**
+   `TimeoutError: Timed out waiting for image transfer event` になります。`--extra sample`（`sys_platform == 'win32'` で `pywin32` を含む）を入れれば解決します。
+
+> 撮影が上記のいずれかで失敗する場合、まずカメラの電源を入れ直し、EOS Utility など他の Canon アプリを閉じ、モードダイヤルを Manual/Av/Tv にしてから再試行してください。
 
 ## プロジェクト構成
 
