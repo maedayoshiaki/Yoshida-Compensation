@@ -252,11 +252,59 @@ def test_capture_hdr_linear_recovers_saturated_and_crushed():
     assert abs(out[0, 0, 2] - 0.02) < 0.005  # 露光延長で黒潰れを回復
 
 
+def test_capture_hdr_linear_uses_actual_exposure_ratio():
+    # capture_at が (frame, 実効露光比) を返す場合、公称 scale ではなく
+    # 実効比で回復すること。実機は離散 Tv しか取れず、公称 2.0 倍を要求しても
+    # 例えば 1.875 倍しか延ばせない、という状況を模す。
+    true_val = 0.03  # trust_low(=10/255≈0.039) 以下＝黒潰れ
+    actual_ratio = 1.875
+
+    def capture_at(scale):
+        if scale == 1.0:
+            return np.full((1, 1, 3), true_val, dtype=np.float32)
+        frame = np.full((1, 1, 3), true_val * actual_ratio, dtype=np.float32)
+        return frame, actual_ratio  # (frame, 実効露光比)
+
+    out = ilut.capture_hdr_linear(
+        capture_at, enabled=True, trust_low=10, trust_high=245, max_stops=1
+    )
+    # 実効比 1.875 で割るので true_val に戻る（公称 2.0 で割ると誤差 6%）。
+    assert abs(out[0, 0, 2] - true_val) < 1e-6
+
+
+def test_tv_to_seconds_parses_canon_formats():
+    assert abs(ilut.tv_to_seconds("1/125") - 0.008) < 1e-6
+    assert abs(ilut.tv_to_seconds("1/15") - 1 / 15) < 1e-9
+    assert ilut.tv_to_seconds('0"5') == 0.5   # Canon 秒表記
+    assert ilut.tv_to_seconds('1"5') == 1.5
+    assert ilut.tv_to_seconds('4"') == 4.0
+    assert ilut.tv_to_seconds('30"') == 30.0
+    assert ilut.tv_to_seconds("2") == 2.0
+
+
 def test_scale_shutter_tv():
     assert ilut.scale_shutter_tv("1/15", 0.5) == "1/30"   # 露光半分
     assert ilut.scale_shutter_tv("1/15", 2.0) == "1/8"    # 露光倍
     assert ilut.scale_shutter_tv("1/15", 1.0) == "1/15"
     assert ilut.scale_shutter_tv("2", 0.5) == "1"
+
+
+def test_scale_shutter_tv_snaps_to_realizable_value():
+    # 以前は非対応値(1/120, 1/2)を返し EDSDK が弾いていた段を、
+    # 最も近い実在 Canon Tv にスナップする（tv=1/15, 3段ブラケット相当）。
+    assert ilut.scale_shutter_tv("1/15", 0.125) == "1/125"
+    assert ilut.scale_shutter_tv("1/15", 8.0) == '0"5'
+    # 返り値は必ず実在の標準 Tv（tv_to_seconds で解釈可能）
+    assert ilut.scale_shutter_tv("1/15", 0.125) in ilut._STANDARD_TV_DISPLAYS
+
+
+def test_scale_shutter_tv_snaps_to_supported_menu():
+    # カメラの受理メニューを与えると、その中の最も近い値へスナップする。
+    supported = ["1/30", "1/15", "1/8", '0"5']
+    assert ilut.scale_shutter_tv("1/15", 0.125, supported=supported) == "1/30"
+    assert ilut.scale_shutter_tv("1/15", 8.0, supported=supported) == '0"5'
+    # 候補外の露光でも、必ず与えたメニュー内の値を返す。
+    assert ilut.scale_shutter_tv("1/15", 4.0, supported=supported) in supported
 
 
 # ── Task 5: build ────────────────────────────────────────────────────

@@ -38,19 +38,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.python.config import get_config, reload_config, split_cli_config_path
-from src.python.inverse_lut import scale_shutter_tv
-
-
-def _requested_seconds(tv: str) -> float:
-    """Nominal exposure seconds encoded by a ``scale_shutter_tv`` string.
-
-    ``scale_shutter_tv`` が返す文字列（``"1/N"`` か小数）を秒に直す。
-    """
-    text = str(tv).strip()
-    if "/" in text:
-        numerator, denominator = text.split("/", 1)
-        return float(numerator) / float(denominator)
-    return float(text)
+from src.python.inverse_lut import scale_shutter_tv, tv_to_seconds
 
 
 def _bracket_scales(max_stops: int) -> list[tuple[str, float]]:
@@ -72,78 +60,69 @@ def _bracket_scales(max_stops: int) -> list[tuple[str, float]]:
 
 
 def _dry_run(base_tv: str, max_stops: int) -> int:
-    """Check scaled tv strings against edsdk's global parse table only.
+    """Confirm each bracket snaps to a parseable standard Canon Tv.
 
-    カメラ無しで、スケール後 tv 文字列が edsdk のグローバル Tv テーブルに
-    存在するか（＝``_parse_tv`` が通るか）だけを確認する。機種固有の
-    サポート集合は分からないので、それは実機モードで確認する。
+    カメラ無しで、各ブラケット段が ``scale_shutter_tv`` により実在の標準
+    Canon Tv へスナップされ、``_parse_tv`` を通ることを確認する。機種固有の
+    サポート集合は実機モードで確認する。
     """
     try:
-        from edsdk.camera_controller import TvTable, _parse_tv, _tv_display_to_seconds
+        from edsdk.camera_controller import _parse_tv
     except ImportError as exc:
         print(f"edsdk import failed: {exc}", file=sys.stderr)
         return 2
 
-    # Precompute standard Canon seconds for nearest-value hints.
-    standard: list[tuple[float, str]] = []
-    for disp in TvTable.values():
-        try:
-            standard.append((_tv_display_to_seconds(disp), disp))
-        except Exception:
-            continue
-
-    def nearest(seconds: float) -> str:
-        best = min(standard, key=lambda item: abs(item[0] - seconds))
-        return f"{best[1]} ({best[0]:g}s)"
-
-    print(f"base tv = {base_tv!r}, hdr_max_stops = {max_stops}")
-    print("(dry-run: global Canon Tv table only; per-body support needs the camera)\n")
-    print(f"{'dir':<8} {'scale':>7}  {'requested tv':>14}  {'parse':<6}  hint / nearest standard")
+    base_seconds = tv_to_seconds(base_tv)
+    print(f"base tv = {base_tv!r} ({base_seconds:g}s), hdr_max_stops = {max_stops}")
+    print("(dry-run: snaps to standard Canon Tv; per-body support needs the camera)\n")
+    print(
+        f"{'dir':<8} {'scale':>7}  {'target s':>10}  {'snapped tv':>12}  "
+        f"{'snapped s':>10}  {'err%':>6}  parse"
+    )
     print("-" * 78)
 
     failures = 0
     for direction, scale in _bracket_scales(max_stops):
-        requested = scale_shutter_tv(base_tv, scale)
-        seconds = _requested_seconds(requested)
+        target = base_seconds * scale
+        snapped = scale_shutter_tv(base_tv, scale)
+        snapped_seconds = tv_to_seconds(snapped)
+        err = abs(snapped_seconds - target) / target * 100.0 if target else 0.0
         try:
-            _parse_tv(requested)
+            _parse_tv(snapped)
             verdict = "OK"
-            hint = ""
         except ValueError:
             verdict = "FAIL"
             failures += 1
-            hint = f"-> nearest: {nearest(seconds)}"
         print(
-            f"{direction:<8} {scale:>7.4g}  {requested:>14}  {verdict:<6}  {hint}"
+            f"{direction:<8} {scale:>7.4g}  {target:>10.5g}  {snapped:>12}  "
+            f"{snapped_seconds:>10.5g}  {err:>6.1f}  {verdict}"
         )
 
     print("-" * 78)
     if failures:
         print(
-            f"\n{failures} bracket step(s) produce a tv string edsdk cannot parse.\n"
-            "These would raise ValueError inside the HDR loop and abort calibration.\n"
-            "Fix: snap scale_shutter_tv to a supported Tv (nearest by seconds) and\n"
-            "merge using the ACTUAL achieved exposure ratio, not the nominal scale."
+            f"\n{failures} bracket step(s) still fail to parse -- unexpected after "
+            "snapping.\nInvestigate scale_shutter_tv / _STANDARD_TV_DISPLAYS."
         )
     else:
-        print("\nAll bracket tv strings parse against the global table.")
-        print("Run without --dry-run on the Canon to confirm per-body support.")
+        print(
+            "\nAll bracket steps snap to a realizable standard Tv (parse OK).\n"
+            "'err%' is the discrete-shutter drift; the HDR merge divides by the\n"
+            "ACTUAL ratio, so this drift does not bias recovered values.\n"
+            "Run without --dry-run on the Canon to confirm this body's own menu."
+        )
     return 1 if failures else 0
 
 
 def _hardware_run(base_tv: str, max_stops: int) -> int:
-    """Query the connected Canon's supported Tv set and check each step.
+    """Snap each bracket onto the connected Canon's own Tv menu and check it.
 
-    接続中の Canon の受理 Tv 集合（``list_supported()``）と各ブラケット段を
-    突き合わせる。撮影は行わず、プロパティ記述子の照会のみ。
+    接続中の Canon の受理 Tv 集合（``list_supported()``）へ各ブラケット段を
+    スナップし、実際に受理されるかを確認する。撮影は行わず、プロパティ記述子の
+    照会のみ。
     """
     try:
-        from edsdk.camera_controller import (
-            PropID,
-            TvTable,
-            _parse_tv,
-            _tv_display_to_seconds,
-        )
+        from edsdk.camera_controller import PropID, TvTable, _parse_tv
         from edsdk.camera_controller import CameraController
     except ImportError as exc:
         print(f"edsdk import failed: {exc}", file=sys.stderr)
@@ -152,9 +131,7 @@ def _hardware_run(base_tv: str, max_stops: int) -> int:
     try:
         with CameraController() as camera:
             supported_codes = set(camera._get_supported_codes(PropID.Tv))
-            supported_displays = [
-                TvTable.get(code, str(code)) for code in supported_codes
-            ]
+            supported = list(camera.list_supported().get("Tv", []))
     except Exception as exc:  # noqa: BLE001 - surface any EDSDK/session error
         print(
             f"Could not query the Canon camera: {exc}\n"
@@ -164,70 +141,48 @@ def _hardware_run(base_tv: str, max_stops: int) -> int:
         )
         return 2
 
-    supported_seconds = []
-    for disp in supported_displays:
-        try:
-            supported_seconds.append((_tv_display_to_seconds(disp), disp))
-        except Exception:
-            continue
-    supported_sorted = sorted(
-        (d for d in supported_displays), key=str
+    print(f"Camera-supported Tv values ({len(supported)}):")
+    print("  " + ", ".join(str(tv) for tv in sorted(supported, key=str)) + "\n")
+
+    base_seconds = tv_to_seconds(base_tv)
+    print(f"base tv = {base_tv!r} ({base_seconds:g}s), hdr_max_stops = {max_stops}\n")
+    print(
+        f"{'dir':<8} {'scale':>7}  {'target s':>10}  {'snapped tv':>12}  "
+        f"{'verdict':<13}  err%"
     )
-    print(f"Camera-supported Tv values ({len(supported_displays)}):")
-    print("  " + ", ".join(supported_sorted) + "\n")
-
-    def nearest(seconds: float) -> str:
-        if not supported_seconds:
-            return "?"
-        best = min(supported_seconds, key=lambda item: abs(item[0] - seconds))
-        return f"{best[1]} ({best[0]:g}s)"
-
-    print(f"base tv = {base_tv!r}, hdr_max_stops = {max_stops}\n")
-    print(f"{'dir':<8} {'scale':>7}  {'requested tv':>14}  {'verdict':<13}  detail")
-    print("-" * 84)
+    print("-" * 80)
 
     failures = 0
     for direction, scale in _bracket_scales(max_stops):
-        requested = scale_shutter_tv(base_tv, scale)
-        nominal = _requested_seconds(requested)
+        target = base_seconds * scale
+        snapped = scale_shutter_tv(base_tv, scale, supported=supported)
+        snapped_seconds = tv_to_seconds(snapped)
+        err = abs(snapped_seconds - target) / target * 100.0 if target else 0.0
         try:
-            code = _parse_tv(requested)
+            code = _parse_tv(snapped)
+            accepted = code in supported_codes
         except ValueError:
+            accepted = False
+        verdict = "OK" if accepted else "NOT_SUPPORTED"
+        if not accepted:
             failures += 1
-            print(
-                f"{direction:<8} {scale:>7.4g}  {requested:>14}  "
-                f"{'PARSE_FAIL':<13}  nearest supported: {nearest(nominal)}"
-            )
-            continue
-        if code not in supported_codes:
-            failures += 1
-            print(
-                f"{direction:<8} {scale:>7.4g}  {requested:>14}  "
-                f"{'NOT_SUPPORTED':<13}  nearest supported: {nearest(nominal)}"
-            )
-            continue
-        actual = _tv_display_to_seconds(TvTable.get(code, ""))
-        ratio = actual / nominal if nominal else float("nan")
-        err = abs(ratio - scale) / scale * 100.0 if scale else 0.0
         print(
-            f"{direction:<8} {scale:>7.4g}  {requested:>14}  "
-            f"{'OK':<13}  actual={actual:g}s nominal={nominal:g}s "
-            f"exposure_err={err:.1f}%"
+            f"{direction:<8} {scale:>7.4g}  {target:>10.5g}  {snapped:>12}  "
+            f"{verdict:<13}  {err:>5.1f}"
         )
 
-    print("-" * 84)
+    print("-" * 80)
     if failures:
         print(
-            f"\n{failures} bracket step(s) are rejected by this body -> "
-            "calibration would abort.\n"
-            "Fix: snap scale_shutter_tv to the nearest supported Tv and merge with\n"
-            "the actual exposure ratio (see 'exposure_err' for the discrete drift)."
+            f"\n{failures} bracket step(s) are still not accepted by this body.\n"
+            "Unexpected: scale_shutter_tv was given this body's own menu. Check that\n"
+            "list_supported()['Tv'] and _parse_tv agree on display formatting."
         )
     else:
         print(
-            "\nAll bracket steps are accepted. Note any nonzero exposure_err: the "
-            "HDR merge\ndivides by the NOMINAL scale, so large drift biases the "
-            "recovered values."
+            "\nAll bracket steps snap onto this body's Tv menu and are accepted.\n"
+            "'err%' is the discrete-shutter drift; the HDR merge divides by the\n"
+            "ACTUAL exposure ratio, so it does not bias recovered values."
         )
     return 1 if failures else 0
 

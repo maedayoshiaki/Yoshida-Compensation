@@ -180,3 +180,35 @@ class CanonEdsdkCamera(CameraBackend):
             raise CameraCaptureError("No image returned from canon_edsdk backend.")
 
         return _normalize_capture_output(images[0], self.config.image_quality)
+
+    def supported_shutter_speeds(self) -> list[str]:
+        """List the Tv (shutter) values this camera body accepts.
+
+        この機種が受理する Tv（シャッター）値の一覧を返す。
+
+        Queries EDSDK property descriptors only; it does not release the
+        shutter. Used by the simple-HDR bracket to snap scaled exposures
+        onto values the body will accept.
+
+        EDSDK のプロパティ記述子を照会するのみで、シャッターは切らない。
+        簡易 HDR ブラケットが、スケール後の露光を機種が受理する値へ
+        スナップするために使う。
+
+        Returns:
+            Supported Tv display strings (e.g. ``"1/30"``, ``0"5``, ``"2"``).
+                受理される Tv 表示文字列（例 ``"1/30"``, ``0"5``, ``"2"``）。
+
+        Raises:
+            CameraCaptureError: If EDSDK is unavailable.
+                EDSDK が利用できない場合。
+        """
+        try:
+            from edsdk.camera_controller import CameraController
+        except ImportError as exc:
+            raise CameraCaptureError(
+                "edsdk is required for canon_edsdk backend."
+            ) from exc
+
+        with CameraController() as camera:
+            supported = camera.list_supported()
+        return [str(tv) for tv in supported.get("Tv", [])]

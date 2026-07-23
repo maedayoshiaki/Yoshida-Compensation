@@ -19,7 +19,7 @@ import json
 import sys
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Callable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
@@ -364,46 +364,134 @@ def measure_calibration_samples(
 # ── Capture orchestration (HDR provisional) ──────────────────────────
 
 
-def scale_shutter_tv(tv: str, scale: float) -> str:
-    """Scale a Canon shutter-speed (``tv``) string by an exposure factor.
+# Standard Canon Tv (shutter-speed) values as display strings accepted by
+# EDSDK's parser, spanning 1/16000s .. 30s. Used to snap a scaled exposure
+# onto a realizable value when the camera's own menu is not supplied.
+# EDSDK が受理する標準 Canon Tv（シャッター）表示値（1/16000〜30秒）。
+# カメラ実機のメニューが無いとき、スケール後露光を実在値へスナップするのに使う。
+_STANDARD_TV_DISPLAYS: Tuple[str, ...] = (
+    "1/16000", "1/12800", "1/10000", "1/8000", "1/6400", "1/6000",
+    "1/5000", "1/4000", "1/3200", "1/3000", "1/2500", "1/2000",
+    "1/1600", "1/1500", "1/1250", "1/1000", "1/800", "1/750",
+    "1/640", "1/500", "1/400", "1/350", "1/320", "1/250",
+    "1/200", "1/180", "1/160", "1/125", "1/100", "1/90",
+    "1/80", "1/60", "1/50", "1/45", "1/40", "1/30",
+    "1/25", "1/20", "1/15", "1/13", "1/10", "1/8",
+    "1/6", "1/5", "1/4", '0"3', '0"4', '0"5', '0"6', '0"7', '0"8',
+    "1", '1"3', '1"5', '1"6', "2", '2"5', "3", '3"2',
+    '4"', '5"', '6"', '8"', '10"', '13"', '15"', '20"', '25"', '30"',
+)
 
-    Canon シャッタースピード（``tv``）文字列を露光係数でスケールする。
 
-    ``scale = 0.5`` halves the exposure time (faster shutter);
-    ``scale = 2.0`` doubles it. Accepts fraction strings like ``"1/15"``
-    or decimals like ``"0.5"``. Best-effort formatting; EDSDK-accepted
-    values should be validated on the device.
+def tv_to_seconds(tv: str) -> float:
+    """Convert a Canon shutter (``tv``) display string to seconds.
 
-    ``scale = 0.5`` は露光時間を半分（速いシャッター）、``scale = 2.0`` は
-    倍にする。``"1/15"`` のような分数や ``"0.5"`` の小数を受け付ける。
-    整形はベストエフォートで、EDSDK が受理する値かは実機で要確認。
+    Canon シャッター（``tv``）表示文字列を秒に変換する。
+
+    Accepts fraction form ``"1/125"``, Canon seconds notation ``0"5`` /
+    ``1"5`` / ``4"`` / ``30"``, and plain integer/decimal seconds ``"2"``.
+
+    ``"1/125"`` の分数、``0"5`` / ``1"5`` / ``4"`` / ``30"`` の Canon 秒表記、
+    ``"2"`` の整数/小数秒を受け付ける。
 
     Args:
-        tv: Base shutter-speed string. 基準シャッタースピード文字列。
-        scale: Exposure-time multiplier. 露光時間の倍率。
+        tv: Shutter-speed display string. シャッタースピード表示文字列。
 
     Returns:
-        The scaled shutter-speed string.
-            スケール後のシャッタースピード文字列。
+        Exposure time in seconds. 露光時間（秒）。
     """
     text = str(tv).strip()
     if "/" in text:
         numerator, denominator = text.split("/", 1)
-        seconds = float(numerator) / float(denominator)
-    else:
-        seconds = float(text)
-    new_seconds = seconds * float(scale)
-    if new_seconds <= 0.0:
-        return text
-    if new_seconds < 1.0:
-        return f"1/{int(round(1.0 / new_seconds))}"
-    if abs(new_seconds - round(new_seconds)) < 1e-6:
-        return str(int(round(new_seconds)))
-    return f"{new_seconds:.1f}"
+        return float(numerator) / float(denominator)
+    if '"' in text:
+        whole, _, frac = text.partition('"')
+        whole = whole or "0"
+        if frac:  # e.g. 0"5 -> 0.5, 3"2 -> 3.2
+            return float(f"{int(whole)}.{frac}")
+        return float(whole)  # e.g. 4" -> 4, 30" -> 30
+    return float(text)
+
+
+def scale_shutter_tv(
+    tv: str,
+    scale: float,
+    *,
+    supported: Optional[Sequence[str]] = None,
+) -> str:
+    """Scale a Canon shutter (``tv``) and snap to the nearest realizable value.
+
+    Canon シャッター（``tv``）を露光係数でスケールし、実現可能な最も近い値へスナップする。
+
+    ``scale = 0.5`` halves the exposure time (faster shutter); ``scale =
+    2.0`` doubles it. The scaled target is snapped to the nearest value in
+    ``supported`` -- the camera's actual Tv menu, e.g.
+    ``list_supported()["Tv"]`` -- or, when not given, to the nearest
+    standard Canon Tv. This guarantees a value the camera can accept and
+    avoids an EDSDK ``ValueError`` that would abort calibration mid-run.
+
+    ``scale = 0.5`` は露光時間を半分（速いシャッター）、``scale = 2.0`` は倍に
+    する。スケール後の目標秒を ``supported``（カメラ実機の Tv メニュー、例
+    ``list_supported()["Tv"]``）— 未指定なら標準 Canon Tv — の中で最も近い値へ
+    スナップする。これによりカメラが受理できる値を保証し、キャリブレーション
+    途中で ``ValueError`` により中断するのを防ぐ。
+
+    Args:
+        tv: Base shutter-speed string. 基準シャッタースピード文字列。
+        scale: Exposure-time multiplier. 露光時間の倍率。
+        supported: Candidate Tv display strings to snap onto (the camera's
+            menu). Defaults to standard Canon Tv values.
+            スナップ先候補の Tv 表示文字列（カメラのメニュー）。既定は標準
+            Canon Tv 値。
+
+    Returns:
+        The nearest realizable shutter-speed display string.
+            最も近い実現可能なシャッタースピード表示文字列。
+    """
+    target_seconds = tv_to_seconds(tv) * float(scale)
+    candidates = list(supported) if supported else list(_STANDARD_TV_DISPLAYS)
+
+    best_display: Optional[str] = None
+    best_error = float("inf")
+    for display in candidates:
+        try:
+            seconds = tv_to_seconds(display)
+        except (ValueError, TypeError):
+            continue  # skip non-numeric entries such as "bulb"
+        error = abs(seconds - target_seconds)
+        if error < best_error:
+            best_error = error
+            best_display = display
+
+    if best_display is None:
+        return str(tv).strip()
+    return best_display
+
+
+def _frame_and_ratio(ret, nominal_scale: float) -> Tuple[np.ndarray, float]:
+    """Unpack a capture return into ``(frame, exposure_ratio)``.
+
+    撮影戻り値を ``(フレーム, 露光比)`` に分解する。
+
+    A ``capture_at_fn`` may return either a bare frame or a
+    ``(frame, actual_ratio)`` tuple. For a bare frame the nominal ``scale``
+    is used as the ratio (backward-compatible); for a tuple the *actual*
+    achieved exposure ratio is used, which matters because a camera can
+    only realize discrete shutter speeds.
+
+    ``capture_at_fn`` は素のフレーム、または ``(frame, actual_ratio)``
+    タプルを返し得る。素のフレームなら公称 ``scale`` を露光比として使い
+    （後方互換）、タプルなら実効露光比を使う。カメラは離散的な
+    シャッター速度しか実現できないため、この区別が効いてくる。
+    """
+    if isinstance(ret, tuple):
+        frame, ratio = ret
+        return np.asarray(frame, dtype=np.float32), float(ratio)
+    return np.asarray(ret, dtype=np.float32), float(nominal_scale)
 
 
 def capture_hdr_linear(
-    capture_at_fn: Callable[[float], np.ndarray],
+    capture_at_fn: Callable[[float], "np.ndarray | Tuple[np.ndarray, float]"],
     *,
     enabled: bool = False,
     trust_low: float = 10.0,
@@ -431,10 +519,21 @@ def capture_hdr_linear(
     非信頼画素を置き換え、基準露光のリニア単位でダイナミックレンジを
     拡張する（値は 1.0 を超え得る）。
 
+    Recovery divides each bracketed frame by its *actual* exposure ratio
+    (see :func:`_frame_and_ratio`), not the nominal ``scale``, so discrete
+    shutter snapping does not bias the merged values.
+
+    回復は各ブラケットフレームを公称 ``scale`` ではなく *実効* 露光比
+    （:func:`_frame_and_ratio` 参照）で割るため、離散シャッターへの
+    スナップがマージ値を偏らせない。
+
     Args:
         capture_at_fn: Callable mapping an exposure ``scale`` to a linear
-            RGB frame (H, W, 3) in [0, 1].
+            RGB frame (H, W, 3) in [0, 1], or to a ``(frame, actual_ratio)``
+            tuple when the realized exposure ratio differs from ``scale``.
             露光 ``scale`` をリニア RGB フレーム (H, W, 3)[0, 1] に写す callable。
+            実現露光比が ``scale`` と異なる場合は ``(frame, actual_ratio)``
+            タプルを返してもよい。
         enabled: Whether to bracket exposures.
             露光ブラケットを行うか。
         trust_low: Lower trustworthy bound as an 8-bit pixel value (0-255).
@@ -448,7 +547,7 @@ def capture_hdr_linear(
         Merged linear RGB frame of shape (H, W, 3).
             マージされたリニア RGB フレーム (H, W, 3)。
     """
-    base = np.asarray(capture_at_fn(1.0), dtype=np.float32)
+    base, _ = _frame_and_ratio(capture_at_fn(1.0), 1.0)
     if not enabled:
         return base
 
@@ -463,8 +562,8 @@ def capture_hdr_linear(
         if not np.any(raw >= high):
             break
         scale *= 0.5
-        raw = np.asarray(capture_at_fn(scale), dtype=np.float32)
-        recovered = raw / scale
+        raw, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
+        recovered = raw / ratio
         mask = (result >= high) & (raw <= high)
         result = np.where(mask, recovered, result)
 
@@ -475,12 +574,40 @@ def capture_hdr_linear(
         if not np.any(raw <= low):
             break
         scale *= 2.0
-        raw = np.asarray(capture_at_fn(scale), dtype=np.float32)
-        recovered = raw / scale
+        raw, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
+        recovered = raw / ratio
         mask = (result <= low) & (raw >= low)
         result = np.where(mask, recovered, result)
 
     return result.astype(np.float32)
+
+
+def _query_supported_shutter_speeds(camera_backend: Any) -> Optional[List[str]]:
+    """Return the camera's accepted Tv display strings, or ``None``.
+
+    カメラが受理する Tv 表示文字列の一覧を返す（取得不可なら ``None``）。
+
+    Uses a backend's optional ``supported_shutter_speeds()`` (no capture).
+    Falls back to ``None`` -- and thus to standard Canon Tv snapping -- for
+    backends that do not expose it or when the query fails.
+
+    バックエンドの任意メソッド ``supported_shutter_speeds()``（撮影なし）を
+    使う。非対応バックエンドや照会失敗時は ``None``（＝標準 Canon Tv への
+    スナップ）にフォールバックする。
+    """
+    getter = getattr(camera_backend, "supported_shutter_speeds", None)
+    if not callable(getter):
+        return None
+    try:
+        values = list(getter())
+    except Exception as exc:  # noqa: BLE001 - HW/SDK errors must stay non-fatal
+        print(
+            f"inverse_lut: could not query supported shutter speeds ({exc}); "
+            "falling back to standard Canon Tv values.",
+            file=sys.stderr,
+        )
+        return None
+    return values or None
 
 
 def run_calibration_capture(
@@ -536,6 +663,13 @@ def run_calibration_capture(
         )
         hdr_enabled = False
 
+    # Query the body's actual Tv menu once so bracket exposures snap onto
+    # values it accepts (prevents an EDSDK ValueError mid-calibration).
+    supported_tv = (
+        _query_supported_shutter_speeds(camera_backend) if hdr_enabled else None
+    )
+    base_seconds = tv_to_seconds(cfg.camera.tv)
+
     if show_window:
         proj = cfg.projector
         cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
@@ -543,18 +677,21 @@ def run_calibration_capture(
         cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
 
     def capture_fn(sample: CalibrationSample) -> np.ndarray:
-        def capture_at(scale: float) -> np.ndarray:
+        def capture_at(scale: float):
             if show_window:
                 bgr = cv2.cvtColor(sample.image, cv2.COLOR_RGB2BGR)
                 cv2.imshow(window_name, bgr)
                 cv2.waitKey(cfg.camera.wait_key_ms)
             if scale == 1.0:
                 return camera_backend.capture_linear_rgb()
-            # HDR bracket: rebuild the backend with a scaled shutter speed.
-            scaled_camera_cfg = replace(
-                cfg.camera, tv=scale_shutter_tv(cfg.camera.tv, scale)
-            )
-            return create_camera_backend(scaled_camera_cfg).capture_linear_rgb()
+            # HDR bracket: rebuild the backend with a scaled shutter snapped
+            # to a realizable Tv, and report the *actual* exposure ratio so
+            # the merge does not assume the nominal scale was achieved.
+            scaled_tv = scale_shutter_tv(cfg.camera.tv, scale, supported=supported_tv)
+            actual_ratio = tv_to_seconds(scaled_tv) / base_seconds
+            scaled_camera_cfg = replace(cfg.camera, tv=scaled_tv)
+            frame = create_camera_backend(scaled_camera_cfg).capture_linear_rgb()
+            return frame, actual_ratio
 
         return capture_hdr_linear(
             capture_at,
