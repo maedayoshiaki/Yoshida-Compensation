@@ -272,6 +272,38 @@ def test_capture_hdr_linear_uses_actual_exposure_ratio():
     assert abs(out[0, 0, 2] - true_val) < 1e-6
 
 
+def test_capture_hdr_linear_channels_restricts_bracketing():
+    # 単独チャンネル(青)相当: R,G は常時 ~0(黒潰れ), B は中間(問題なし)。
+    def _blue_only(scale):
+        return np.array([[[0.0, 0.0, 0.5]]], dtype=np.float32)
+
+    # channels=(2,) なら 暗い R/G は無視され、B が正常なのでブラケットしない。
+    calls = {"n": 0}
+
+    def capture_at(scale):
+        calls["n"] += 1
+        return _blue_only(scale)
+
+    out = ilut.capture_hdr_linear(
+        capture_at, enabled=True, trust_low=10, trust_high=245,
+        max_stops=3, channels=(2,),
+    )
+    assert calls["n"] == 1  # 基準撮影のみ、無駄な長露光なし
+    assert np.isclose(out[0, 0, 2], 0.5)
+
+    # channels 未指定(全ch)だと、常時暗の R/G が黒潰れループを毎回誘発する。
+    calls_all = {"n": 0}
+
+    def capture_at_all(scale):
+        calls_all["n"] += 1
+        return _blue_only(scale)
+
+    ilut.capture_hdr_linear(
+        capture_at_all, enabled=True, trust_low=10, trust_high=245, max_stops=3
+    )
+    assert calls_all["n"] > 1  # 基準 + R/G のための長露光ブラケット
+
+
 def test_tv_to_seconds_parses_canon_formats():
     assert abs(ilut.tv_to_seconds("1/125") - 0.008) < 1e-6
     assert abs(ilut.tv_to_seconds("1/15") - 1 / 15) < 1e-9

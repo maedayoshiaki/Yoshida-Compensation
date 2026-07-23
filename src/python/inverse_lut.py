@@ -580,6 +580,7 @@ def capture_hdr_linear(
     trust_low: float = 10.0,
     trust_high: float = 245.0,
     max_stops: int = 3,
+    channels: Optional[Sequence[int]] = None,
 ) -> np.ndarray:
     """Capture a linear frame, optionally via simple exposure-bracket HDR.
 
@@ -625,6 +626,15 @@ def capture_hdr_linear(
             信頼上限（8bit画素値 0〜255）。
         max_stops: Max exposure stops to bracket in each direction.
             各方向にブラケットする最大露光段数。
+        channels: Channels to consider when deciding whether to bracket and
+            which values to recover. Defaults to all channels. For
+            single-channel calibration ramps pass the recorded channel(s) so
+            the always-dark non-projected channels do not force needless
+            long-exposure brackets, and only the measured channel is merged.
+            ブラケット要否の判定と回復対象にするチャンネル。既定は全チャンネル。
+            単独チャンネルランプでは記録チャンネルを渡すことで、投影していない
+            常時暗のチャンネルが不要な長露光ブラケットを誘発するのを防ぎ、
+            測定対象のチャンネルだけをマージする。
 
     Returns:
         Merged linear RGB frame of shape (H, W, 3).
@@ -638,28 +648,38 @@ def capture_hdr_linear(
     high = float(trust_high) / 255.0
     result = base.copy()
 
+    # Restrict bracketing/recovery to the requested channels (default: all).
+    # A per-channel gate broadcast over the last axis, so the always-dark
+    # non-projected channels of a single-channel ramp never trigger a bracket.
+    channel_gate = np.zeros(base.shape[-1], dtype=bool)
+    if channels is None:
+        channel_gate[:] = True
+    else:
+        for c in channels:
+            channel_gate[int(c)] = True
+
     # Saturated pixels: shorten exposure until they come below trust_high.
     scale = 1.0
     raw = base
     for _ in range(int(max_stops)):
-        if not np.any(raw >= high):
+        if not np.any((raw >= high) & channel_gate):
             break
         scale *= 0.5
         raw, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
         recovered = raw / ratio
-        mask = (result >= high) & (raw <= high)
+        mask = (result >= high) & (raw <= high) & channel_gate
         result = np.where(mask, recovered, result)
 
     # Crushed pixels: lengthen exposure until they rise above trust_low.
     scale = 1.0
     raw = base
     for _ in range(int(max_stops)):
-        if not np.any(raw <= low):
+        if not np.any((raw <= low) & channel_gate):
             break
         scale *= 2.0
         raw, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
         recovered = raw / ratio
-        mask = (result <= low) & (raw >= low)
+        mask = (result <= low) & (raw >= low) & channel_gate
         result = np.where(mask, recovered, result)
 
     return result.astype(np.float32)
@@ -909,6 +929,10 @@ def run_calibration_capture(
             trust_low=ilut_cfg.trust_low,
             trust_high=ilut_cfg.trust_high,
             max_stops=ilut_cfg.hdr_max_stops,
+            # Only bracket for the channel(s) this sample records, so the
+            # always-dark non-projected channels of a channel ramp don't force
+            # useless long-exposure brackets.
+            channels=sample.recorded_channels,
         )
         if debug:
             mean = np.asarray(merged, dtype=np.float32).reshape(-1, 3).mean(axis=0)
