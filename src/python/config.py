@@ -90,6 +90,13 @@ class CameraConfig:
             OpenCV バックエンドで使用するカメラインデックス。
         wait_key_ms: Delay in milliseconds between projecting a pattern and capturing.
             パターン投影からキャプチャまでの待機時間（ミリ秒）。
+        half_size: Develop the Canon RAW at half resolution (~1/4 the memory).
+            Essential on low-RAM machines; the ROI-mean measurement is
+            unaffected, but ROI coordinates must then be in half-res pixels.
+            Only affects ``canon_edsdk`` ``capture_linear_rgb``.
+            Canon RAW を半解像度で現像（メモリ約1/4）。低RAM機で必須。ROI平均の
+            計測は不変だが、ROI座標は半解像度ピクセルで指定する必要がある。
+            ``canon_edsdk`` の ``capture_linear_rgb`` のみに影響。
 
     カメラデバイスの設定。
     """
@@ -101,6 +108,7 @@ class CameraConfig:
     image_quality: str = "LR"
     device_index: int = 0
     wait_key_ms: int = 200
+    half_size: bool = False
 
 
 @dataclass(frozen=True)

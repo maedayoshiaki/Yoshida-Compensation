@@ -86,7 +86,7 @@ def test_capture_linear_rgb_converts_jpeg_output_to_linear(monkeypatch) -> None:
         "validate": True,
         "tolerate_not_supported": True,
     }
-    assert captured["raw_processor"] is _raw_to_linear_rgb
+    assert callable(captured["raw_processor"])
     assert linear_rgb.dtype == np.float32
     assert np.isclose(linear_rgb[0, 0, 0], 1.0)
     assert np.isclose(linear_rgb[0, 0, 1], _srgb_to_linear(128 / 255.0))

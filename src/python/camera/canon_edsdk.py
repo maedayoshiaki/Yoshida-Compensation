@@ -74,10 +74,12 @@ def _normalize_capture_output(image: np.ndarray, image_quality: str) -> np.ndarr
     if not _image_quality_looks_raw(image_quality):
         normalized = _srgb_to_linear(normalized)
 
-    return np.clip(normalized, 0.0, 1.0).astype(np.float32, copy=False)
+    normalized = np.ascontiguousarray(normalized, dtype=np.float32)
+    np.clip(normalized, 0.0, 1.0, out=normalized)  # in-place: avoid a full-frame copy
+    return normalized
 
 
-def _raw_to_linear_rgb(raw_bytes: bytes) -> np.ndarray:
+def _raw_to_linear_rgb(raw_bytes: bytes, half_size: bool = False) -> np.ndarray:
     """Convert RAW bytes to normalized linear RGB.
 
     Args:
@@ -119,6 +121,7 @@ def _raw_to_linear_rgb(raw_bytes: bytes) -> np.ndarray:
                 use_auto_wb=False,
                 no_auto_scale=False,
                 user_sat=None,
+                half_size=half_size,
             )
     except Exception as exc:
         raise CameraCaptureError(
@@ -127,7 +130,14 @@ def _raw_to_linear_rgb(raw_bytes: bytes) -> np.ndarray:
 
     if rgb is None:
         raise CameraCaptureError("RAW conversion failed for canon_edsdk backend.")
-    return np.clip(rgb.astype(np.float32) / 65535.0, 0.0, 1.0)
+    # In-place scale + clip to keep peak memory low: a 32 MP frame is ~390 MB
+    # as float32, and separate ``/`` and ``np.clip`` calls would each allocate
+    # another ~390 MB (~1 GB peak), which OOMs on low-RAM machines.
+    out = rgb.astype(np.float32)
+    del rgb
+    out /= 65535.0
+    np.clip(out, 0.0, 1.0, out=out)
+    return out
 
 
 def capture_srgb_uint8(camera_controller, image_quality: str) -> np.ndarray:
@@ -215,7 +225,13 @@ class CanonEdsdkCamera(CameraBackend):
             controller.set_properties(
                 tv=tv, validate=True, tolerate_not_supported=True
             )
-        images = controller.capture_numpy(raw_processor=_raw_to_linear_rgb)
+        # ``half_size`` develops the RAW at half resolution (~1/4 the memory),
+        # essential on low-RAM machines. The measurement (ROI mean of solid
+        # patterns) is unaffected; the ROI must be set in capture-resolution px.
+        half = bool(getattr(self.config, "half_size", False))
+        images = controller.capture_numpy(
+            raw_processor=lambda rb: _raw_to_linear_rgb(rb, half_size=half)
+        )
         if not images or images[0] is None:
             raise CameraCaptureError("No image returned from canon_edsdk backend.")
         return _normalize_capture_output(images[0], self.config.image_quality)
