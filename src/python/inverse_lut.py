@@ -437,6 +437,12 @@ def is_flicker_free(tv: str, refresh_hz: Optional[float], tol: float = 0.03) -> 
     """
     if not refresh_hz or refresh_hz <= 0:
         return True
+    # Canon 1/3-stop menu entries (e.g. '1/6 (1/3)') display a rounded nominal
+    # fraction whose ACTUAL exposure differs (1/6 shown, ~1/6.35 s real), so we
+    # cannot trust them to be an exact refresh multiple -- exclude them and use
+    # only clean, un-annotated shutter speeds.
+    if "(" in str(tv):
+        return False
     try:
         cycles = tv_to_seconds(tv) * float(refresh_hz)
     except (ValueError, TypeError):
@@ -694,6 +700,7 @@ def run_calibration_capture(
     camera_backend=None,
     show_window: bool = True,
     window_name: str = "inverse_lut_calibration",
+    debug_dir: Optional[str] = None,
 ) -> CalibrationData:
     """Project each pattern and capture its linear response.
 
@@ -717,6 +724,11 @@ def run_calibration_capture(
             with mocked ``cv2``).
             投影ウィンドウを開くか（テストではモック cv2 で無効化）。
         window_name: OpenCV window name. OpenCV ウィンドウ名。
+        debug_dir: If set, save every captured ROI crop -- each pre-HDR
+            exposure and the post-HDR merged result -- as PNGs, plus a
+            ``captures.csv`` of ROI-mean values per stage, for debugging.
+            設定すると、撮影した ROI クロップ（各露光=HDR前、及びHDRマージ後）を
+            PNG 保存し、各段の ROI 平均値を ``captures.csv`` に残す（デバッグ用）。
 
     Returns:
         A :class:`CalibrationData` with the recorded measurements.
@@ -776,14 +788,91 @@ def run_calibration_capture(
         ilut_cfg.roi_height,
     )
 
+    # Debug: save every capture (each pre-HDR exposure + the post-HDR merge).
+    # Work on the ROI crop (not the (1,1,3) mean) so both are viewable images;
+    # the crop is small enough (~tens of MB) that the HDR merge stays in memory.
+    debug = debug_dir is not None
+    debug_state = {"idx": 0, "rows": []}
+    debug_path = Path(debug_dir) if debug_dir is not None else None
+    if debug_path is not None:
+        debug_path.mkdir(parents=True, exist_ok=True)
+
+    def _roi_crop(frame: np.ndarray) -> np.ndarray:
+        """Return a COPY of the frame's ROI rectangle (whole frame if unset).
+
+        A copy (not a slice view) is essential: a view keeps the whole ~390 MB
+        capture alive, and holding several across the HDR merge exhausts memory.
+        """
+        frame = np.asarray(frame, dtype=np.float32)
+        height, width = frame.shape[:2]
+        x, y, rw, rh = roi
+        if rw > 0 and rh > 0:
+            x0 = max(0, min(int(x), width))
+            y0 = max(0, min(int(y), height))
+            x1 = max(x0, min(int(x) + int(rw), width))
+            y1 = max(y0, min(int(y) + int(rh), height))
+            crop = frame[y0:y1, x0:x1, :3]
+            if crop.size > 0:
+                return crop.copy()
+        return frame[:, :, :3].copy()
+
+    def _save_crop(crop: np.ndarray, name: str) -> str:
+        # Save an 8-bit PNG (viewable) and return its path. Disk-backed on
+        # purpose: this machine cannot hold many full-res crops in RAM, so we
+        # write each capture out and read it back only when merging.
+        assert debug_path is not None
+        path = debug_path / f"{name}.png"
+        img = np.clip(np.asarray(crop, dtype=np.float32), 0.0, 1.0)
+        bgr = cv2.cvtColor((img * 255.0).round().astype(np.uint8), cv2.COLOR_RGB2BGR)
+        cv2.imwrite(str(path), bgr)
+        return str(path)
+
+    def _load_crop(path: str) -> np.ndarray:
+        bgr = cv2.imread(path, cv2.IMREAD_COLOR)
+        if bgr is None:
+            raise RuntimeError(f"Failed to read back debug crop: {path}")
+        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        return rgb.astype(np.float32) / 255.0
+
+    def _merge_saved_crops(exposures, low: float, high: float) -> np.ndarray:
+        # Re-merge the saved full-res crops (read from disk, one at a time) into
+        # a post-HDR image. Runs after a pattern's captures, when no RAW develop
+        # is in flight, so peak memory is only a few crops. The measurement
+        # itself uses the exact mean-HDR below -- this is for a viewable image.
+        result = _load_crop(exposures[0][0])
+        for path, ratio in exposures[1:]:
+            crop = _load_crop(path)
+            recovered = crop / ratio
+            if ratio < 1.0:  # shorter exposure recovers highlights
+                mask = (result >= high) & (crop <= high)
+            else:  # longer exposure recovers shadows
+                mask = (result <= low) & (crop >= low)
+            result = np.where(mask, recovered, result)
+        return result
+
     def capture_fn(sample: CalibrationSample) -> np.ndarray:
-        def _reduced(frame: np.ndarray) -> np.ndarray:
-            # Reduce each exposure to its ROI mean (as a (1, 1, 3) frame)
-            # BEFORE the HDR merge. The merge then holds only tiny arrays;
-            # keeping full-resolution frames (e.g. 4660x6984x3 ~= 390 MB)
-            # across bracket copies exhausts memory. This is correct for the
-            # solid calibration patterns: the measurement IS the ROI mean, so
-            # HDR extends the dynamic range of exactly that measured quantity.
+        tag = ""
+        exp = {"n": 0}
+        exposures: list = []  # (png_path, ratio) per exposure, base ratio 1.0
+        if debug:
+            r, g, b = (int(round(v * 255)) for v in sample.input_rgb)
+            tag = f"{debug_state['idx']:02d}_{sample.kind}_r{r:03d}g{g:03d}b{b:03d}"
+
+        def _prepare(frame: np.ndarray, tv_label: str, ratio: float) -> np.ndarray:
+            # Always reduce to the ROI mean (1,1,3) for the in-memory HDR merge
+            # -- that is the exact measurement and stays memory-light. In debug
+            # also save the full-res crop to disk for later image inspection.
+            if debug:
+                crop = _roi_crop(frame)  # full-res copy (frees the 390 MB frame)
+                safe_tv = tv_label.replace("/", "-").replace('"', "s").replace(" ", "")
+                path = _save_crop(crop, f"{tag}_pre{exp['n']:02d}_tv{safe_tv}")
+                exposures.append((path, float(ratio)))
+                mean = crop.reshape(-1, 3).mean(axis=0)
+                debug_state["rows"].append(
+                    (tag, f"pre:{tv_label}", *[float(x) for x in mean])
+                )
+                exp["n"] += 1
+                return mean.reshape(1, 1, 3).astype(np.float32)
             return reduce_frame(frame, roi).reshape(1, 1, 3)
 
         def capture_at(scale: float):
@@ -792,29 +881,45 @@ def run_calibration_capture(
                 cv2.imshow(window_name, bgr)
                 cv2.waitKey(cfg.camera.wait_key_ms)
             if not hdr_enabled:
-                return _reduced(camera_backend.capture_linear_rgb())
+                return _prepare(camera_backend.capture_linear_rgb(), base_tv, 1.0)
             # HDR bracket (Canon only): set the shutter explicitly per shot on
             # the persistent session -- base tv for the reference exposure, a
             # snapped realizable Tv for brackets -- and report the *actual*
             # exposure ratio so the merge does not assume the nominal scale.
             if scale == 1.0:
-                return _reduced(camera_backend.capture_linear_rgb(tv=base_tv))
+                return _prepare(
+                    camera_backend.capture_linear_rgb(tv=base_tv), base_tv, 1.0
+                )
             scaled_tv = scale_shutter_tv(
                 base_tv, scale, supported=supported_tv, refresh_hz=refresh_hz
             )
             actual_ratio = tv_to_seconds(scaled_tv) / base_seconds
             return (
-                _reduced(camera_backend.capture_linear_rgb(tv=scaled_tv)),
+                _prepare(
+                    camera_backend.capture_linear_rgb(tv=scaled_tv),
+                    scaled_tv,
+                    actual_ratio,
+                ),
                 actual_ratio,
             )
 
-        return capture_hdr_linear(
+        merged = capture_hdr_linear(
             capture_at,
             enabled=hdr_enabled,
             trust_low=ilut_cfg.trust_low,
             trust_high=ilut_cfg.trust_high,
             max_stops=ilut_cfg.hdr_max_stops,
         )
+        if debug:
+            mean = np.asarray(merged, dtype=np.float32).reshape(-1, 3).mean(axis=0)
+            debug_state["rows"].append((tag, "post_hdr", *[float(x) for x in mean]))
+            # Build a viewable full-res post-HDR image from the saved crops.
+            post = _merge_saved_crops(
+                exposures, ilut_cfg.trust_low / 255.0, ilut_cfg.trust_high / 255.0
+            )
+            _save_crop(post, f"{tag}_HDR")
+            debug_state["idx"] += 1
+        return merged
 
     with session_cm:
         # Query the body's actual Tv menu once (reusing the open session) so
@@ -833,6 +938,19 @@ def run_calibration_capture(
         finally:
             if show_window:
                 cv2.destroyWindow(window_name)
+
+    if debug_path is not None:
+        csv_lines = ["pattern,stage,roi_R,roi_G,roi_B"]
+        csv_lines += [
+            f"{tag},{stage},{r:.6f},{g:.6f},{b:.6f}"
+            for tag, stage, r, g, b in debug_state["rows"]
+        ]
+        (debug_path / "captures.csv").write_text("\n".join(csv_lines), encoding="utf-8")
+        print(
+            f"inverse_lut: saved {debug_state['idx']} patterns "
+            f"({len(debug_state['rows'])} captures) to {debug_path}",
+            file=sys.stderr,
+        )
 
     data.meta["source"] = ilut_cfg.source
     data.meta["hdr_enabled"] = hdr_enabled

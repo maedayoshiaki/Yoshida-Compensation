@@ -222,3 +222,5 @@ data/**/*.tiff
 # VSCode (local editor settings)
 .vscode/settings.json
 *.npz
+*.CR2
+*.CR3

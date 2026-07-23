@@ -122,29 +122,42 @@ def measure_modes(
     lut: Optional[InverseLut] = None,
     ref_gamma: float = 2.2,
     modes: Sequence[str] = MODES,
+    per_channel: bool = False,
 ) -> Dict[str, np.ndarray]:
-    """Project and measure a gray ramp under each correction mode.
+    """Project and measure a ramp under each correction mode.
 
-    各補正条件でグレーランプを投影・計測する。
+    各補正条件でランプを投影・計測する。
+
+    With ``per_channel=False`` (default) a gray ramp ``(v, v, v)`` is
+    projected and all three camera channels recorded. With
+    ``per_channel=True`` each channel is driven ALONE -- ``(v, 0, 0)`` /
+    ``(0, v, 0)`` / ``(0, 0, v)`` -- and only the projected channel is
+    recorded, matching how the ``channel_ramp`` LUT was calibrated (no
+    cross-channel interaction).
+
+    ``per_channel=False``（既定）はグレーランプ ``(v, v, v)`` を投影し
+    3チャンネルを記録。``per_channel=True`` は各チャンネルを単独駆動
+    （``(v, 0, 0)`` 等）し投影chのみ記録（``channel_ramp`` LUT の校正方法と
+    一致、チャンネル間相互作用なし）。
 
     Args:
         levels: Input levels in [0, 1], shape (N,).
             入力レベル（[0, 1]）、形状 (N,)。
         capture_fn: Callable that projects a solid projector-input color
-            (8-bit, shape (3,)) and returns the measured linear RGB
-            (shape (3,)).
-            プロジェクタ入力色（8bit, (3,)）の単色を投影し、計測リニア RGB
-            （(3,)）を返す callable。
+            (8-bit, shape (3,)) and returns the measured linear RGB (3,).
+            プロジェクタ入力色（8bit,(3,)）の単色を投影し計測リニアRGB(3,)を返す。
         lut: The measured inverse LUT (required for the ``inverse_lut`` mode).
             測定済み逆LUT（``inverse_lut`` モードで必須）。
         ref_gamma: Projector gamma for the analytic reference.
             解析的参照のプロジェクタガンマ。
         modes: Modes to measure. Missing prerequisites are skipped.
             計測する条件。前提が欠ける条件はスキップ。
+        per_channel: Drive each channel alone (see above).
+            各チャンネルを単独駆動するか（上記参照）。
 
     Returns:
-        Mapping ``mode -> measured array (N, 3)`` of linear RGB.
-            ``条件 -> 計測配列 (N, 3)``（リニア RGB）の辞書。
+        Mapping ``mode -> measured array (N, 3)``.
+            ``条件 -> 計測配列 (N, 3)`` の辞書。
     """
     results: Dict[str, np.ndarray] = {}
     for mode in modes:
@@ -153,10 +166,18 @@ def measure_modes(
         measured = np.zeros((len(levels), 3), dtype=np.float64)
         for i, level in enumerate(levels):
             value = int(round(float(level) * 255.0))
-            projector_pixel = corrected_projector_pixel(
-                (value, value, value), mode, lut, ref_gamma
-            )
-            measured[i] = np.asarray(capture_fn(projector_pixel), dtype=np.float64).reshape(3)
+            if per_channel:
+                for channel in range(3):
+                    level_rgb = [0, 0, 0]
+                    level_rgb[channel] = value
+                    px = corrected_projector_pixel(level_rgb, mode, lut, ref_gamma)
+                    m = np.asarray(capture_fn(px), dtype=np.float64).reshape(3)
+                    measured[i, channel] = m[channel]
+            else:
+                px = corrected_projector_pixel(
+                    (value, value, value), mode, lut, ref_gamma
+                )
+                measured[i] = np.asarray(capture_fn(px), dtype=np.float64).reshape(3)
         results[mode] = measured
     return results
 
@@ -359,12 +380,13 @@ def main(argv: Optional[List[str]] = None) -> None:
         raise SystemExit(1)
 
     no_plot = "--no-plot" in clean_argv
-    clean_argv = [a for a in clean_argv if a != "--no-plot"]
+    per_channel = "--per-channel" in clean_argv
+    clean_argv = [a for a in clean_argv if a not in ("--no-plot", "--per-channel")]
     if len(clean_argv) != 1:
         print(
             "Usage: python examples/python/validate_inverse_lut.py "
             "[--config <config.toml>] [--lut <lut.npz>] [--num-levels <n>] "
-            "[--ref-gamma <g>] [--out-prefix <path>] [--no-plot]"
+            "[--ref-gamma <g>] [--out-prefix <path>] [--no-plot] [--per-channel]"
         )
         raise SystemExit(1)
 
@@ -388,9 +410,10 @@ def main(argv: Optional[List[str]] = None) -> None:
     out_prefix = out_prefix_arg or "data/inverse_lut_validation"
     levels = ramp_levels(num_levels)
 
+    projection = "per-channel (v,0,0)/(0,v,0)/(0,0,v)" if per_channel else "gray (v,v,v)"
     print(
         f"Validating inverse LUT (source={lut.meta.get('source')}) with "
-        f"{num_levels} levels; ref gamma={ref_gamma:g}."
+        f"{num_levels} levels; ref gamma={ref_gamma:g}; projection={projection}."
     )
 
     # Snap the shutter to a flicker-free value (integer multiple of the
@@ -421,7 +444,10 @@ def main(argv: Optional[List[str]] = None) -> None:
         cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
         try:
             capture_fn = _make_real_capture_fn(cfg, camera_backend, window_name)
-            results = measure_modes(levels, capture_fn, lut=lut, ref_gamma=ref_gamma)
+            results = measure_modes(
+                levels, capture_fn, lut=lut, ref_gamma=ref_gamma,
+                per_channel=per_channel,
+            )
         finally:
             cv2.destroyWindow(window_name)
 

@@ -284,9 +284,10 @@ def test_tv_to_seconds_parses_canon_formats():
     assert abs(ilut.tv_to_seconds("1/10 (1/3)") - 0.1) < 1e-9
     assert abs(ilut.tv_to_seconds("1/6 (1/3)") - 1 / 6) < 1e-9
     assert ilut.tv_to_seconds('0"3 (1/3)') == 0.3
-    # annotated third-stops are flicker-free at 60Hz (multiples of 1/60)
-    assert ilut.is_flicker_free("1/10 (1/3)", 60.0)  # 0.1s = 6/60
-    assert ilut.is_flicker_free("1/6 (1/3)", 60.0)   # 1/6s = 10/60
+    # Canon 1/3-stop annotated entries are EXCLUDED from flicker-free (their
+    # displayed fraction is rounded; the real exposure isn't an exact multiple).
+    assert not ilut.is_flicker_free("1/10 (1/3)", 60.0)
+    assert not ilut.is_flicker_free("1/6 (1/3)", 60.0)
 
 
 def test_scale_shutter_tv():

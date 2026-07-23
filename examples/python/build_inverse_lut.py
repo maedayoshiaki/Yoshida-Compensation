@@ -65,6 +65,7 @@ def main(argv: list[str] | None = None) -> None:
         clean_argv, config_path = split_cli_config_path(argv)
         clean_argv, load_path = _split_flag(clean_argv, "--load")
         clean_argv, apply_path = _split_flag(clean_argv, "--apply")
+        clean_argv, debug_dir = _split_flag(clean_argv, "--debug-dir")
     except ValueError as exc:
         print(f"Invalid CLI arguments: {exc}")
         raise SystemExit(1)
@@ -72,7 +73,8 @@ def main(argv: list[str] | None = None) -> None:
     if len(clean_argv) != 1:
         print(
             "Usage: python examples/python/build_inverse_lut.py "
-            "[--config <config.toml>] [--load <lut.npz>] [--apply <image>]"
+            "[--config <config.toml>] [--load <lut.npz>] [--apply <image>] "
+            "[--debug-dir <dir>]"
         )
         raise SystemExit(1)
 
@@ -96,7 +98,7 @@ def main(argv: list[str] | None = None) -> None:
             f"Projecting {len(samples)} calibration patterns "
             f"(source={ilut_cfg.source})..."
         )
-        data = ilut.run_calibration_capture(samples)
+        data = ilut.run_calibration_capture(samples, debug_dir=debug_dir)
         lut = ilut.build_inverse_lut(data, source=ilut_cfg.source)
         out_path = ilut.save_inverse_lut(ilut_cfg.inverse_lut_path, lut)
         print(f"Saved inverse LUT to: {out_path}")
