@@ -375,6 +375,7 @@ def main(argv: Optional[List[str]] = None) -> None:
         clean_argv, levels_arg = _split_flag(clean_argv, "--num-levels")
         clean_argv, gamma_arg = _split_flag(clean_argv, "--ref-gamma")
         clean_argv, out_prefix_arg = _split_flag(clean_argv, "--out-prefix")
+        clean_argv, tv_arg = _split_flag(clean_argv, "--tv")
     except ValueError as exc:
         print(f"Invalid CLI arguments: {exc}")
         raise SystemExit(1)
@@ -386,7 +387,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         print(
             "Usage: python examples/python/validate_inverse_lut.py "
             "[--config <config.toml>] [--lut <lut.npz>] [--num-levels <n>] "
-            "[--ref-gamma <g>] [--out-prefix <path>] [--no-plot] [--per-channel]"
+            "[--ref-gamma <g>] [--out-prefix <path>] [--tv <shutter>] "
+            "[--no-plot] [--per-channel]"
         )
         raise SystemExit(1)
 
@@ -418,13 +420,17 @@ def main(argv: Optional[List[str]] = None) -> None:
 
     # Snap the shutter to a flicker-free value (integer multiple of the
     # projector refresh period) so captures don't show flicker/banding.
+    # Capture exposure: default to config tv, but --tv can override it (e.g. a
+    # faster shutter so bright projections don't clip during validation, since
+    # this single-exposure capture has no HDR).
+    base_tv = tv_arg if tv_arg is not None else cfg.camera.tv
     refresh_hz = float(getattr(cfg.projector, "refresh_rate", 0.0) or 0.0)
-    cam_cfg = cfg.camera
+    cam_cfg = replace(cfg.camera, tv=base_tv)
     if refresh_hz > 0:
-        ff_tv = snap_to_flicker_free_tv(cfg.camera.tv, refresh_hz=refresh_hz)
-        if ff_tv != cfg.camera.tv:
+        ff_tv = snap_to_flicker_free_tv(base_tv, refresh_hz=refresh_hz)
+        if ff_tv != base_tv:
             print(
-                f"validate_inverse_lut: shutter {cfg.camera.tv!r} is not a multiple "
+                f"validate_inverse_lut: shutter {base_tv!r} is not a multiple "
                 f"of the {refresh_hz:g}Hz projector refresh; using {ff_tv!r}.",
                 file=sys.stderr,
             )
