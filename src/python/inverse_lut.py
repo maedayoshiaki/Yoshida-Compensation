@@ -121,6 +121,42 @@ class InverseLut:
 # ── Pattern generation ───────────────────────────────────────────────
 
 
+VALID_SOURCES: Tuple[str, ...] = ("channel_ramp", "gray")
+"""Allowed sampling methods. Exactly one is used per run; never mixed.
+
+許容されるサンプリング系統。1 回の実行で一方のみ使用し、混在させない。
+"""
+
+
+def normalize_source(source: str) -> str:
+    """Validate and normalize a sampling-method name.
+
+    サンプリング系統名を検証・正規化する。
+
+    Args:
+        source: Sampling method, "channel_ramp" or "gray".
+            サンプリング系統。"channel_ramp" または "gray"。
+
+    Returns:
+        The lowercased, stripped source name.
+            小文字化・トリム済みの系統名。
+
+    Raises:
+        ValueError: If ``source`` is not one of :data:`VALID_SOURCES`
+            (e.g. the removed "both").
+            ``source`` が :data:`VALID_SOURCES` にない場合（廃止された
+            "both" など）。
+    """
+    normalized = str(source).strip().lower()
+    if normalized not in VALID_SOURCES:
+        raise ValueError(
+            f"Invalid source {source!r}. Expected one of {VALID_SOURCES} "
+            "(the two sampling methods are mutually exclusive; 'both' is no "
+            "longer supported)."
+        )
+    return normalized
+
+
 def _make_solid_image(
     rgb01: Sequence[float],
     x_size: int,
@@ -150,47 +186,58 @@ def generate_calibration_patterns(
     x_size: int,
     y_size: int,
     num_levels: Optional[int] = None,
-    include_gray: bool = True,
-    include_channel_ramps: bool = True,
+    source: Optional[str] = None,
     dtype: np.typing.DTypeLike = np.uint8,
 ) -> List[CalibrationSample]:
-    """Generate gray and per-channel calibration ramp patterns.
+    """Generate calibration ramp patterns for a single sampling method.
 
-    Produce a gray ramp ``(v, v, v)`` (recording all three camera
-    channels) and per-channel ramps ``(v, 0, 0)`` / ``(0, v, 0)`` /
-    ``(0, 0, v)`` (each recording only the projecting channel), sampled
-    at ``num_levels`` equally spaced levels in [0, 1].
+    Depending on ``source``, produce **either** a gray ramp ``(v, v, v)``
+    (recording all three camera channels) **or** per-channel ramps
+    ``(v, 0, 0)`` / ``(0, v, 0)`` / ``(0, 0, v)`` (each recording only the
+    projecting channel), sampled at ``num_levels`` equally spaced levels in
+    [0, 1]. Only one method is generated so the build sees a single,
+    self-consistent set of observations per channel (the two methods are
+    never mixed, which would make the inverse-curve fit inconsistent).
 
-    グレーランプと各チャンネル単独ランプのキャリブレーションパターンを生成する。
+    単一のサンプリング系統のキャリブレーションパターンを生成する。
 
-    グレーランプ ``(v, v, v)``（カメラ 3 チャンネルすべてを記録）と、
-    各チャンネル単独ランプ ``(v, 0, 0)`` / ``(0, v, 0)`` / ``(0, 0, v)``
-    （投影しているチャンネルのみ記録）を、[0, 1] 等間隔の
-    ``num_levels`` レベルで生成する。
+    ``source`` に応じて、グレーランプ ``(v, v, v)``（カメラ 3 チャンネル
+    すべてを記録）**または** 各チャンネル単独ランプ ``(v, 0, 0)`` /
+    ``(0, v, 0)`` / ``(0, 0, v)``（投影しているチャンネルのみ記録）の
+    **どちらか一方**を、[0, 1] 等間隔の ``num_levels`` レベルで生成する。
+    一方の系統のみを生成するため、構築時にチャンネルごとの観測が一貫する
+    （両系統を混ぜると逆曲線フィットが不整合になるため混在させない）。
 
     Args:
         x_size: Pattern width in pixels. パターン幅（ピクセル）。
         y_size: Pattern height in pixels. パターン高さ（ピクセル）。
         num_levels: Number of levels per ramp. Default from config.
             各ランプのレベル数。既定は設定から。
-        include_gray: Whether to include the gray ramp.
-            グレーランプを含めるか。
-        include_channel_ramps: Whether to include per-channel ramps.
-            各チャンネル単独ランプを含めるか。
+        source: Sampling method, "channel_ramp" or "gray". Default from config.
+            サンプリング系統。"channel_ramp" または "gray"。既定は設定から。
         dtype: Output image dtype (uint8/uint16/float32).
             出力画像の dtype（uint8/uint16/float32）。
 
     Returns:
-        List of :class:`CalibrationSample`.
-            :class:`CalibrationSample` のリスト。
+        List of :class:`CalibrationSample` for the selected method.
+            選択した系統の :class:`CalibrationSample` のリスト。
+
+    Raises:
+        ValueError: If ``source`` is not one of :data:`VALID_SOURCES`.
+            ``source`` が :data:`VALID_SOURCES` にない場合。
     """
-    if num_levels is None:
-        num_levels = get_config().inverse_lut.num_levels
+    if num_levels is None or source is None:
+        cfg = get_config().inverse_lut
+        if num_levels is None:
+            num_levels = cfg.num_levels
+        if source is None:
+            source = cfg.source
+    source = normalize_source(source)
     num_levels = max(2, int(num_levels))
     levels = np.linspace(0.0, 1.0, num_levels)
 
     samples: List[CalibrationSample] = []
-    if include_gray:
+    if source == "gray":
         for v in levels:
             rgb = (float(v), float(v), float(v))
             samples.append(
@@ -201,7 +248,7 @@ def generate_calibration_patterns(
                     recorded_channels=(0, 1, 2),
                 )
             )
-    if include_channel_ramps:
+    else:  # "channel_ramp"
         for channel in range(3):
             for v in levels:
                 rgb_list = [0.0, 0.0, 0.0]
@@ -221,16 +268,24 @@ def generate_calibration_patterns(
 # ── Measurement / reduction ──────────────────────────────────────────
 
 
-def reduce_frame(frame: np.ndarray, reference_region: float = 0.2) -> np.ndarray:
-    """Average the central region of a captured frame into one RGB value.
+def reduce_frame(
+    frame: np.ndarray,
+    roi: Optional[Tuple[int, int, int, int]] = None,
+) -> np.ndarray:
+    """Average a rectangular ROI of a captured frame into one RGB value.
 
-    撮影フレームの中央領域を平均し、1組の RGB 値に集約する。
+    撮影フレームの矩形 ROI を平均し、1組の RGB 値に集約する。
 
     Args:
         frame: Linear RGB frame of shape (H, W, 3).
             形状 (H, W, 3) のリニア RGB フレーム。
-        reference_region: Central fraction to average (0.0-1.0).
-            平均する中央領域の割合（0.0〜1.0）。
+        roi: Region of interest as ``(x, y, width, height)`` in pixels.
+            ``None`` (or a non-positive ``width``/``height``) averages the
+            whole frame. The rectangle is clipped to the frame bounds; a
+            fully out-of-bounds ROI falls back to the whole frame.
+            関心領域 ``(x, y, width, height)``（ピクセル）。``None``（または
+            ``width``/``height`` が非正）なら全フレームを平均。矩形はフレーム
+            境界にクリップし、完全に範囲外なら全フレームにフォールバックする。
 
     Returns:
         Mean RGB value of shape (3,), dtype float32.
@@ -238,19 +293,25 @@ def reduce_frame(frame: np.ndarray, reference_region: float = 0.2) -> np.ndarray
     """
     frame = np.asarray(frame, dtype=np.float32)
     height, width = frame.shape[:2]
-    fraction = float(np.clip(reference_region, 0.0, 1.0))
-    region_h = max(1, int(round(height * fraction)))
-    region_w = max(1, int(round(width * fraction)))
-    y0 = (height - region_h) // 2
-    x0 = (width - region_w) // 2
-    patch = frame[y0 : y0 + region_h, x0 : x0 + region_w, :3]
+
+    patch = frame[:, :, :3]
+    if roi is not None:
+        x, y, w, h = int(roi[0]), int(roi[1]), int(roi[2]), int(roi[3])
+        if w > 0 and h > 0:
+            x0 = max(0, min(x, width))
+            y0 = max(0, min(y, height))
+            x1 = max(x0, min(x + w, width))
+            y1 = max(y0, min(y + h, height))
+            candidate = frame[y0:y1, x0:x1, :3]
+            if candidate.size > 0:
+                patch = candidate
     return patch.reshape(-1, 3).mean(axis=0).astype(np.float32)
 
 
 def measure_calibration_samples(
     samples: Sequence[CalibrationSample],
     capture_fn: Callable[[CalibrationSample], np.ndarray],
-    reference_region: float = 0.2,
+    roi: Optional[Tuple[int, int, int, int]] = None,
 ) -> CalibrationData:
     """Capture each sample once (dedup by input) and record measurements.
 
@@ -262,8 +323,10 @@ def measure_calibration_samples(
         capture_fn: Callable returning a linear RGB frame (H, W, 3) in
             [0, 1] for a given sample.
             サンプルに対しリニア RGB フレーム (H, W, 3)[0, 1] を返す callable。
-        reference_region: Central fraction averaged per capture.
-            撮影ごとに平均する中央領域の割合。
+        roi: Measurement ROI ``(x, y, width, height)`` in pixels averaged per
+            capture. ``None`` averages the whole frame. See :func:`reduce_frame`.
+            撮影ごとに平均する計測 ROI ``(x, y, width, height)``（ピクセル）。
+            ``None`` は全フレーム平均。:func:`reduce_frame` を参照。
 
     Returns:
         A :class:`CalibrationData` with one measurement per sample.
@@ -275,7 +338,7 @@ def measure_calibration_samples(
         key = tuple(round(float(v), 6) for v in sample.input_rgb)
         if key not in cache:
             frame = capture_fn(sample)
-            cache[key] = reduce_frame(frame, reference_region)
+            cache[key] = reduce_frame(frame, roi)
         mean = cache[key]
         measured = np.full(3, np.nan, dtype=np.float32)
         for channel in sample.recorded_channels:
@@ -292,7 +355,10 @@ def measure_calibration_samples(
                 kind=sample.kind,
             )
         )
-    return CalibrationData(measurements=measurements, meta={"reference_region": reference_region})
+    return CalibrationData(
+        measurements=measurements,
+        meta={"roi": tuple(int(v) for v in roi) if roi is not None else None},
+    )
 
 
 # ── Capture orchestration (HDR provisional) ──────────────────────────
@@ -498,10 +564,14 @@ def run_calibration_capture(
             max_stops=ilut_cfg.hdr_max_stops,
         )
 
+    roi = (
+        ilut_cfg.roi_x,
+        ilut_cfg.roi_y,
+        ilut_cfg.roi_width,
+        ilut_cfg.roi_height,
+    )
     try:
-        data = measure_calibration_samples(
-            samples, capture_fn, ilut_cfg.reference_region
-        )
+        data = measure_calibration_samples(samples, capture_fn, roi)
     finally:
         if show_window:
             cv2.destroyWindow(window_name)
@@ -658,8 +728,11 @@ def build_inverse_lut(
     Args:
         data: Calibration measurements.
             キャリブレーション計測値。
-        source: "both" / "channel_ramp" / "gray". Default from config.
-            "both" / "channel_ramp" / "gray"。既定は設定から。
+        source: Sampling method, "channel_ramp" or "gray". Default from config.
+            Only measurements of the matching method are used; the two are
+            never mixed.
+            サンプリング系統。"channel_ramp" または "gray"。既定は設定から。
+            一致する系統の計測のみを使い、両系統を混在させない。
         lut_resolution: Number of LUT entries. Default from config.
             LUT エントリ数。既定は設定から。
         trust_low: Lower trustworthy bound as an 8-bit pixel value (0-255).
@@ -674,7 +747,7 @@ def build_inverse_lut(
             構築された :class:`InverseLut`。
     """
     cfg = get_config().inverse_lut
-    source = cfg.source if source is None else source
+    source = normalize_source(cfg.source if source is None else source)
     lut_resolution = cfg.lut_resolution if lut_resolution is None else int(lut_resolution)
     trust_low = cfg.trust_low if trust_low is None else float(trust_low)
     trust_high = cfg.trust_high if trust_high is None else float(trust_high)

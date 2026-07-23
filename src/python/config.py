@@ -170,13 +170,24 @@ class InverseLutConfig:
     Attributes:
         num_levels: Number of gradation points per ramp (gray and per-channel).
             各ランプ（グレー / 単独チャンネル）の階調数。
-        source: Curve-building source. One of "both", "channel_ramp", "gray".
-            曲線構築ソース。"both" / "channel_ramp" / "gray"。
+        source: Sampling method used for both capture and curve building.
+            One of "channel_ramp" (per-channel ramps) or "gray" (gray ramp).
+            Exactly one method is used; the two are never mixed.
+            撮影と曲線構築の双方に使うサンプリング系統。"channel_ramp"
+            （各チャンネル単独ランプ）または "gray"（グレーランプ）の一方のみ。
+            両系統を混在させない。
         lut_resolution: Number of entries in the dense [0,1] inverse LUT.
             密な [0,1] 逆LUTのエントリ数。
-        reference_region: Central fraction of the captured frame averaged
-            into one measurement (0.0-1.0).
-            1計測に集約する撮影フレーム中央領域の割合（0.0〜1.0）。
+        roi_x: Left edge (x) of the measurement ROI in pixels.
+            計測 ROI の左端 x（ピクセル）。
+        roi_y: Top edge (y) of the measurement ROI in pixels.
+            計測 ROI の上端 y（ピクセル）。
+        roi_width: Width of the measurement ROI in pixels. ``0`` (or any
+            non-positive value) averages the whole captured frame.
+            計測 ROI の幅（ピクセル）。``0``（以下）なら全フレームを平均。
+        roi_height: Height of the measurement ROI in pixels. ``0`` (or any
+            non-positive value) averages the whole captured frame.
+            計測 ROI の高さ（ピクセル）。``0``（以下）なら全フレームを平均。
         trust_low: Lower trustworthy bound as an 8-bit pixel value (0-255).
             Values at or below are treated as unreliable/crushed.
             信頼下限（8bit画素値 0〜255）。以下は非信頼/黒潰れ扱い。
@@ -194,9 +205,12 @@ class InverseLutConfig:
     """
 
     num_levels: int = 17
-    source: str = "both"
+    source: str = "channel_ramp"
     lut_resolution: int = 256
-    reference_region: float = 0.2
+    roi_x: int = 0
+    roi_y: int = 0
+    roi_width: int = 0
+    roi_height: int = 0
     trust_low: float = 10.0
     trust_high: float = 245.0
     hdr_enabled: bool = False

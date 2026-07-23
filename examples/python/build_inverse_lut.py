@@ -1,12 +1,14 @@
 """Build a measured inverse LUT (projector linearization) from capture.
 
-Generate gray + per-channel calibration ramps, project the raw patterns
-and capture their linear response, build a per-channel inverse LUT, and
-save it. Optionally apply the LUT to an image for a quick demo.
+Generate calibration ramps for the configured sampling method
+(``inverse_lut.source``: "channel_ramp" or "gray"), project the raw
+patterns and capture their linear response, build a per-channel inverse
+LUT, and save it. Optionally apply the LUT to an image for a quick demo.
 
 撮影から測定ベース逆LUT（プロジェクタ線形化）を構築する。
 
-グレー＋各チャンネル単独ランプを生成し、生パターンを投影してリニア応答を
+設定のサンプリング系統（``inverse_lut.source``: "channel_ramp" または
+"gray"）のキャリブレーションランプを生成し、生パターンを投影してリニア応答を
 撮影、チャンネル別逆LUTを構築して保存する。任意で画像に適用するデモも行う。
 
 Usage:
@@ -87,11 +89,15 @@ def main(argv: list[str] | None = None) -> None:
             cfg.projector.width,
             cfg.projector.height,
             num_levels=ilut_cfg.num_levels,
+            source=ilut_cfg.source,
             dtype=np.uint8,
         )
-        print(f"Projecting {len(samples)} calibration patterns...")
+        print(
+            f"Projecting {len(samples)} calibration patterns "
+            f"(source={ilut_cfg.source})..."
+        )
         data = ilut.run_calibration_capture(samples)
-        lut = ilut.build_inverse_lut(data)
+        lut = ilut.build_inverse_lut(data, source=ilut_cfg.source)
         out_path = ilut.save_inverse_lut(ilut_cfg.inverse_lut_path, lut)
         print(f"Saved inverse LUT to: {out_path}")
 

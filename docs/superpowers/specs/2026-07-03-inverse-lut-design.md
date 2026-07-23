@@ -31,7 +31,7 @@
 新規 `src/python/inverse_lut.py`:
 
 ```
-generate_calibration_patterns()   # グレーランプ ＋ 各チャンネル単独ランプ
+generate_calibration_patterns()   # グレーランプ **または** 各チャンネル単独ランプ（source で一方のみ）
         ↓  生パターン投影 ＆ リニア撮影（中央領域平均, 簡易HDR=仮実装）
 run_calibration_capture()  →  CalibrationData（(入力RGB, 計測値, 記録チャンネル) の集合）
         ↓  入力レベルで集約 → 黒引き・白正規化 → 単調化 → 反転
@@ -52,22 +52,24 @@ save_inverse_lut / load_inverse_lut  (npz)
   `kind: str`（"gray"|"channel"）, `recorded_channels: tuple[int,...]`。
 - `CalibrationMeasurement`: `input_rgb: (3,)`, `measured_rgb: (3,)`（リニア [0,1]、未記録は NaN）,
   `recorded_channels: tuple[int,...]`, `kind: str`。
-- `CalibrationData`: `measurements: list[CalibrationMeasurement]` + メタ（reference_region, 露光条件など）。
+- `CalibrationData`: `measurements: list[CalibrationMeasurement]` + メタ（roi, 露光条件など）。
 - `InverseLut`: `lut: np.ndarray (3, R)`（[0,1]）, `t_grid: np.ndarray (R,)`,
   `knots: list[(p_i, n_i) per ch]`, `meta: dict`。
 
 ## 3. キャリブレーションのサンプリング（生成画像）
 
-以下の **2 系統**の 1D ランプを生成する（`num_levels` 既定 **17** 点、[0,1] を等間隔、
-投影直前に 8bit 量子化）。
+以下の **2 系統**の 1D ランプのうち、**`source` で指定した一方のみ**を生成する
+（`num_levels` 既定 **17** 点、[0,1] を等間隔、投影直前に 8bit 量子化）。両系統は
+**混在させない**（混ぜると系統間で黒レベル/クロストークが食い違い、逆曲線フィットが不整合になる）。
 
-1. **グレーランプ**: `(v,v,v)`, 例 `(0,0,0),(15,15,15),(31,31,31),…,(255,255,255)`。
+1. **グレーランプ**（`source="gray"`）: `(v,v,v)`, 例 `(0,0,0),(15,15,15),(31,31,31),…,(255,255,255)`。
    1 回のグレー掃引で 3 チャンネル同時に駆動する。
-2. **各チャンネル単独ランプ**: `(v,0,0)` / `(0,v,0)` / `(0,0,v)`、
+2. **各チャンネル単独ランプ**（`source="channel_ramp"`, 既定）: `(v,0,0)` / `(0,v,0)` / `(0,0,v)`、
    例 `(0,0,0),(15,0,0),…,(255,0,0)`（G, B も同様）。各チャンネルを単独で掃引する。
 
-- 全黒 `(0,0,0)` は全系統に現れるため、**同一投影画像は 1 回だけ撮影**する（計測は系統ごとに
-  導出）。distinct な投影数 ≈ `1 + (num_levels-1) * 4` = **約 65**（`num_levels=17` のとき）。
+- 全黒 `(0,0,0)` は複数ランプに現れるため、**同一投影画像は 1 回だけ撮影**する（計測は系統ごとに
+  導出）。distinct な投影数は `source="gray"` で `num_levels`（**17**）、
+  `source="channel_ramp"` で `1 + (num_levels-1) * 3` = **約 49**（`num_levels=17` のとき）。
 
 ## 4. 撮影・計測 / 保管方法（正しさの要）
 
@@ -75,8 +77,9 @@ save_inverse_lut / load_inverse_lut  (npz)
   線形化された出力」になり、`g` を打ち消す情報が消える（＝逆ガンマの代替を作れない）。
 - 計測は `camera.capture_linear_rgb()` の **リニア値**（[0,1] float32）を使用する。
   `sample.py` の `capture_image()`（`linear_to_srgb` を掛けた sRGB uint8）は使わない。
-- 各撮影は **中央領域（既定 中央 20%, `reference_region`）の平均**で 1 組の計測 RGB に集約
-  （グローバル LUT のため）。
+- 各撮影は **ROI 矩形 `(x, y, width, height)`（`roi_x`/`roi_y`/`roi_width`/`roi_height`, ピクセル）の平均**で
+  1 組の計測 RGB に集約（グローバル LUT のため）。`width`/`height` が 0（既定）なら全フレームを平均。
+  ROI はフレーム境界にクリップする。
 - 投影ウィンドウは `sample.py` 流儀（`namedWindow`/`WINDOW_FULLSCREEN`/`moveWindow(pos_x,pos_y)`/
   `waitKey(wait_key_ms)`）を踏襲。
 
@@ -104,11 +107,13 @@ save_inverse_lut / load_inverse_lut  (npz)
 
 ## 5. LUT 構築（核心）
 
-チャンネル `c` ごとに、`c` を **記録しているすべての計測**から `(入力[c], 計測[c])` を集める。
+チャンネル `c` ごとに、**選択した系統**の計測から `(入力[c], 計測[c])` を集める。
+系統は撮影・構築を通じて一方のみを用いる（`normalize_source` で検証。廃止した `"both"` は
+`ValueError`）。
 
-- `source="both"`（既定）: グレーランプ ＋ 単独ランプ `c` の両方を使う
-  （クロストーク非考慮の前提下では両者は同じ量を測るため、点数が増えてロバストになる）。
-- `source="channel_ramp"`: 単独ランプ `c` のみ。`source="gray"`: グレーランプのみ。
+- `source="channel_ramp"`（既定）: 単独ランプ `c` のみ。各チャンネルを単独で駆動して測るため
+  プロジェクタチャンネル間クロストークが混入しない。
+- `source="gray"`: グレーランプのみ（1 掃引で 3ch 同時記録。撮影枚数は最小だが R=G=B 同時点灯）。
 
 構築手順:
 
@@ -139,9 +144,12 @@ save_inverse_lut / load_inverse_lut  (npz)
 | キー | 既定 | 説明 |
 | --- | --- | --- |
 | `num_levels` | `17` | 各ランプ（グレー / 単独）の階調数 |
-| `source` | `"both"` | 曲線構築ソース（`both`/`channel_ramp`/`gray`） |
+| `source` | `"channel_ramp"` | サンプリング系統（`channel_ramp`/`gray` の一方のみ・混在不可） |
 | `lut_resolution` | `256` | 逆 LUT の密グリッド解像度 |
-| `reference_region` | `0.2` | 計測に使う中央領域の割合 |
+| `roi_x` | `0` | 計測 ROI 左端 x（ピクセル） |
+| `roi_y` | `0` | 計測 ROI 上端 y（ピクセル） |
+| `roi_width` | `0` | 計測 ROI 幅（0 なら全フレーム平均） |
+| `roi_height` | `0` | 計測 ROI 高さ（0 なら全フレーム平均） |
 | `trust_low` | `10` | 信頼下限（8bit画素値, ≤は非信頼/黒潰れ） |
 | `trust_high` | `245` | 信頼上限（8bit画素値, ≥は非信頼/サチュ） |
 | `hdr_enabled` | `false` | 簡易HDRブラケット撮影 |
@@ -159,7 +167,8 @@ save_inverse_lut / load_inverse_lut  (npz)
 - **単調性**: 生成 LUT が非減少。
 - **サチュ除外**: `≤trust_low` / `≥trust_high` の点が構築から除外される。
 - **保管方法**: グレーは r,g,b を記録、単独ランプは投影チャンネルのみ記録（他は NaN）。
-- **ソース統合**: `source="both"` でグレー＋単独ランプの観測が集約に反映される。
+- **系統排他**: `source` は `channel_ramp`/`gray` の一方のみ。混在データを与えても選択系統の
+  観測だけが集約に使われ、廃止した `"both"` は `ValueError`。
 - **チャンネル独立性**: R/G/B で別々の γ を与えて各々復元できる。
 - **save/load 往復**、**パターン枚数/全黒の重複除去**、**中央領域平均**。
 - 撮影は「リニアフレームを返す callable」をモックして HW 非依存に。既存
@@ -175,5 +184,9 @@ save_inverse_lut / load_inverse_lut  (npz)
 
 ## 10. 撮影枚数の見積り
 
-`num_levels=17` で **約 65 パターン**（グレー 17 + 単独 R/G/B 各 17、全黒重複を除去）。
-`num_levels` を変えると線形に増減する。
+`source` で選んだ一方の系統のみを撮影する（`num_levels=17` のとき）:
+
+- `source="channel_ramp"`（既定）: **約 49 パターン**（単独 R/G/B 各 17、全黒重複を除去）。
+- `source="gray"`: **17 パターン**（グレー 17）。
+
+`num_levels` を変えると線形に増減する。両系統を同時に撮影する `"both"` は廃止した。
