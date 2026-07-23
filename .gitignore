@@ -218,3 +218,6 @@ data/**/*.tiff
 *.csv
 *.png
 *.mp4
+
+# VSCode (local editor settings)
+.vscode/settings.json
