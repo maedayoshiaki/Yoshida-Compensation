@@ -211,7 +211,7 @@ def test_run_calibration_capture_projects_and_measures(monkeypatch):
             self._it = iter(frames)
             self.calls = 0
 
-        def capture_linear_rgb(self):
+        def capture_linear_rgb(self, tv=None):
             self.calls += 1
             return next(self._it)
 

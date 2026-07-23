@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import json
 import sys
-from dataclasses import dataclass, field, replace
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
@@ -663,18 +664,19 @@ def run_calibration_capture(
         )
         hdr_enabled = False
 
-    # Query the body's actual Tv menu once so bracket exposures snap onto
-    # values it accepts (prevents an EDSDK ValueError mid-calibration).
-    supported_tv = (
-        _query_supported_shutter_speeds(camera_backend) if hdr_enabled else None
-    )
     base_seconds = tv_to_seconds(cfg.camera.tv)
 
-    if show_window:
-        proj = cfg.projector
-        cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
-        cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-        cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
+    # Reuse ONE camera session across all captures when the backend supports
+    # it (a persistent EDSDK session). Opening a session per shot repeats
+    # InitializeSDK/TerminateSDK, which destabilizes EDSDK during batch
+    # capture (EDS_ERR_DEVICE_BUSY / EDS_ERR_INTERNAL_ERROR). Backends without
+    # a context manager (e.g. OpenCV) run unchanged.
+    session_cm = (
+        camera_backend
+        if hasattr(camera_backend, "__enter__") and hasattr(camera_backend, "__exit__")
+        else nullcontext(camera_backend)
+    )
+    supported_tv: Optional[List[str]] = None
 
     def capture_fn(sample: CalibrationSample) -> np.ndarray:
         def capture_at(scale: float):
@@ -682,16 +684,17 @@ def run_calibration_capture(
                 bgr = cv2.cvtColor(sample.image, cv2.COLOR_RGB2BGR)
                 cv2.imshow(window_name, bgr)
                 cv2.waitKey(cfg.camera.wait_key_ms)
-            if scale == 1.0:
+            if not hdr_enabled:
                 return camera_backend.capture_linear_rgb()
-            # HDR bracket: rebuild the backend with a scaled shutter snapped
-            # to a realizable Tv, and report the *actual* exposure ratio so
-            # the merge does not assume the nominal scale was achieved.
+            # HDR bracket (Canon only): set the shutter explicitly per shot on
+            # the persistent session -- base tv for the reference exposure, a
+            # snapped realizable Tv for brackets -- and report the *actual*
+            # exposure ratio so the merge does not assume the nominal scale.
+            if scale == 1.0:
+                return camera_backend.capture_linear_rgb(tv=cfg.camera.tv)
             scaled_tv = scale_shutter_tv(cfg.camera.tv, scale, supported=supported_tv)
             actual_ratio = tv_to_seconds(scaled_tv) / base_seconds
-            scaled_camera_cfg = replace(cfg.camera, tv=scaled_tv)
-            frame = create_camera_backend(scaled_camera_cfg).capture_linear_rgb()
-            return frame, actual_ratio
+            return camera_backend.capture_linear_rgb(tv=scaled_tv), actual_ratio
 
         return capture_hdr_linear(
             capture_at,
@@ -707,11 +710,23 @@ def run_calibration_capture(
         ilut_cfg.roi_width,
         ilut_cfg.roi_height,
     )
-    try:
-        data = measure_calibration_samples(samples, capture_fn, roi)
-    finally:
+    with session_cm:
+        # Query the body's actual Tv menu once (reusing the open session) so
+        # bracket exposures snap onto values it accepts.
+        if hdr_enabled:
+            supported_tv = _query_supported_shutter_speeds(camera_backend)
         if show_window:
-            cv2.destroyWindow(window_name)
+            proj = cfg.projector
+            cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
+            cv2.setWindowProperty(
+                window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
+            )
+            cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
+        try:
+            data = measure_calibration_samples(samples, capture_fn, roi)
+        finally:
+            if show_window:
+                cv2.destroyWindow(window_name)
 
     data.meta["source"] = ilut_cfg.source
     data.meta["hdr_enabled"] = hdr_enabled

@@ -41,8 +41,13 @@ class OpenCVCamera(CameraBackend):
     ``device_index`` で指定したデバイスから 1 フレーム取得する。
     """
 
-    def capture_linear_rgb(self) -> np.ndarray:
+    def capture_linear_rgb(self, tv: "str | None" = None) -> np.ndarray:
         """Capture one frame from OpenCV device as linear RGB.
+
+        ``tv`` (shutter override) is accepted for interface parity but
+        ignored; OpenCV UVC capture has no EDSDK-style shutter control.
+        ``tv``（シャッター上書き）はインターフェース整合のため受け取るが
+        無視する（OpenCV UVC 撮影に EDSDK 相当のシャッター制御はない）。
 
         Returns:
             Linear RGB image in shape ``(H, W, 3)`` and dtype ``float32``.

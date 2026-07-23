@@ -51,6 +51,9 @@ def test_capture_linear_rgb_converts_jpeg_output_to_linear(monkeypatch) -> None:
     jpeg_rgb = np.array([[[255, 128, 0]]], dtype=np.uint8)
 
     class FakeController:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
         def __enter__(self):
             return self
 
@@ -80,6 +83,8 @@ def test_capture_linear_rgb_converts_jpeg_output_to_linear(monkeypatch) -> None:
         "tv": "1/15",
         "iso": "400",
         "image_quality": "LJF",
+        "validate": True,
+        "tolerate_not_supported": True,
     }
     assert captured["raw_processor"] is _raw_to_linear_rgb
     assert linear_rgb.dtype == np.float32

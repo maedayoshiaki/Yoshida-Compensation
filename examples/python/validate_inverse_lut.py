@@ -394,15 +394,20 @@ def main(argv: Optional[List[str]] = None) -> None:
     camera_backend = create_camera_backend(cfg.camera)
     window_name = "inverse_lut_validation"
     proj = cfg.projector
-    cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
-    cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
 
-    try:
-        capture_fn = _make_real_capture_fn(cfg, camera_backend, window_name)
-        results = measure_modes(levels, capture_fn, lut=lut, ref_gamma=ref_gamma)
-    finally:
-        cv2.destroyWindow(window_name)
+    # Reuse ONE camera session across all captures (~3 modes x num_levels
+    # shots); opening a session per shot destabilizes Canon EDSDK.
+    with camera_backend:
+        cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
+        cv2.setWindowProperty(
+            window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
+        )
+        cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
+        try:
+            capture_fn = _make_real_capture_fn(cfg, camera_backend, window_name)
+            results = measure_modes(levels, capture_fn, lut=lut, ref_gamma=ref_gamma)
+        finally:
+            cv2.destroyWindow(window_name)
 
     npz_path = save_data(f"{out_prefix}.npz", levels, results, ref_gamma)
     print(f"Saved raw curves to: {npz_path}")

@@ -146,19 +146,39 @@ def capture_srgb_uint8(camera_controller, image_quality: str) -> np.ndarray:
 class CanonEdsdkCamera(CameraBackend):
     """Capture backend backed by Canon EDSDK.
 
-    Canon EDSDK を用いて 1 枚撮影し、リニア RGB 画像を返す。
+    Canon EDSDK を用いて撮影し、リニア RGB 画像を返す。
+
+    Can be used as a context manager to hold ONE EDSDK session open across
+    many captures::
+
+        with CanonEdsdkCamera(config) as cam:
+            for _ in range(n):
+                frame = cam.capture_linear_rgb()
+
+    EDSDK must be initialized once per process; opening a fresh session per
+    shot (``InitializeSDK``/``TerminateSDK`` each time) makes the SDK
+    unstable and raises ``EDS_ERR_DEVICE_BUSY`` / ``EDS_ERR_INTERNAL_ERROR``
+    during batch capture. Outside a ``with`` block each call still opens a
+    one-shot session (fine for single captures).
+
+    context manager として使うと、多数の撮影で 1 つの EDSDK セッションを
+    開いたまま使い回せる。EDSDK はプロセスで 1 回だけ初期化する設計であり、
+    撮影ごとに ``InitializeSDK``/``TerminateSDK`` を繰り返すと SDK が不安定に
+    なり、バッチ撮影中に ``EDS_ERR_DEVICE_BUSY`` / ``EDS_ERR_INTERNAL_ERROR``
+    が発生する。``with`` の外では従来どおり 1 回ごとにセッションを開く
+    （単発撮影には十分）。
     """
 
-    def capture_linear_rgb(self) -> np.ndarray:
-        """Capture one frame from Canon camera as linear RGB.
+    def __init__(self, config) -> None:
+        super().__init__(config)
+        # Persistent CameraController while used as a context manager.
+        # context manager として使う間だけ保持する永続 CameraController。
+        self._controller = None
 
-        Returns:
-            Linear RGB image in shape ``(H, W, 3)`` and dtype ``float32``.
-                形状 ``(H, W, 3)``、dtype ``float32`` のリニア RGB 画像。
+    def __enter__(self) -> "CanonEdsdkCamera":
+        """Open one EDSDK session and apply capture properties once.
 
-        Raises:
-            CameraCaptureError: If EDSDK is unavailable or capture fails.
-                EDSDK が利用できない場合、または撮影に失敗した場合。
+        1 つの EDSDK セッションを開き、撮影プロパティを 1 回だけ適用する。
         """
         try:
             from edsdk.camera_controller import CameraController
@@ -167,19 +187,80 @@ class CanonEdsdkCamera(CameraBackend):
                 "edsdk is required for canon_edsdk backend."
             ) from exc
 
-        with CameraController() as camera:
-            camera.set_properties(
+        controller = CameraController(register_property_events=False)
+        controller.__enter__()
+        try:
+            controller.set_properties(
                 av=self.config.av,
                 tv=self.config.tv,
                 iso=self.config.iso,
                 image_quality=self.config.image_quality,
+                validate=True,
+                tolerate_not_supported=True,
             )
-            images = camera.capture_numpy(raw_processor=_raw_to_linear_rgb)
+        except Exception:
+            controller.__exit__(None, None, None)
+            raise
+        self._controller = controller
+        return self
 
+    def __exit__(self, exc_type, exc, tb) -> None:
+        controller, self._controller = self._controller, None
+        if controller is not None:
+            controller.__exit__(exc_type, exc, tb)
+
+    def _capture_via(self, controller, tv) -> np.ndarray:
+        """Set the shutter (if given) and capture one linear RGB frame."""
+        if tv is not None:
+            controller.set_properties(
+                tv=tv, validate=True, tolerate_not_supported=True
+            )
+        images = controller.capture_numpy(raw_processor=_raw_to_linear_rgb)
         if not images or images[0] is None:
             raise CameraCaptureError("No image returned from canon_edsdk backend.")
-
         return _normalize_capture_output(images[0], self.config.image_quality)
+
+    def capture_linear_rgb(self, tv: "str | None" = None) -> np.ndarray:
+        """Capture one frame from the Canon camera as linear RGB.
+
+        Canon カメラから 1 枚撮影し、リニア RGB 画像を返す。
+
+        Reuses the open session when inside a ``with`` block; otherwise opens
+        a one-shot session. ``tv`` overrides the shutter speed for this shot
+        (used by the simple-HDR bracket).
+
+        ``with`` ブロック内なら開いているセッションを再利用し、そうでなければ
+        単発セッションを開く。``tv`` はこの 1 枚のシャッター速度を上書きする
+        （簡易 HDR ブラケットで使用）。
+
+        Returns:
+            Linear RGB image of shape ``(H, W, 3)``, dtype ``float32``.
+                形状 ``(H, W, 3)``、dtype ``float32`` のリニア RGB 画像。
+
+        Raises:
+            CameraCaptureError: If EDSDK is unavailable or capture fails.
+                EDSDK が利用できない場合、または撮影に失敗した場合。
+        """
+        if self._controller is not None:
+            return self._capture_via(self._controller, tv)
+
+        try:
+            from edsdk.camera_controller import CameraController
+        except ImportError as exc:
+            raise CameraCaptureError(
+                "edsdk is required for canon_edsdk backend."
+            ) from exc
+
+        with CameraController(register_property_events=False) as camera:
+            camera.set_properties(
+                av=self.config.av,
+                tv=tv if tv is not None else self.config.tv,
+                iso=self.config.iso,
+                image_quality=self.config.image_quality,
+                validate=True,
+                tolerate_not_supported=True,
+            )
+            return self._capture_via(camera, None)
 
     def supported_shutter_speeds(self) -> list[str]:
         """List the Tv (shutter) values this camera body accepts.
@@ -202,6 +283,10 @@ class CanonEdsdkCamera(CameraBackend):
             CameraCaptureError: If EDSDK is unavailable.
                 EDSDK が利用できない場合。
         """
+        if self._controller is not None:
+            supported = self._controller.list_supported()
+            return [str(tv) for tv in supported.get("Tv", [])]
+
         try:
             from edsdk.camera_controller import CameraController
         except ImportError as exc:
@@ -209,6 +294,6 @@ class CanonEdsdkCamera(CameraBackend):
                 "edsdk is required for canon_edsdk backend."
             ) from exc
 
-        with CameraController() as camera:
+        with CameraController(register_property_events=False) as camera:
             supported = camera.list_supported()
         return [str(tv) for tv in supported.get("Tv", [])]
