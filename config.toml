@@ -10,8 +10,8 @@ refresh_rate = 60.0     # リフレッシュレート(Hz)。露光をこの周�
 
 [camera]
 backend = "canon_edsdk" # "canon_edsdk" | "opencv"
-av = "5"
-tv = "1/60"             # 60Hzの整数倍(フリッカーフリー)。最速の同期露光。白飛びするなら av を上げる
+av = "7.1"              # 絞り。1/30基準で白がHDR短露光(1/60)で回復できる明るさ
+tv = "1/30"             # HDR基準露光。フリッカーフリー(60Hz整数倍)。短露光1/60で白飛び回復、長露光1/15,1/6…で暗部持ち上げ
 iso = "200"
 image_quality = "LR"
 device_index = 0        # OpenCV backend 使用時のカメラインデックス

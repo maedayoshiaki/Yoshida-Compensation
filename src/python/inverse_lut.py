@@ -402,6 +402,10 @@ def tv_to_seconds(tv: str) -> float:
         Exposure time in seconds. 露光時間（秒）。
     """
     text = str(tv).strip()
+    # Drop a Canon fraction-stop annotation like " (1/3)" so third-stop menu
+    # entries (e.g. '1/10 (1/3)') parse to their base seconds.
+    if "(" in text:
+        text = text.split("(", 1)[0].strip()
     if "/" in text:
         numerator, denominator = text.split("/", 1)
         return float(numerator) / float(denominator)

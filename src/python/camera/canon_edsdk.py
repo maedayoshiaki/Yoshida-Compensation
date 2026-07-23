@@ -275,8 +275,17 @@ class CanonEdsdkCamera(CameraBackend):
         簡易 HDR ブラケットが、スケール後の露光を機種が受理する値へ
         スナップするために使う。
 
+        Only values the body's own parser round-trips are returned:
+        ``list_supported()`` can report display forms that ``set_properties``
+        later rejects (e.g. seconds-notation third-stops like ``0"3 (1/3)``),
+        which would abort a bracket. Such values are filtered out here.
+
+        戻すのは機種自身のパーサが往復できる値のみ。``list_supported()`` は
+        後で ``set_properties`` が弾く表示形式（例 ``0"3 (1/3)`` の秒表記
+        1/3段）を返すことがあり、ブラケットを中断させるため、ここで除外する。
+
         Returns:
-            Supported Tv display strings (e.g. ``"1/30"``, ``0"5``, ``"2"``).
+            Accepted Tv display strings (e.g. ``"1/30"``, ``0"5``, ``"2"``).
                 受理される Tv 表示文字列（例 ``"1/30"``, ``0"5``, ``"2"``）。
 
         Raises:
@@ -284,8 +293,7 @@ class CanonEdsdkCamera(CameraBackend):
                 EDSDK が利用できない場合。
         """
         if self._controller is not None:
-            supported = self._controller.list_supported()
-            return [str(tv) for tv in supported.get("Tv", [])]
+            return self._accepted_shutter_speeds(self._controller)
 
         try:
             from edsdk.camera_controller import CameraController
@@ -295,5 +303,28 @@ class CanonEdsdkCamera(CameraBackend):
             ) from exc
 
         with CameraController(register_property_events=False) as camera:
-            supported = camera.list_supported()
-        return [str(tv) for tv in supported.get("Tv", [])]
+            return self._accepted_shutter_speeds(camera)
+
+    @staticmethod
+    def _accepted_shutter_speeds(controller) -> list[str]:
+        """Return supported Tv values the body's parser also accepts.
+
+        機種のパーサが受理する（往復できる）サポート Tv 値だけを返す。
+        """
+        try:
+            from edsdk.camera_controller import _parse_tv
+        except ImportError:
+            _parse_tv = None
+
+        values = list(controller.list_supported().get("Tv", []))
+        if _parse_tv is None:
+            return [str(tv) for tv in values]
+
+        accepted: list[str] = []
+        for tv in values:
+            try:
+                _parse_tv(tv)
+            except Exception:
+                continue  # display form set_properties would reject
+            accepted.append(str(tv))
+        return accepted

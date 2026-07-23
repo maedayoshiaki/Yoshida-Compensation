@@ -280,6 +280,13 @@ def test_tv_to_seconds_parses_canon_formats():
     assert ilut.tv_to_seconds('4"') == 4.0
     assert ilut.tv_to_seconds('30"') == 30.0
     assert ilut.tv_to_seconds("2") == 2.0
+    # Canon 1/3-stop annotated menu forms parse to their base seconds.
+    assert abs(ilut.tv_to_seconds("1/10 (1/3)") - 0.1) < 1e-9
+    assert abs(ilut.tv_to_seconds("1/6 (1/3)") - 1 / 6) < 1e-9
+    assert ilut.tv_to_seconds('0"3 (1/3)') == 0.3
+    # annotated third-stops are flicker-free at 60Hz (multiples of 1/60)
+    assert ilut.is_flicker_free("1/10 (1/3)", 60.0)  # 0.1s = 6/60
+    assert ilut.is_flicker_free("1/6 (1/3)", 60.0)   # 1/6s = 10/60
 
 
 def test_scale_shutter_tv():
