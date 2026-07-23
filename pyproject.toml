@@ -34,5 +34,7 @@ sample = [
     # (edsdk._pump_messages_once). Without pywin32 the pump is a no-op and
     # captures time out even though the shutter fires. See README (Canon EDSDK setup).
     "pywin32; sys_platform == 'win32'",
+    # Plotting for validate_inverse_lut.py (linearity check plots).
+    "matplotlib",
 ]
 
