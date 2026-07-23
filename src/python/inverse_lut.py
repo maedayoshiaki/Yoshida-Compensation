@@ -414,44 +414,37 @@ def tv_to_seconds(tv: str) -> float:
     return float(text)
 
 
-def scale_shutter_tv(
-    tv: str,
-    scale: float,
-    *,
-    supported: Optional[Sequence[str]] = None,
-) -> str:
-    """Scale a Canon shutter (``tv``) and snap to the nearest realizable value.
+def is_flicker_free(tv: str, refresh_hz: Optional[float], tol: float = 0.03) -> bool:
+    """Whether a shutter ``tv`` integrates whole projector refresh cycles.
 
-    Canon シャッター（``tv``）を露光係数でスケールし、実現可能な最も近い値へスナップする。
+    シャッター ``tv`` がプロジェクタのリフレッシュ周期の整数個を積分するか。
 
-    ``scale = 0.5`` halves the exposure time (faster shutter); ``scale =
-    2.0`` doubles it. The scaled target is snapped to the nearest value in
-    ``supported`` -- the camera's actual Tv menu, e.g.
-    ``list_supported()["Tv"]`` -- or, when not given, to the nearest
-    standard Canon Tv. This guarantees a value the camera can accept and
-    avoids an EDSDK ``ValueError`` that would abort calibration mid-run.
+    Photographing a projector requires the exposure time to be an integer
+    multiple of the refresh period (``1 / refresh_hz``); otherwise the frame
+    captures a partial refresh and shows flicker/banding. Returns ``True``
+    when ``exposure * refresh_hz`` is a positive near-integer within ``tol``,
+    or when ``refresh_hz`` is falsy/non-positive (constraint disabled).
 
-    ``scale = 0.5`` は露光時間を半分（速いシャッター）、``scale = 2.0`` は倍に
-    する。スケール後の目標秒を ``supported``（カメラ実機の Tv メニュー、例
-    ``list_supported()["Tv"]``）— 未指定なら標準 Canon Tv — の中で最も近い値へ
-    スナップする。これによりカメラが受理できる値を保証し、キャリブレーション
-    途中で ``ValueError`` により中断するのを防ぐ。
-
-    Args:
-        tv: Base shutter-speed string. 基準シャッタースピード文字列。
-        scale: Exposure-time multiplier. 露光時間の倍率。
-        supported: Candidate Tv display strings to snap onto (the camera's
-            menu). Defaults to standard Canon Tv values.
-            スナップ先候補の Tv 表示文字列（カメラのメニュー）。既定は標準
-            Canon Tv 値。
-
-    Returns:
-        The nearest realizable shutter-speed display string.
-            最も近い実現可能なシャッタースピード表示文字列。
+    プロジェクタ撮影では露光時間がリフレッシュ周期（``1 / refresh_hz``）の
+    整数倍である必要がある。そうでないと部分的なリフレッシュを撮ってしまい
+    フリッカー/バンディングが出る。``exposure * refresh_hz`` が ``tol`` 以内の
+    正の（ほぼ）整数なら ``True``。``refresh_hz`` が偽値/非正なら制約無効で
+    ``True``。
     """
-    target_seconds = tv_to_seconds(tv) * float(scale)
-    candidates = list(supported) if supported else list(_STANDARD_TV_DISPLAYS)
+    if not refresh_hz or refresh_hz <= 0:
+        return True
+    try:
+        cycles = tv_to_seconds(tv) * float(refresh_hz)
+    except (ValueError, TypeError):
+        return False
+    return cycles >= 1.0 - tol and abs(cycles - round(cycles)) <= tol
 
+
+def _nearest_tv(candidates: Sequence[str], target_seconds: float) -> Optional[str]:
+    """Return the candidate Tv whose seconds is nearest ``target_seconds``.
+
+    ``target_seconds`` に最も近い秒を持つ候補 Tv を返す（解釈不能な候補は無視）。
+    """
     best_display: Optional[str] = None
     best_error = float("inf")
     for display in candidates:
@@ -463,10 +456,89 @@ def scale_shutter_tv(
         if error < best_error:
             best_error = error
             best_display = display
-
-    if best_display is None:
-        return str(tv).strip()
     return best_display
+
+
+def scale_shutter_tv(
+    tv: str,
+    scale: float,
+    *,
+    supported: Optional[Sequence[str]] = None,
+    refresh_hz: Optional[float] = None,
+) -> str:
+    """Scale a Canon shutter (``tv``) and snap to the nearest realizable value.
+
+    Canon シャッター（``tv``）を露光係数でスケールし、実現可能な最も近い値へスナップする。
+
+    ``scale = 0.5`` halves the exposure time (faster shutter); ``scale =
+    2.0`` doubles it. The scaled target is snapped to the nearest value in
+    ``supported`` -- the camera's actual Tv menu, e.g.
+    ``list_supported()["Tv"]`` -- or, when not given, to the nearest
+    standard Canon Tv. This guarantees a value the camera can accept and
+    avoids an EDSDK ``ValueError`` that would abort calibration mid-run. When
+    ``refresh_hz`` is given, only flicker-free candidates (exposure = integer
+    multiple of ``1 / refresh_hz``) are considered, so the shutter stays
+    synced to the projector.
+
+    ``scale = 0.5`` は露光時間を半分（速いシャッター）、``scale = 2.0`` は倍に
+    する。スケール後の目標秒を ``supported``（カメラ実機の Tv メニュー、例
+    ``list_supported()["Tv"]``）— 未指定なら標準 Canon Tv — の中で最も近い値へ
+    スナップする。これによりカメラが受理できる値を保証し、キャリブレーション
+    途中で ``ValueError`` により中断するのを防ぐ。``refresh_hz`` を与えると、
+    フリッカーフリー候補（露光が ``1 / refresh_hz`` の整数倍）のみを対象にし、
+    シャッターをプロジェクタに同期させる。
+
+    Args:
+        tv: Base shutter-speed string. 基準シャッタースピード文字列。
+        scale: Exposure-time multiplier. 露光時間の倍率。
+        supported: Candidate Tv display strings to snap onto (the camera's
+            menu). Defaults to standard Canon Tv values.
+            スナップ先候補の Tv 表示文字列（カメラのメニュー）。既定は標準
+            Canon Tv 値。
+        refresh_hz: Projector refresh rate (Hz) to stay flicker-free with. If
+            falsy/non-positive, the constraint is disabled.
+            フリッカーフリーを保つプロジェクタのリフレッシュレート（Hz）。
+            偽値/非正なら制約無効。
+
+    Returns:
+        The nearest realizable shutter-speed display string.
+            最も近い実現可能なシャッタースピード表示文字列。
+    """
+    target_seconds = tv_to_seconds(tv) * float(scale)
+    candidates = list(supported) if supported else list(_STANDARD_TV_DISPLAYS)
+    if refresh_hz and refresh_hz > 0:
+        flicker_free = [c for c in candidates if is_flicker_free(c, refresh_hz)]
+        if flicker_free:
+            candidates = flicker_free
+
+    best_display = _nearest_tv(candidates, target_seconds)
+    return best_display if best_display is not None else str(tv).strip()
+
+
+def snap_to_flicker_free_tv(
+    tv: str,
+    supported: Optional[Sequence[str]] = None,
+    refresh_hz: float = 60.0,
+) -> str:
+    """Snap a shutter ``tv`` to the nearest flicker-free realizable value.
+
+    シャッター ``tv`` を、最も近いフリッカーフリーな実現可能値へスナップする。
+
+    Picks the nearest value in ``supported`` (or standard Canon Tv) whose
+    exposure is an integer multiple of the ``refresh_hz`` period. Returns
+    ``tv`` unchanged when the constraint is disabled or no flicker-free
+    candidate exists.
+
+    ``supported``（または標準 Canon Tv）の中で、露光が ``refresh_hz`` 周期の
+    整数倍になる最も近い値を選ぶ。制約が無効、または候補が無い場合は ``tv``
+    をそのまま返す。
+    """
+    if not refresh_hz or refresh_hz <= 0:
+        return str(tv).strip()
+    candidates = list(supported) if supported else list(_STANDARD_TV_DISPLAYS)
+    flicker_free = [c for c in candidates if is_flicker_free(c, refresh_hz)]
+    best_display = _nearest_tv(flicker_free, tv_to_seconds(tv))
+    return best_display if best_display is not None else str(tv).strip()
 
 
 def _frame_and_ratio(ret, nominal_scale: float) -> Tuple[np.ndarray, float]:
@@ -664,7 +736,23 @@ def run_calibration_capture(
         )
         hdr_enabled = False
 
-    base_seconds = tv_to_seconds(cfg.camera.tv)
+    # Snap the base shutter to a flicker-free value (an integer multiple of
+    # the projector refresh period) so the camera integrates whole refresh
+    # cycles; otherwise the projection shows flicker/banding. HDR brackets are
+    # likewise restricted to flicker-free values below.
+    refresh_hz = float(getattr(cfg.projector, "refresh_rate", 0.0) or 0.0)
+    base_tv = cfg.camera.tv
+    if refresh_hz > 0:
+        snapped_tv = snap_to_flicker_free_tv(cfg.camera.tv, refresh_hz=refresh_hz)
+        if snapped_tv != base_tv:
+            print(
+                f"inverse_lut: shutter {cfg.camera.tv!r} is not a multiple of the "
+                f"{refresh_hz:g}Hz projector refresh; using flicker-free "
+                f"{snapped_tv!r} instead.",
+                file=sys.stderr,
+            )
+        base_tv = snapped_tv
+    base_seconds = tv_to_seconds(base_tv)
 
     # Reuse ONE camera session across all captures when the backend supports
     # it (a persistent EDSDK session). Opening a session per shot repeats
@@ -706,8 +794,10 @@ def run_calibration_capture(
             # snapped realizable Tv for brackets -- and report the *actual*
             # exposure ratio so the merge does not assume the nominal scale.
             if scale == 1.0:
-                return _reduced(camera_backend.capture_linear_rgb(tv=cfg.camera.tv))
-            scaled_tv = scale_shutter_tv(cfg.camera.tv, scale, supported=supported_tv)
+                return _reduced(camera_backend.capture_linear_rgb(tv=base_tv))
+            scaled_tv = scale_shutter_tv(
+                base_tv, scale, supported=supported_tv, refresh_hz=refresh_hz
+            )
             actual_ratio = tv_to_seconds(scaled_tv) / base_seconds
             return (
                 _reduced(camera_backend.capture_linear_rgb(tv=scaled_tv)),

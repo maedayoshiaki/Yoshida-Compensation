@@ -307,6 +307,45 @@ def test_scale_shutter_tv_snaps_to_supported_menu():
     assert ilut.scale_shutter_tv("1/15", 4.0, supported=supported) in supported
 
 
+def test_is_flicker_free_60hz():
+    # 1/60秒の整数倍はフリッカーフリー
+    for tv in ("1/60", "1/30", "1/20", "1/15", "1/10", "1/6", "1/5", "1/4", '0"5', "1"):
+        assert ilut.is_flicker_free(tv, 60.0), tv
+    # 1/60秒の整数倍でない値はNG
+    for tv in ("1/100", "1/125", "1/80", "1/50", "1/40", "1/13", "1/8"):
+        assert not ilut.is_flicker_free(tv, 60.0), tv
+    # 1周期より速い露光もNG
+    assert not ilut.is_flicker_free("1/8000", 60.0)
+    # 制約無効(0/None)なら常にTrue
+    assert ilut.is_flicker_free("1/100", 0)
+    assert ilut.is_flicker_free("1/100", None)
+
+
+def test_snap_to_flicker_free_tv():
+    # 1/100(非整数倍) -> 最も近いフリッカーフリー(最速は1/60)
+    assert ilut.snap_to_flicker_free_tv("1/100", refresh_hz=60.0) == "1/60"
+    # 既にフリッカーフリーならそのまま
+    assert ilut.snap_to_flicker_free_tv("1/15", refresh_hz=60.0) == "1/15"
+    assert ilut.snap_to_flicker_free_tv("1/45", refresh_hz=60.0) == "1/60"
+    # メニューを与えたら、その中のフリッカーフリー値から選ぶ
+    supported = ["1/30", "1/15", "1/8", '0"5']  # 1/8 はフリッカーフリーでない
+    assert ilut.snap_to_flicker_free_tv("1/8", supported=supported, refresh_hz=60.0) == "1/15"
+    # 制約無効ならそのまま
+    assert ilut.snap_to_flicker_free_tv("1/100", refresh_hz=0) == "1/100"
+
+
+def test_scale_shutter_tv_flicker_free_60hz():
+    # HDRブラケットも60Hzの整数倍のみに制限される
+    assert ilut.scale_shutter_tv("1/15", 0.5, refresh_hz=60.0) == "1/30"
+    assert ilut.scale_shutter_tv("1/15", 0.25, refresh_hz=60.0) == "1/60"
+    # 2倍: 目標2/15=0.133 -> フリッカーフリーの最近傍は1/10 (1/8は非整数倍で除外)
+    assert ilut.scale_shutter_tv("1/15", 2.0, refresh_hz=60.0) == "1/10"
+    # 返り値は必ずフリッカーフリー
+    assert ilut.is_flicker_free(
+        ilut.scale_shutter_tv("1/15", 0.25, refresh_hz=60.0), 60.0
+    )
+
+
 # ── Task 5: build ────────────────────────────────────────────────────
 
 

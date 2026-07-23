@@ -49,6 +49,7 @@ from src.python.inverse_lut import (
     apply_inverse_lut,
     load_inverse_lut,
     reduce_frame,
+    snap_to_flicker_free_tv,
 )
 
 # Correction conditions to compare, in plot order.
@@ -340,6 +341,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     実機で逆LUTの線形性検証を実行する。
     """
     import cv2
+    from dataclasses import replace
 
     from src.python.camera import create_camera_backend
 
@@ -391,7 +393,21 @@ def main(argv: Optional[List[str]] = None) -> None:
         f"{num_levels} levels; ref gamma={ref_gamma:g}."
     )
 
-    camera_backend = create_camera_backend(cfg.camera)
+    # Snap the shutter to a flicker-free value (integer multiple of the
+    # projector refresh period) so captures don't show flicker/banding.
+    refresh_hz = float(getattr(cfg.projector, "refresh_rate", 0.0) or 0.0)
+    cam_cfg = cfg.camera
+    if refresh_hz > 0:
+        ff_tv = snap_to_flicker_free_tv(cfg.camera.tv, refresh_hz=refresh_hz)
+        if ff_tv != cfg.camera.tv:
+            print(
+                f"validate_inverse_lut: shutter {cfg.camera.tv!r} is not a multiple "
+                f"of the {refresh_hz:g}Hz projector refresh; using {ff_tv!r}.",
+                file=sys.stderr,
+            )
+        cam_cfg = replace(cfg.camera, tv=ff_tv)
+
+    camera_backend = create_camera_backend(cam_cfg)
     window_name = "inverse_lut_validation"
     proj = cfg.projector
 

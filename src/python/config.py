@@ -45,6 +45,15 @@ class ProjectorConfig:
             デスクトップ上のプロジェクタウィンドウの水平位置。
         pos_y: Vertical position of the projector window on the desktop.
             デスクトップ上のプロジェクタウィンドウの垂直位置。
+        refresh_rate: Projector refresh rate in Hz. Camera exposures are
+            snapped to integer multiples of this period (``1 / refresh_rate``)
+            so the shutter integrates whole refresh cycles and avoids
+            flicker/banding when photographing the projection. ``0`` (or
+            negative) disables the constraint.
+            プロジェクタのリフレッシュレート（Hz）。カメラ露光をこの周期
+            （``1 / refresh_rate``）の整数倍へスナップし、シャッターが
+            リフレッシュ周期の整数個を積分するようにして、投影撮影時の
+            フリッカー/バンディングを防ぐ。``0``（以下）で無効。
 
     プロジェクタデバイスの設定。
     """
@@ -54,6 +63,7 @@ class ProjectorConfig:
     height: int = 1080
     pos_x: int = 5360
     pos_y: int = 0
+    refresh_rate: float = 60.0
 
 
 @dataclass(frozen=True)
