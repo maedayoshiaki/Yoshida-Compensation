@@ -587,20 +587,22 @@ def capture_hdr_linear(
     リニアフレームを撮影する（任意で簡易な露光ブラケット HDR）。
 
     With ``enabled=False`` this simply returns the base exposure
-    ``capture_at_fn(1.0)``. With ``enabled=True`` it brackets exposures:
-    where the base pixel saturates (>= ``trust_high``) it shortens the
-    exposure (``scale`` 0.5, 0.25, ...) and rescales the pixel by
-    ``1/scale``; where the base pixel is crushed (<= ``trust_low``) it
-    lengthens the exposure (``scale`` 2, 4, ...) and rescales by
-    ``1/scale``. Trustworthy pixels replace untrustworthy ones, extending
-    dynamic range in base-exposure linear units (values may exceed 1.0).
+    ``capture_at_fn(1.0)``. With ``enabled=True`` it brackets exposures
+    (shorten while any gated channel saturates, lengthen while any is
+    crushed) and then merges **independently per channel**: for each channel
+    (and pixel) it picks the longest exposure whose own value is not
+    saturated (< ``trust_high``) -- the highest-SNR trustworthy sample -- and
+    rescales it to base-exposure units by ``1/ratio``. Each channel judges
+    its own saturation/crush, so a bright channel is never held back by a
+    dark one; values may exceed 1.0 (dynamic range beyond the base clip).
 
     ``enabled=False`` では基準露光 ``capture_at_fn(1.0)`` をそのまま返す。
-    ``enabled=True`` では露光をブラケットする: 基準画素がサチる
-    (>= ``trust_high``) 箇所は露光を短く（``scale`` 0.5, 0.25, ...）して
-    画素を ``1/scale`` 倍、黒潰れ (<= ``trust_low``) 箇所は露光を長く
-    （``scale`` 2, 4, ...）して ``1/scale`` 倍する。信頼できる画素で
-    非信頼画素を置き換え、基準露光のリニア単位でダイナミックレンジを
+    ``enabled=True`` では露光をブラケット（対象chのいずれかがサチる間は短く、
+    いずれかが黒潰れの間は長く）してから、**チャンネルごとに独立**にマージする:
+    各チャンネル（各画素）について、自分の値が飽和しない (< ``trust_high``)
+    範囲で最も長い露光＝最高SNRの信頼サンプルを選び、``1/ratio`` 倍して基準
+    露光単位に戻す。各chが自分の飽和/黒潰れを判定するので、明るいchが暗いchに
+    引きずられない。値は 1.0 を超え得る（基準クリップを超えるダイナミックレンジを
     拡張する（値は 1.0 を超え得る）。
 
     Recovery divides each bracketed frame by its *actual* exposure ratio
@@ -640,17 +642,16 @@ def capture_hdr_linear(
         Merged linear RGB frame of shape (H, W, 3).
             マージされたリニア RGB フレーム (H, W, 3)。
     """
-    base, _ = _frame_and_ratio(capture_at_fn(1.0), 1.0)
+    base = np.asarray(_frame_and_ratio(capture_at_fn(1.0), 1.0)[0], dtype=np.float32)
     if not enabled:
         return base
 
     low = float(trust_low) / 255.0
     high = float(trust_high) / 255.0
-    result = base.copy()
 
-    # Restrict bracketing/recovery to the requested channels (default: all).
-    # A per-channel gate broadcast over the last axis, so the always-dark
-    # non-projected channels of a single-channel ramp never trigger a bracket.
+    # Per-channel gate (default: all). The always-dark non-projected channels of
+    # a single-channel ramp are excluded so they neither drive brackets nor are
+    # merged.
     channel_gate = np.zeros(base.shape[-1], dtype=bool)
     if channels is None:
         channel_gate[:] = True
@@ -658,30 +659,44 @@ def capture_hdr_linear(
         for c in channels:
             channel_gate[int(c)] = True
 
-    # Saturated pixels: shorten exposure until they come below trust_high.
-    scale = 1.0
+    # Capture the bracket sweep. Shorten while ANY gated channel is still
+    # saturated; lengthen while ANY gated channel is still crushed. This only
+    # decides HOW MANY exposures to grab (each is a whole-frame shot); the merge
+    # below is judged fully independently per channel.
+    exposures = [(base, 1.0)]
     raw = base
+    scale = 1.0
     for _ in range(int(max_stops)):
         if not np.any((raw >= high) & channel_gate):
             break
         scale *= 0.5
-        raw, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
-        recovered = raw / ratio
-        mask = (result >= high) & (raw <= high) & channel_gate
-        result = np.where(mask, recovered, result)
-
-    # Crushed pixels: lengthen exposure until they rise above trust_low.
-    scale = 1.0
+        frame, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
+        raw = np.asarray(frame, dtype=np.float32)
+        exposures.append((raw, ratio))
     raw = base
+    scale = 1.0
     for _ in range(int(max_stops)):
         if not np.any((raw <= low) & channel_gate):
             break
         scale *= 2.0
-        raw, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
-        recovered = raw / ratio
-        mask = (result <= low) & (raw >= low) & channel_gate
-        result = np.where(mask, recovered, result)
+        frame, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
+        raw = np.asarray(frame, dtype=np.float32)
+        exposures.append((raw, ratio))
 
+    # Per-channel merge: for EACH channel (and pixel) INDEPENDENTLY, choose the
+    # longest exposure whose own value is not saturated (< trust_high) -- that
+    # gives the highest SNR -- and convert it to base-exposure units. Each
+    # channel decides its own saturation/crush from its own value; a bright
+    # channel is not held back by a dark one and vice versa. Elements saturated
+    # in every exposure fall back to the shortest one.
+    result = base.copy()
+    chosen = np.zeros(base.shape, dtype=np.float32)  # ratio of chosen exposure; 0 = none
+    for frame, ratio in sorted(exposures, key=lambda e: -e[1]):  # longest first
+        take = (frame < high) & (ratio > chosen)
+        result = np.where(take, frame / ratio, result)
+        chosen = np.where(take, np.float32(ratio), chosen)
+    shortest_frame, shortest_ratio = min(exposures, key=lambda e: e[1])
+    result = np.where(chosen == 0.0, shortest_frame / shortest_ratio, result)
     return result.astype(np.float32)
 
 

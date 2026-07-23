@@ -304,6 +304,38 @@ def test_capture_hdr_linear_channels_restricts_bracketing():
     assert calls_all["n"] > 1  # 基準 + R/G のための長露光ブラケット
 
 
+def test_capture_hdr_linear_per_channel_best_exposure():
+    # 露光に比例(1.0でクリップ)する合成カメラ。真の基準露光値:
+    #   R=1.4(基準で飽和), G=0.5(中間), B=0.01(暗い)。
+    true = np.array([[[1.4, 0.5, 0.01]]], dtype=np.float32)
+
+    def capture_at(scale):
+        return np.clip(true * scale, 0.0, 1.0).astype(np.float32)
+
+    out = ilut.capture_hdr_linear(
+        capture_at, enabled=True, trust_low=10, trust_high=245, max_stops=3
+    )
+    # 各chが自分にとって最良の露光から独立に復元される。
+    assert abs(out[0, 0, 0] - 1.4) < 0.05    # R: 短露光から(1.0超も可)
+    assert abs(out[0, 0, 1] - 0.5) < 0.02    # G: 中間、基準
+    assert abs(out[0, 0, 2] - 0.01) < 0.004  # B: 最長の非飽和露光から(高SNR)
+
+
+def test_capture_hdr_linear_prefers_longest_unsaturated():
+    # B が暗い場合、low を最初に超えた露光ではなく、飽和しない範囲で最長の
+    # 露光(最高SNR)を選ぶこと。
+    true = np.array([[[0.5, 0.5, 0.01]]], dtype=np.float32)
+
+    def capture_at(scale):
+        return np.clip(true * scale, 0.0, 1.0).astype(np.float32)
+
+    out = ilut.capture_hdr_linear(
+        capture_at, enabled=True, trust_low=10, trust_high=245,
+        max_stops=3, channels=(2,),
+    )
+    assert abs(out[0, 0, 2] - 0.01) < 0.003
+
+
 def test_tv_to_seconds_parses_canon_formats():
     assert abs(ilut.tv_to_seconds("1/125") - 0.008) < 1e-6
     assert abs(ilut.tv_to_seconds("1/15") - 1 / 15) < 1e-9
