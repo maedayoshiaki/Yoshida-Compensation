@@ -198,6 +198,8 @@ def test_run_calibration_capture_projects_and_measures(monkeypatch):
     for name in ("namedWindow", "setWindowProperty", "moveWindow", "imshow", "destroyWindow"):
         monkeypatch.setattr(ilut.cv2, name, lambda *a, **k: None)
     monkeypatch.setattr(ilut.cv2, "waitKey", lambda *a, **k: 0)
+    # Skip the real projection-settle sleep so the test stays fast.
+    monkeypatch.setattr(ilut.time, "sleep", lambda *a, **k: None)
 
     samples = ilut.generate_calibration_patterns(
         6, 6, num_levels=4, source="channel_ramp", dtype=np.uint8

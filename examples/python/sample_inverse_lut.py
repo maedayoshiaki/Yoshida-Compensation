@@ -35,6 +35,7 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
+import time
 from pathlib import Path
 
 import cv2
@@ -214,6 +215,9 @@ def main(argv: list[str] | None = None) -> None:
     for pattern in lut_patterns:
         cv2.imshow(window_name, cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR))
         cv2.waitKey(cfg.camera.wait_key_ms)
+        # Settle: let the projector display fully switch to the new pattern
+        # before capturing (same buffer as calibration/validation).
+        time.sleep(ilut._PROJECTION_SETTLE_SECONDS)
 
         captured_image = sample.capture_image()
         if captured_image is None:

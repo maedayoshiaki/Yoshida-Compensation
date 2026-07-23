@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,6 +29,17 @@ from scipy.interpolate import PchipInterpolator
 
 from src.python.camera import create_camera_backend
 from src.python.config import get_config
+
+
+# Wall-clock settle time between projecting a new pattern and capturing it, so
+# the projector's display has fully switched before the shutter fires. Applied
+# once per pattern (on the base exposure); HDR brackets keep the same pattern on
+# screen and only change the shutter, so they need no extra settle.
+# パターンを投影してから撮影するまでの整定待ち（実時間）。プロジェクタの表示が
+# 完全に切り替わってからシャッターを切るための待機。パターンごとに1回（基準露光時）
+# 適用する。HDRブラケットは同じパターンを表示したままシャッターだけ変えるので
+# 追加の待機は不要。
+_PROJECTION_SETTLE_SECONDS = 0.3
 
 
 # ── Data structures ──────────────────────────────────────────────────
@@ -915,6 +927,12 @@ def run_calibration_capture(
                 bgr = cv2.cvtColor(sample.image, cv2.COLOR_RGB2BGR)
                 cv2.imshow(window_name, bgr)
                 cv2.waitKey(cfg.camera.wait_key_ms)
+                # Settle once per pattern: the base exposure (scale == 1.0) is
+                # the first shot after this (new) pattern is projected, so wait
+                # for the display to fully switch before capturing. HDR brackets
+                # (scale != 1.0) keep the same pattern up and need no extra wait.
+                if scale == 1.0:
+                    time.sleep(_PROJECTION_SETTLE_SECONDS)
             if not hdr_enabled:
                 return _prepare(camera_backend.capture_linear_rgb(), base_tv, 1.0)
             # HDR bracket (Canon only): set the shutter explicitly per shot on

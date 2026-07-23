@@ -46,6 +46,7 @@ from src.python.color_mixing_matrix import apply_inverse_gamma_correction
 from src.python.config import get_config, reload_config, split_cli_config_path
 from src.python.inverse_lut import (
     InverseLut,
+    _PROJECTION_SETTLE_SECONDS,
     apply_inverse_lut,
     load_inverse_lut,
     reduce_frame,
@@ -336,6 +337,7 @@ def _make_real_capture_fn(cfg, camera_backend, window_name: str):
     単色を投影して計測する capture_fn を生成する。
     """
     import cv2
+    import time
 
     proj = cfg.projector
     roi = (
@@ -350,6 +352,9 @@ def _make_real_capture_fn(cfg, camera_backend, window_name: str):
         image[:, :] = np.asarray(projector_pixel, dtype=np.uint8).reshape(3)
         cv2.imshow(window_name, cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
         cv2.waitKey(cfg.camera.wait_key_ms)
+        # Settle: wait for the projector display to fully switch to the new
+        # pattern before capturing (same buffer used during calibration).
+        time.sleep(_PROJECTION_SETTLE_SECONDS)
         frame = camera_backend.capture_linear_rgb()
         return reduce_frame(frame, roi)
 
