@@ -677,24 +677,42 @@ def run_calibration_capture(
         else nullcontext(camera_backend)
     )
     supported_tv: Optional[List[str]] = None
+    roi = (
+        ilut_cfg.roi_x,
+        ilut_cfg.roi_y,
+        ilut_cfg.roi_width,
+        ilut_cfg.roi_height,
+    )
 
     def capture_fn(sample: CalibrationSample) -> np.ndarray:
+        def _reduced(frame: np.ndarray) -> np.ndarray:
+            # Reduce each exposure to its ROI mean (as a (1, 1, 3) frame)
+            # BEFORE the HDR merge. The merge then holds only tiny arrays;
+            # keeping full-resolution frames (e.g. 4660x6984x3 ~= 390 MB)
+            # across bracket copies exhausts memory. This is correct for the
+            # solid calibration patterns: the measurement IS the ROI mean, so
+            # HDR extends the dynamic range of exactly that measured quantity.
+            return reduce_frame(frame, roi).reshape(1, 1, 3)
+
         def capture_at(scale: float):
             if show_window:
                 bgr = cv2.cvtColor(sample.image, cv2.COLOR_RGB2BGR)
                 cv2.imshow(window_name, bgr)
                 cv2.waitKey(cfg.camera.wait_key_ms)
             if not hdr_enabled:
-                return camera_backend.capture_linear_rgb()
+                return _reduced(camera_backend.capture_linear_rgb())
             # HDR bracket (Canon only): set the shutter explicitly per shot on
             # the persistent session -- base tv for the reference exposure, a
             # snapped realizable Tv for brackets -- and report the *actual*
             # exposure ratio so the merge does not assume the nominal scale.
             if scale == 1.0:
-                return camera_backend.capture_linear_rgb(tv=cfg.camera.tv)
+                return _reduced(camera_backend.capture_linear_rgb(tv=cfg.camera.tv))
             scaled_tv = scale_shutter_tv(cfg.camera.tv, scale, supported=supported_tv)
             actual_ratio = tv_to_seconds(scaled_tv) / base_seconds
-            return camera_backend.capture_linear_rgb(tv=scaled_tv), actual_ratio
+            return (
+                _reduced(camera_backend.capture_linear_rgb(tv=scaled_tv)),
+                actual_ratio,
+            )
 
         return capture_hdr_linear(
             capture_at,
@@ -704,12 +722,6 @@ def run_calibration_capture(
             max_stops=ilut_cfg.hdr_max_stops,
         )
 
-    roi = (
-        ilut_cfg.roi_x,
-        ilut_cfg.roi_y,
-        ilut_cfg.roi_width,
-        ilut_cfg.roi_height,
-    )
     with session_cm:
         # Query the body's actual Tv menu once (reusing the open session) so
         # bracket exposures snap onto values it accepts.
