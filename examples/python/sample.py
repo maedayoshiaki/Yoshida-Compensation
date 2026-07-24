@@ -19,7 +19,6 @@ import numpy as np
 import cv2
 from typing import List, Tuple, Optional, Literal, cast
 import torch
-import colour
 from external.GrayCode.src.python.warp_image import (
     PixelMapWarperTorch,
     AggregationMethod,
@@ -394,6 +393,52 @@ def linear_to_srgb(linear_rgb: np.ndarray) -> np.ndarray:
     )
 
 
+def srgb_to_linear(srgb: np.ndarray) -> np.ndarray:
+    """Convert sRGB values in [0, 1] to linear RGB values in [0, 1].
+
+    Inverse of :func:`linear_to_srgb`. The compensation pipeline operates
+    on linear light, so sRGB-encoded inputs (e.g. target images loaded
+    from PNG/JPEG) must pass through this before any computation.
+
+    範囲 [0, 1] の sRGB をリニア RGB に変換する。
+
+    :func:`linear_to_srgb` の逆変換。補償パイプラインはリニア光量で
+    計算するため、sRGB エンコードされた入力（PNG/JPEG のターゲット画像
+    など）は計算前に必ずこの変換を通す。
+
+    Args:
+        srgb: sRGB image array in range [0, 1].
+            範囲 [0, 1] の sRGB 画像配列。
+
+    Returns:
+        Linear RGB image array in range [0, 1].
+            範囲 [0, 1] のリニア RGB 画像配列。
+    """
+    srgb = np.clip(srgb, 0.0, 1.0)
+    return np.where(
+        srgb <= 0.04045,
+        srgb / 12.92,
+        np.power((srgb + 0.055) / 1.055, 2.4),
+    )
+
+
+def capture_to_srgb_uint8(image: np.ndarray) -> np.ndarray:
+    """Encode a linear capture as sRGB uint8 for saving/viewing only.
+
+    The pipeline itself stays linear; this exists solely so captured
+    frames written to disk are viewable. uint8 input passes through.
+
+    リニア撮影値を保存・表示用に sRGB uint8 へエンコードする。
+    パイプライン本体はリニアのまま。uint8 入力はそのまま返す。
+    """
+    arr = np.asarray(image)
+    if arr.dtype == np.uint8:
+        return arr
+    return (
+        (linear_to_srgb(arr.astype(np.float32)) * 255.0).round().astype(np.uint8)
+    )
+
+
 def apply_rpcc_correction(
     linear_image: np.ndarray,
     RPCC_MATRIX: np.ndarray,
@@ -439,6 +484,8 @@ def apply_rpcc_correction(
         RPCC 行列は展開された RGB 入力を想定しているため、この関数は
         内部的に画像データに対して同じ多項式展開を行う。
     """
+    import colour
+
     # Expand image data: [R, G, B] -> [R, G, B, sqrt(RG), sqrt(GB), sqrt(BR)]
     expanded_image = colour.characterisation.polynomial_expansion_Finlayson2015(
         linear_image, degree=degree, root_polynomial_expansion=True
@@ -453,53 +500,30 @@ def apply_rpcc_correction(
     return corrected_xyz
 
 
-def capture_image(
-    RPCC_matrix: np.ndarray | None = None, RPCC_degree: Literal[1, 2, 3] = 2
-) -> Optional[np.ndarray]:
-    """Capture an image from the camera and apply color correction.
+def capture_image() -> Optional[np.ndarray]:
+    """Capture one LINEAR RGB frame from the configured camera.
 
-    Capture one image from the configured camera backend, optionally
-    apply RPCC color correction to XYZ, and convert to display-ready
-    RGB output.
+    The whole compensation pipeline operates on linear light: captures
+    are used as-is (no tone encoding). Use :func:`capture_to_srgb_uint8`
+    only when writing a capture to disk for viewing.
 
-    カメラから画像をキャプチャし、色補正を適用する。
+    カメラから 1 フレームをリニア RGB のまま取得する。
 
-    設定されたカメラバックエンドから画像をキャプチャし、必要に応じて RPCC
-    色補正を XYZ に適用した後、表示用の RGB 画像に変換する。
-
-    Args:
-        RPCC_matrix: Optional pre-computed RPCC transformation matrix.
-            If provided, color correction will be applied.
-            オプションの事前計算された RPCC 変換行列。指定された場合、
-            色補正が適用される。
-        RPCC_degree: Polynomial degree for RPCC expansion (1, 2, or 3).
-            Default is 2.
-            RPCC 展開の多項式次数（1、2、または 3）。デフォルトは 2。
+    補償パイプライン全体はリニア光量で動作するため、撮影値はエンコード
+    せずそのまま使う。ディスク保存（閲覧用）時のみ
+    :func:`capture_to_srgb_uint8` でエンコードする。
 
     Returns:
-        Captured image as RGB numpy array with shape ``(H, W, 3)`` and
-        dtype uint8, or ``None`` if capture fails.
-        形状 ``(H, W, 3)``、dtype uint8 の RGB NumPy 配列としての
-        キャプチャ画像。キャプチャに失敗した場合は ``None``。
+        Linear RGB image, float32, shape ``(H, W, 3)``, values in
+        [0, 1]; or ``None`` if capture fails.
+        リニア RGB 画像（float32、形状 ``(H, W, 3)``、[0, 1]）。
+        キャプチャに失敗した場合は ``None``。
     """
     try:
         cam_cfg = get_config().camera
         camera = create_camera_backend(cam_cfg)
         linear_rgb = camera.capture_linear_rgb()
-
-        if RPCC_matrix is not None:
-            try:
-                xyz_img = apply_rpcc_correction(
-                    linear_rgb, RPCC_matrix, degree=RPCC_degree
-                )
-                srgb_img = colour.XYZ_to_sRGB(xyz_img, apply_cctf_encoding=False)
-            except ImportError:
-                srgb_img = linear_to_srgb(linear_rgb)
-        else:
-            srgb_img = linear_to_srgb(linear_rgb)
-
-        srgb_img = np.clip(srgb_img, 0.0, 1.0)
-        return (srgb_img * 255).astype(np.uint8)
+        return np.clip(np.asarray(linear_rgb, dtype=np.float32), 0.0, 1.0)
     except CameraCaptureError as exc:
         print(f"Camera capture failed: {exc}", file=sys.stderr)
         traceback.print_exc()
@@ -806,7 +830,11 @@ def main(argv: list[str] | None = None):
             return
 
         captured_images.append(captured_image)
-        bgr_captured = cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR)
+        # Saved PNGs are sRGB-encoded for viewing only; the pipeline keeps
+        # using the linear array in `captured_images`.
+        bgr_captured = cv2.cvtColor(
+            capture_to_srgb_uint8(captured_image), cv2.COLOR_RGB2BGR
+        )
         cv2.imwrite(
             os.path.join(
                 paths.captured_image_dir,
@@ -846,7 +874,12 @@ def main(argv: list[str] | None = None):
     cam_height = captured_images[0].shape[0]
     compensation_space = compensation_space_from_warp_method(warp_method)
 
-    for idx, (target_name, target_image) in enumerate(target_images):
+    for idx, (target_name, target_uint8) in enumerate(target_images):
+        # Targets on disk are sRGB-encoded; the matrices map LINEAR camera
+        # values, so decode to linear light before any computation.
+        target_image = srgb_to_linear(
+            target_uint8.astype(np.float32) / 255.0
+        ).astype(np.float32)
         target_debug_dir = _warp_debug_target_dir(WARP_DEBUG_DIR, idx, target_name)
         target_crop_rect = center_rect(
             target_image.shape[1],
@@ -857,7 +890,7 @@ def main(argv: list[str] | None = None):
         target_exceeds_projector = (
             target_image.shape[1] > proj.width or target_image.shape[0] > proj.height
         )
-        _save_rgb_debug_image(target_debug_dir / "00_original_target.png", target_image)
+        _save_rgb_debug_image(target_debug_dir / "00_original_target.png", target_uint8)
         _save_rgb_debug_image(
             target_debug_dir / "00_original_target_region.png",
             _projector_region_preview(

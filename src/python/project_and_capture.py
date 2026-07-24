@@ -74,9 +74,14 @@ def _build_output_path() -> Path:
 
 
 def _save_captured_image(captured_rgb: np.ndarray) -> Path:
+    from examples.python.sample import capture_to_srgb_uint8
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     output_path = _build_output_path()
-    captured_bgr = cv2.cvtColor(captured_rgb, cv2.COLOR_RGB2BGR)
+    # capture_image() returns linear RGB; encode to sRGB for the saved PNG.
+    captured_bgr = cv2.cvtColor(
+        capture_to_srgb_uint8(captured_rgb), cv2.COLOR_RGB2BGR
+    )
     if not cv2.imwrite(str(output_path), captured_bgr):
         raise OSError(f"Failed to save captured image: {output_path}")
     return output_path

@@ -226,12 +226,16 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         captured_images.append(captured_image)
+        # Saved PNGs are sRGB-encoded for viewing only; the pipeline keeps
+        # using the linear array in `captured_images`.
         cv2.imwrite(
             os.path.join(
                 paths.captured_image_dir,
                 f"captured_image_{len(captured_images) - 1:02d}.png",
             ),
-            cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR),
+            cv2.cvtColor(
+                sample.capture_to_srgb_uint8(captured_image), cv2.COLOR_RGB2BGR
+            ),
         )
 
     cv2.destroyWindow(window_name)
@@ -256,7 +260,12 @@ def main(argv: list[str] | None = None) -> None:
     cam_height = captured_images[0].shape[0]
     compensation_space = sample.compensation_space_from_warp_method(warp_method)
 
-    for idx, (target_name, target_image) in enumerate(target_images):
+    for idx, (target_name, target_uint8) in enumerate(target_images):
+        # Targets on disk are sRGB-encoded; the matrices map LINEAR camera
+        # values, so decode to linear light before any computation.
+        target_image = sample.srgb_to_linear(
+            target_uint8.astype(np.float32) / 255.0
+        ).astype(np.float32)
         compensation_target_image = sample.prepare_target_image_for_compensation(
             target_image,
             target_image_space,

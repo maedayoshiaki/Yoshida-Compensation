@@ -15,7 +15,12 @@ from pathlib import Path
 
 import cv2
 
-from examples.python.sample import capture_image, resolve_warp_settings, warp_image
+from examples.python.sample import (
+    capture_image,
+    capture_to_srgb_uint8,
+    resolve_warp_settings,
+    warp_image,
+)
 from external.GrayCode.src.python.config import (
     reload_config as reload_graycode_config,
 )
@@ -67,9 +72,10 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(1)
 
     os.makedirs("data/manual_capture/wo_warp", exist_ok=True)
+    # Captures are linear; encode to sRGB only for the saved (viewable) PNG.
     cv2.imwrite(
         "data/manual_capture/wo_warp/captured_image.png",
-        cv2.cvtColor(captured_image, cv2.COLOR_RGB2BGR),
+        cv2.cvtColor(capture_to_srgb_uint8(captured_image), cv2.COLOR_RGB2BGR),
     )
 
     warped_image = warp_image(
@@ -85,7 +91,7 @@ def main(argv: list[str] | None = None) -> None:
     os.makedirs("data/manual_capture/with_warp", exist_ok=True)
     cv2.imwrite(
         "data/manual_capture/with_warp/warped_image.png",
-        cv2.cvtColor(warped_image, cv2.COLOR_RGB2BGR),
+        cv2.cvtColor(capture_to_srgb_uint8(warped_image), cv2.COLOR_RGB2BGR),
     )
     print("Captured and warped images saved.")
 

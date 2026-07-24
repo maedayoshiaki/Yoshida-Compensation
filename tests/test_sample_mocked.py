@@ -279,7 +279,11 @@ def test_sample_uses_camera_space_compensation_for_c2p(
 
     assert len(calc_calls) == 1
     calc_target_image, calc_cmm = calc_calls[0]
-    assert np.array_equal(calc_target_image, target_image)
+    # Targets are decoded from sRGB to linear before compensation.
+    expected_target = sample.srgb_to_linear(
+        target_image.astype(np.float32) / 255.0
+    )
+    assert np.allclose(calc_target_image, expected_target, atol=1e-6)
     assert calc_cmm is color_mixing_matrices
     assert len(warp_calls) == 1
     assert np.array_equal(warp_calls[0], compensation_input)
@@ -383,7 +387,12 @@ def test_sample_inverse_warps_projector_target_for_c2p(
     sample.main(["sample.py", "--config", str(config_path)])
 
     assert len(invwarp_calls) == 1
-    assert np.array_equal(invwarp_calls[0], target_image)
+    # Targets are decoded from sRGB to linear before compensation.
+    assert np.allclose(
+        invwarp_calls[0],
+        sample.srgb_to_linear(target_image.astype(np.float32) / 255.0),
+        atol=1e-6,
+    )
     assert len(calc_calls) == 1
     assert np.array_equal(calc_calls[0], camera_space_target)
     assert len(warp_calls) == 1
@@ -552,6 +561,12 @@ def test_sample_clears_stale_outputs_and_groups_warp_only_images(
         lambda *args, **kwargs: np.ones((height, width, 4, 3), dtype=np.float32),
     )
 
+    # Targets reach the warp already decoded to linear float; dispatch on
+    # the decoded value of each target's constant level.
+    alpha_linear = float(
+        sample.srgb_to_linear(np.float32(alpha_target[0, 0, 0]) / 255.0)
+    )
+
     def fake_invwarp_image(
         src_image: np.ndarray,
         pixel_map_path: str,
@@ -561,7 +576,7 @@ def test_sample_clears_stale_outputs_and_groups_warp_only_images(
         cam_height: int,
         warp_method: str = "c2p",
     ) -> np.ndarray:
-        if int(src_image[0, 0, 0]) == int(alpha_target[0, 0, 0]):
+        if abs(float(src_image[0, 0, 0]) - alpha_linear) < 1e-6:
             return alpha_camera_space
         return beta_camera_space
 
@@ -704,7 +719,12 @@ def test_sample_uses_projector_space_compensation_for_p2c(
     assert np.array_equal(matrix_warp_calls[0], camera_space_cmm)
     assert len(calc_calls) == 1
     calc_target_image, calc_cmm = calc_calls[0]
-    assert np.array_equal(calc_target_image, target_image)
+    # Targets are decoded from sRGB to linear before compensation.
+    assert np.allclose(
+        calc_target_image,
+        sample.srgb_to_linear(target_image.astype(np.float32) / 255.0),
+        atol=1e-6,
+    )
     assert np.array_equal(calc_cmm, projector_space_cmm)
 
 
@@ -813,7 +833,12 @@ def test_sample_warps_camera_target_for_p2c(
     sample.main(["sample.py", "--config", str(config_path)])
 
     assert len(warp_calls) == 1
-    assert np.array_equal(warp_calls[0], target_image)
+    # Targets are decoded from sRGB to linear before compensation.
+    assert np.allclose(
+        warp_calls[0],
+        sample.srgb_to_linear(target_image.astype(np.float32) / 255.0),
+        atol=1e-6,
+    )
     assert len(matrix_warp_calls) == 1
     assert np.array_equal(matrix_warp_calls[0], camera_space_cmm)
     assert len(calc_calls) == 1
