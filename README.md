@@ -177,6 +177,7 @@ wait_key_ms = 200
 | `projector` | `gamma` | プロジェクタのガンマ値 |
 | `projector` | `width`, `height` | プロジェクタの解像度 |
 | `projector` | `pos_x`, `pos_y` | マルチディスプレイ環境でのプロジェクタウィンドウ位置 |
+| `projector` | `active_x`, `active_y`, `active_width`, `active_height` | 実際に発光させる投影領域。幅または高さが0以下なら全画面 |
 | `camera` | `backend` | 使用するカメラ実装（`canon_edsdk` / `opencv`） |
 | `camera` | `device_index` | OpenCVバックエンドのカメラインデックス |
 | `camera` | `av`, `tv`, `iso`, `image_quality` | Canon EDSDK バックエンドの撮影パラメータ |
@@ -194,7 +195,8 @@ wait_key_ms = 200
 1. `data/target_images/` に目標画像（`.png` / `.jpg`）を配置します。
 2. `config.toml` で `paths.warp_method` を `c2p` または `p2c` に設定し、対応する `paths.c2p_map` / `paths.p2c_map` を指定します。
 3. 同じく `paths.target_image_space` に、`data/target_images/` の画像が `camera` 座標か `projector` 座標かを指定します。`sample.py` はこの値を見て、補償前にターゲット画像をワープする必要があるかを判定します。
-4. 以下のコマンドで補償パイプラインを実行します。
+4. 必要なら `projector.active_*` で投影領域を絞ります。校正パターン・逆LUT計測・補償画像は領域外が黒になり、projector座標の目標画像はこの領域へリサイズ配置されます。
+5. 以下のコマンドで補償パイプラインを実行します。
 
 ```bash
 uv run python examples/python/sample.py

@@ -31,6 +31,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.python import inverse_lut as ilut
 from src.python.config import get_config, reload_config, split_cli_config_path
+from src.python.projection_region import mask_to_active_region, resolve_active_region
 
 
 def _split_flag(argv: list[str], flag: str) -> tuple[list[str], str | None]:
@@ -94,6 +95,16 @@ def main(argv: list[str] | None = None) -> None:
             source=ilut_cfg.source,
             dtype=np.uint8,
         )
+        active_region = resolve_active_region(cfg.projector)
+        samples = [
+            ilut.CalibrationSample(
+                input_rgb=sample.input_rgb,
+                image=mask_to_active_region(sample.image, active_region),
+                kind=sample.kind,
+                recorded_channels=sample.recorded_channels,
+            )
+            for sample in samples
+        ]
         print(
             f"Projecting {len(samples)} calibration patterns "
             f"(source={ilut_cfg.source})..."

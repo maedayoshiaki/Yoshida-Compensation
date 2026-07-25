@@ -182,9 +182,14 @@ def main(argv: list[str] | None = None) -> None:
 
     # 1. Generate linear projection patterns and linearize them with the LUT.
     #    リニア投影パターンを生成し、LUT で線形化する。
-    linear_proj_patterns = sample.generate_projection_patterns(
+    active_region = sample.resolve_active_region(proj)
+    linear_model_patterns = sample.generate_projection_patterns(
         proj.width, proj.height, dtype=np.dtype(np.uint8)
     )
+    linear_proj_patterns = [
+        sample.mask_to_active_region(pattern, active_region)
+        for pattern in linear_model_patterns
+    ]
     os.makedirs(paths.linear_pattern_dir, exist_ok=True)
     os.makedirs(LUT_PATTERN_DIR, exist_ok=True)
 
@@ -243,7 +248,7 @@ def main(argv: list[str] | None = None) -> None:
     # 3. Calculate color mixing matrices from linear patterns and captures.
     #    リニアパターンと撮影画像からカラーミキシング行列を計算する。
     color_mixing_matrices = sample.calc_color_mixing_matrices(
-        proj_images=linear_proj_patterns, captured_images=captured_images
+        proj_images=linear_model_patterns, captured_images=captured_images
     )
     np.save("data/color_mixing_matrices.npy", color_mixing_matrices)
 
@@ -266,6 +271,12 @@ def main(argv: list[str] | None = None) -> None:
         target_image = sample.srgb_to_linear(
             target_uint8.astype(np.float32) / 255.0
         ).astype(np.float32)
+        if target_image_space == "projector":
+            target_image = sample.embed_in_active_region(
+                target_image,
+                (proj.width, proj.height),
+                active_region,
+            )
         compensation_target_image = sample.prepare_target_image_for_compensation(
             target_image,
             target_image_space,
@@ -322,6 +333,11 @@ def main(argv: list[str] | None = None) -> None:
 
         if compensation_image is None or compensation_image.size == 0:
             return
+
+        compensation_image = sample.mask_to_active_region(
+            compensation_image,
+            active_region,
+        )
 
         # === LUT-based projector linearization (replaces inverse gamma) ===
         # sample.py: apply_inverse_gamma_correction(compensation_image,

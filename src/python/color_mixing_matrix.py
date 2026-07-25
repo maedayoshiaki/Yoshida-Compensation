@@ -393,15 +393,30 @@ def calc_color_mixing_matrices(
         # proj_ref を (B, N, 3) にブロードキャスト
         proj_ref_batch = proj_ref.unsqueeze(0).expand(B, -1, -1)  # (B, N, 3)
 
-        cmm_batch = torch.linalg.lstsq(
-            captured_batch, proj_ref_batch
-        ).solution  # Shape: (B, 4, 3)
+        # Ridge-regularized normal equations remain solvable for unilluminated
+        # pixels outside a configured projection region. CUDA's least-squares
+        # driver can abort when those batches contain rank-deficient systems.
+        captured_t = captured_batch.transpose(1, 2)
+        normal_matrix = captured_t @ captured_batch
+        normal_rhs = captured_t @ proj_ref_batch
+        ridge = torch.eye(4, device=device, dtype=captured_batch.dtype)
+        cmm_batch = torch.linalg.solve(
+            normal_matrix + ridge.unsqueeze(0) * 1e-6,
+            normal_rhs,
+        )  # Shape: (B, 4, 3)
 
         # CPU に退避
         cmm_flat_all[idx:end] = cmm_batch.to("cpu", dtype=torch.float32)
 
         # メモリ開放
-        del captured_batch, proj_ref_batch, cmm_batch
+        del (
+            captured_batch,
+            captured_t,
+            normal_matrix,
+            normal_rhs,
+            proj_ref_batch,
+            cmm_batch,
+        )
         if device.type == "cuda":
             torch.cuda.empty_cache()
 

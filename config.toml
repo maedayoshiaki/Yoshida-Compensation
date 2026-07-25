@@ -2,11 +2,16 @@
 
 [projector]
 gamma = 2.2
-width = 1280
-height = 720
-pos_x = 3440            # 投影ウィンドウ5（このPCでは \\.\DISPLAY4）の左端
+width = 1920
+height = 1080
+pos_x = 3440            # 実写確認済み Win32 \\.\DISPLAY4（1920x1080/150%）
 pos_y = 0               # プロジェクタウィンドウの Y 位置
 refresh_rate = 60.0     # リフレッシュレート(Hz)。露光をこの周期の整数倍へスナップ(フリッカー防止)。0で無効
+
+active_x = 613          # 直前の1920x1080色補償実験と同じ投影領域
+active_y = 201
+active_width = 722
+active_height = 722
 
 [camera]
 backend = "canon_edsdk" # "canon_edsdk" | "opencv"
@@ -22,9 +27,9 @@ half_size = false       # trueでRAWを半解像度現像(メモリ約1/4)。ROI
 c2p_map = "result_c2p_compensated_delaunay.npy"            # C2P correspondence map (.npy)
 p2c_map = "result_p2c_compensated_delaunay.npy"            # P2C correspondence map (.npy)
 warp_method = "p2c"     # "c2p" | "p2c"
-target_image_space = "camera"  # "camera" | "projector"
+target_image_space = "projector"  # "camera" | "projector"
 rpcc_matrix = ""        # RPCC matrix (.npy)
-target_image_dir = "data/target_images"
+target_image_dir = "data/comp_test_targets_square"
 linear_pattern_dir = "data/linear_proj_patterns"
 inv_gamma_pattern_dir = "data/inv_gamma_proj_patterns"
 captured_image_dir = "data/captured_images"

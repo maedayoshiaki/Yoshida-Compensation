@@ -5,9 +5,11 @@
 - Branch: `feature/triggered-batch-capture`
 - Camera backend: Canon EDSDK, `edsdk-python` 0.2.0
 - Trigger path: `transfer="memory"`
-- Projection window: user-visible window 5
-  - Win32 device: `\\.\DISPLAY4`
-  - Bounds: `(3440, 0)`, `1280 x 720`
+- Projection window: Win32 device `\\.\DISPLAY4` (confirmed later with
+  labeled projection/capture)
+  - Desktop position: `(3440, 0)`
+  - Output mode: `1920 x 1080`; OpenCV fullscreen bounds are `1280 x 720`
+    because Windows scaling is 150%
 - Camera RAW quality: `LR`
 - Smoke-test RAW development: `half_size=true`
 

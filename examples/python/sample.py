@@ -20,6 +20,11 @@ import numpy as np
 import cv2
 from typing import List, Tuple, Optional, Literal, Sequence, cast
 import torch
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
 from external.GrayCode.src.python.warp_image import (
     PixelMapWarperTorch,
     AggregationMethod,
@@ -46,6 +51,11 @@ from src.python.config import (
     get_config,
     reload_config,
     split_cli_config_path,
+)
+from src.python.projection_region import (
+    embed_in_active_region,
+    mask_to_active_region,
+    resolve_active_region,
 )
 
 
@@ -859,6 +869,11 @@ def main(argv: list[str] | None = None):
     proj = cfg.projector
     paths = cfg.paths
     try:
+        active_region = resolve_active_region(proj)
+    except ValueError as e:
+        print(f"Invalid projector active region: {e}")
+        return
+    try:
         warp_method, pixel_map_path = resolve_warp_settings(paths)
         target_image_space = resolve_target_image_space(paths)
     except ValueError as e:
@@ -866,9 +881,13 @@ def main(argv: list[str] | None = None):
         return
 
     # Generate projection patterns
-    linear_proj_patterns = generate_projection_patterns(
+    linear_model_patterns = generate_projection_patterns(
         proj.width, proj.height, dtype=np.dtype(np.uint8)
     )
+    linear_proj_patterns = [
+        mask_to_active_region(pattern, active_region)
+        for pattern in linear_model_patterns
+    ]
     inv_gamma_patterns = []
 
     # Create output directories
@@ -901,6 +920,8 @@ def main(argv: list[str] | None = None):
     cv2.resizeWindow(window_name, proj.width, proj.height)
     cv2.waitKey(50)
     cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    if hasattr(cv2, "WND_PROP_TOPMOST"):
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
     os.makedirs(paths.captured_image_dir, exist_ok=True)
     try:
@@ -934,7 +955,9 @@ def main(argv: list[str] | None = None):
 
     # Calculate color mixing matrices
     color_mixing_matrices = calc_color_mixing_matrices(
-        proj_images=linear_proj_patterns, captured_images=captured_images
+        # Projected frames are spatially masked, while their commanded RGB
+        # values inside the active region are the original solid colors.
+        proj_images=linear_model_patterns, captured_images=captured_images
     )
     np.save("data/color_mixing_matrices.npy", color_mixing_matrices)
 
@@ -967,6 +990,12 @@ def main(argv: list[str] | None = None):
         target_image = srgb_to_linear(
             target_uint8.astype(np.float32) / 255.0
         ).astype(np.float32)
+        if target_image_space == "projector":
+            target_image = embed_in_active_region(
+                target_image,
+                (proj.width, proj.height),
+                active_region,
+            )
         target_debug_dir = _warp_debug_target_dir(WARP_DEBUG_DIR, idx, target_name)
         target_crop_rect = center_rect(
             target_image.shape[1],
@@ -1113,6 +1142,11 @@ def main(argv: list[str] | None = None):
 
         if compensation_image is None or compensation_image.size == 0:
             return
+
+        compensation_image = mask_to_active_region(
+            compensation_image,
+            active_region,
+        )
 
         (target_debug_dir / "metadata.json").write_text(
             json.dumps(debug_metadata, indent=2, ensure_ascii=False),

@@ -54,6 +54,9 @@ class ProjectorConfig:
             （``1 / refresh_rate``）の整数倍へスナップし、シャッターが
             リフレッシュ周期の整数個を積分するようにして、投影撮影時の
             フリッカー/バンディングを防ぐ。``0``（以下）で無効。
+        active_x, active_y, active_width, active_height: Rectangle that may
+            emit projector light. Non-positive width or height selects the
+            full projector frame.
 
     プロジェクタデバイスの設定。
     """
@@ -64,6 +67,10 @@ class ProjectorConfig:
     pos_x: int = 5360
     pos_y: int = 0
     refresh_rate: float = 60.0
+    active_x: int = 0
+    active_y: int = 0
+    active_width: int = 0
+    active_height: int = 0
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,52 @@
+{
+  "display": "Win32 DISPLAY4",
+  "position": [
+    3440,
+    0
+  ],
+  "projector_size": [
+    1920,
+    1080
+  ],
+  "region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "patterns": 6,
+  "capture_seconds": 15.539175500161946,
+  "development_seconds": 9.467644600197673,
+  "metrics": {
+    "nature_1_sq/baseline": {
+      "psnr_srgb": 11.453243151248726,
+      "ssim_srgb": 0.5524789690971375,
+      "deltaE76": 32.04100036621094
+    },
+    "nature_1_sq/compensated": {
+      "psnr_srgb": 13.071178689897351,
+      "ssim_srgb": 0.6497290134429932,
+      "deltaE76": 24.08842658996582
+    },
+    "nature_2_sq/baseline": {
+      "psnr_srgb": 13.084872636454667,
+      "ssim_srgb": 0.4416651427745819,
+      "deltaE76": 33.775657653808594
+    },
+    "nature_2_sq/compensated": {
+      "psnr_srgb": 16.841058997265673,
+      "ssim_srgb": 0.5511536598205566,
+      "deltaE76": 15.707429885864258
+    },
+    "nature_3_sq/baseline": {
+      "psnr_srgb": 12.45729001539944,
+      "ssim_srgb": 0.5481439232826233,
+      "deltaE76": 38.188636779785156
+    },
+    "nature_3_sq/compensated": {
+      "psnr_srgb": 17.739510426528092,
+      "ssim_srgb": 0.6007726192474365,
+      "deltaE76": 16.217788696289062
+    }
+  }
+}

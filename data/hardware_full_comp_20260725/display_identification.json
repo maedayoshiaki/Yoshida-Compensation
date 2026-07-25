@@ -1,0 +1,7 @@
+{
+  "confirmed_projector_device": "\\\\.\\DISPLAY4",
+  "confirmed_projector_position": [3440, 0],
+  "win32_display4_red_global_mean8_rgb": [21.065, 0.387, 1.557],
+  "win32_display5_green_with_display4_black_global_mean8_rgb": [0.062, 0.021, 0.053],
+  "conclusion": "The camera sees Win32 DISPLAY4. DISPLAY5 does not drive the photographed projector."
+}
