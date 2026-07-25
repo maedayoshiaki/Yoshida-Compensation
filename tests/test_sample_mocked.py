@@ -109,6 +109,7 @@ def _stub_window_calls(monkeypatch) -> None:
         "namedWindow",
         "setWindowProperty",
         "moveWindow",
+        "resizeWindow",
         "imshow",
         "destroyWindow",
     ):
@@ -186,6 +187,71 @@ def test_capture_image_reports_camera_errors(monkeypatch, capsys) -> None:
 
     assert image is None
     assert "Camera capture failed: raw develop failed" in stderr
+
+
+def test_capture_projection_patterns_defers_canon_development(monkeypatch) -> None:
+    events: list[str] = []
+    patterns = [
+        np.full((2, 3, 3), value, dtype=np.uint8)
+        for value in (0, 64, 255)
+    ]
+
+    class FakeBatch:
+        def __enter__(self):
+            events.append("batch-enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append("batch-exit")
+
+        def trigger(self):
+            events.append("trigger")
+
+        def iter_linear_rgb(self):
+            for index in range(len(patterns)):
+                events.append(f"develop:{index}")
+                yield np.full((2, 3, 3), index / 10, dtype=np.float32)
+
+    class FakeCamera:
+        def __enter__(self):
+            events.append("camera-enter")
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            events.append("camera-exit")
+
+        def triggered_batch(self, tv):
+            assert tv == "1/30"
+            return FakeBatch()
+
+    cfg = types.SimpleNamespace(
+        camera=types.SimpleNamespace(
+            backend="canon_edsdk",
+            tv="1/30",
+            wait_key_ms=0,
+        )
+    )
+    monkeypatch.setattr(
+        sample,
+        "create_camera_backend",
+        lambda camera_cfg: FakeCamera(),
+    )
+    monkeypatch.setattr(sample.cv2, "imshow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sample.cv2, "waitKey", lambda *args, **kwargs: 0)
+
+    captured = sample.capture_projection_patterns(
+        patterns,
+        cfg=cfg,
+        window_name="test",
+    )
+
+    first_develop = events.index("develop:0")
+    assert events[:first_develop].count("trigger") == len(patterns)
+    assert captured is not None
+    assert np.allclose(
+        [float(frame[0, 0, 0]) for frame in captured],
+        [0.0, 0.1, 0.2],
+    )
 
 
 def test_sample_uses_camera_space_compensation_for_c2p(

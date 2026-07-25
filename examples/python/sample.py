@@ -17,7 +17,7 @@ import traceback
 from pathlib import Path
 import numpy as np
 import cv2
-from typing import List, Tuple, Optional, Literal, cast
+from typing import List, Tuple, Optional, Literal, Sequence, cast
 import torch
 from external.GrayCode.src.python.warp_image import (
     PixelMapWarperTorch,
@@ -534,6 +534,77 @@ def capture_image() -> Optional[np.ndarray]:
         return None
 
 
+def capture_projection_patterns(
+    patterns: Sequence[np.ndarray],
+    *,
+    cfg,
+    window_name: str,
+) -> Optional[list[np.ndarray]]:
+    """Project and capture a calibration sequence.
+
+    Canon EDSDK uses triggered capture to spool every encoded frame first and
+    defer RAW development until the complete projection sequence has finished.
+    Other backends retain the existing one-shot capture behavior.
+    """
+    backend_name = cfg.camera.backend.strip().lower()
+    captured_images: list[np.ndarray] = []
+
+    def project(pattern: np.ndarray) -> None:
+        bgr_pattern = cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR)
+        cv2.imshow(window_name, bgr_pattern)
+        cv2.waitKey(cfg.camera.wait_key_ms)
+
+    try:
+        if backend_name == "canon_edsdk":
+            camera = create_camera_backend(cfg.camera)
+            with camera:
+                triggered_batch = getattr(camera, "triggered_batch", None)
+                if not callable(triggered_batch):
+                    raise CameraCaptureError(
+                        "edsdk-python >= 0.2.0 is required for fast triggered capture."
+                    )
+                print(
+                    f"Triggered capture: projecting and capturing "
+                    f"{len(patterns)} pattern(s) before RAW development."
+                )
+                with triggered_batch(cfg.camera.tv) as batch:
+                    for pattern in patterns:
+                        project(pattern)
+                        batch.trigger()
+                    for frame in batch.iter_linear_rgb():
+                        captured_images.append(
+                            np.clip(
+                                np.asarray(frame, dtype=np.float32),
+                                0.0,
+                                1.0,
+                            )
+                        )
+        else:
+            for pattern in patterns:
+                project(pattern)
+                captured_image = capture_image()
+                if captured_image is None:
+                    return None
+                captured_images.append(captured_image)
+    except CameraCaptureError as exc:
+        print(f"Camera capture failed: {exc}", file=sys.stderr)
+        traceback.print_exc()
+        return None
+    except Exception as exc:
+        print(f"Unexpected error during capture: {exc}", file=sys.stderr)
+        traceback.print_exc()
+        return None
+
+    if len(captured_images) != len(patterns):
+        print(
+            "Camera capture failed: triggered frame count does not match "
+            f"the projected pattern count ({len(captured_images)} != {len(patterns)}).",
+            file=sys.stderr,
+        )
+        return None
+    return captured_images
+
+
 def warp_image(
     src_image: np.ndarray,
     pixel_map_path: str,
@@ -810,26 +881,31 @@ def main(argv: list[str] | None = None):
         )
 
     # Display patterns and capture images
-    captured_images = []
-
     # Create fullscreen window on projector display
     window_name = "projection_window"
-    cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
+    cv2.resizeWindow(window_name, proj.width, proj.height)
+    cv2.waitKey(50)
+    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
 
     os.makedirs(paths.captured_image_dir, exist_ok=True)
-    for pattern in inv_gamma_patterns:
-        bgr_pattern = cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR)
-        cv2.imshow(window_name, bgr_pattern)
-        cv2.waitKey(cfg.camera.wait_key_ms)
-
-        captured_image = capture_image()
-        if captured_image is None:
+    try:
+        captured_images = capture_projection_patterns(
+            inv_gamma_patterns,
+            cfg=cfg,
+            window_name=window_name,
+        )
+        if captured_images is None:
             print("Aborting pipeline because image capture failed.", file=sys.stderr)
             return
+    finally:
+        cv2.destroyWindow(window_name)
 
-        captured_images.append(captured_image)
+    # Captures are saved only after the projection/capture pass. In Canon
+    # trigger mode this keeps PNG encoding and other processing out of the
+    # timing-critical projection loop.
+    for index, captured_image in enumerate(captured_images):
         # Saved PNGs are sRGB-encoded for viewing only; the pipeline keeps
         # using the linear array in `captured_images`.
         bgr_captured = cv2.cvtColor(
@@ -838,12 +914,10 @@ def main(argv: list[str] | None = None):
         cv2.imwrite(
             os.path.join(
                 paths.captured_image_dir,
-                f"captured_image_{len(captured_images) - 1:02d}.png",
+                f"captured_image_{index:02d}.png",
             ),
             bgr_captured,
         )
-
-    cv2.destroyWindow(window_name)
 
     # Calculate color mixing matrices
     color_mixing_matrices = calc_color_mixing_matrices(
