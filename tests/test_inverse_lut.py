@@ -241,7 +241,7 @@ def test_run_calibration_capture_projects_and_measures(monkeypatch):
     assert np.isnan(data.measurements[0].measured_rgb[1])
 
 
-def test_run_calibration_capture_batches_triggered_hdr_by_need():
+def test_run_calibration_capture_batches_triggered_hdr_by_need(monkeypatch):
     samples = ilut.generate_calibration_patterns(
         2, 2, num_levels=3, source="gray", dtype=np.uint8
     )
@@ -295,7 +295,8 @@ def test_run_calibration_capture_batches_triggered_hdr_by_need():
         camera=CameraConfig(
             backend="canon_edsdk",
             tv="1/30",
-            wait_key_ms=0,
+            wait_key_ms=300,
+            trigger_wait_key_ms=1,
         ),
         inverse_lut=InverseLutConfig(
             num_levels=3,
@@ -305,16 +306,24 @@ def test_run_calibration_capture_batches_triggered_hdr_by_need():
         ),
     )
     camera = FakeTriggeredCamera()
+    waits = []
+    monkeypatch.setattr(ilut.cv2, "imshow", lambda *a, **k: None)
+    monkeypatch.setattr(
+        ilut.cv2,
+        "waitKey",
+        lambda wait_ms: waits.append(wait_ms) or 0,
+    )
 
     data = ilut.run_calibration_capture(
         samples,
         config=cfg,
         camera_backend=camera,
-        show_window=False,
+        show_window=True,
     )
 
     # Base: all patterns. Short/long: only the saturated/crushed pattern.
     assert camera.batches == [("1/30", 3), ("1/60", 1), ("1/15", 1)]
+    assert waits == [50, 300, 1, 1, 300, 300]
     assert data.meta["capture_mode"] == "edsdk_triggered_batch"
     means = [measurement.measured_rgb[0] for measurement in data.measurements]
     assert means[0] == pytest.approx(0.02, abs=1e-6)

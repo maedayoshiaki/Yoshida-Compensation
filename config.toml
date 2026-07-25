@@ -20,7 +20,8 @@ tv = "1/15"             # 60Hzの4周期を積分するフリッカーフリー�
 iso = "100"
 image_quality = "LR"
 device_index = 0        # OpenCV backend 使用時のカメラインデックス
-wait_key_ms = 300       # パターン表示後の待機時間 (ms)
+wait_key_ms = 300       # バッチ初回、および非トリガ撮影の表示待機 (ms)
+trigger_wait_key_ms = 1 # Canonトリガバッチ内の2枚目以降。実機で1msまで順序・色を確認済み
 half_size = false       # trueでRAWを半解像度現像(メモリ約1/4)。ROIは撮影解像度pxで指定すること
 
 [paths]

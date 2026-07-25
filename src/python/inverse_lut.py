@@ -975,12 +975,17 @@ def run_calibration_capture(
         )
         _save_crop(post, f"{record['tag']}_HDR")
 
-    def _project(sample: CalibrationSample, *, settle: bool) -> None:
+    def _project(
+        sample: CalibrationSample,
+        *,
+        wait_ms: int,
+        settle: bool,
+    ) -> None:
         if not show_window:
             return
         bgr = cv2.cvtColor(sample.image, cv2.COLOR_RGB2BGR)
         cv2.imshow(window_name, bgr)
-        cv2.waitKey(cfg.camera.wait_key_ms)
+        cv2.waitKey(wait_ms)
         if settle:
             time.sleep(_PROJECTION_SETTLE_SECONDS)
 
@@ -990,7 +995,11 @@ def run_calibration_capture(
         def capture_at(scale: float):
             # HDR brackets retain the same pattern, so only the first exposure
             # needs the extra projector settle delay.
-            _project(sample, settle=scale == 1.0)
+            _project(
+                sample,
+                wait_ms=cfg.camera.wait_key_ms,
+                settle=scale == 1.0,
+            )
             if not hdr_enabled:
                 return _prepare_frame(
                     sample,
@@ -1064,9 +1073,26 @@ def run_calibration_capture(
             prepared: dict[Tuple[float, float, float], np.ndarray] = {}
             with camera_backend.triggered_batch(tv_label) as batch:
                 capture_started = time.perf_counter()
-                for sample in pass_samples:
-                    # Every item in a pass changes the projected pattern.
-                    _project(sample, settle=True)
+                switch_wait_ms = int(
+                    getattr(
+                        cfg.camera,
+                        "trigger_wait_key_ms",
+                        cfg.camera.wait_key_ms,
+                    )
+                )
+                for index, sample in enumerate(pass_samples):
+                    # The first frame gets the full initialization wait.
+                    # Later synchronous EDSDK triggers provide ample settle
+                    # time while the previous RAW asset is transferred.
+                    _project(
+                        sample,
+                        wait_ms=(
+                            cfg.camera.wait_key_ms
+                            if index == 0
+                            else switch_wait_ms
+                        ),
+                        settle=False,
+                    )
                     batch.trigger()
                 capture_seconds = time.perf_counter() - capture_started
                 print(

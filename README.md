@@ -134,6 +134,7 @@ iso = "400"
 image_quality = "LR"
 device_index = 0
 wait_key_ms = 200
+trigger_wait_key_ms = 1
 
 [paths]
 c2p_map = ""                              # C2P 対応マップ (.npy)
@@ -160,6 +161,7 @@ tv = "1/15"
 iso = "400"
 image_quality = "LR"
 wait_key_ms = 200
+trigger_wait_key_ms = 1
 ```
 
 ```toml
@@ -181,6 +183,7 @@ wait_key_ms = 200
 | `camera` | `backend` | 使用するカメラ実装（`canon_edsdk` / `opencv`） |
 | `camera` | `device_index` | OpenCVバックエンドのカメラインデックス |
 | `camera` | `av`, `tv`, `iso`, `image_quality` | Canon EDSDK バックエンドの撮影パラメータ |
+| `camera` | `wait_key_ms`, `trigger_wait_key_ms` | 初回・通常撮影の投影待機時間と、Canonトリガバッチ内の画像切替待機時間（ms） |
 | `paths` | `c2p_map` | カメラ-プロジェクタ間のピクセル対応マップ（`.npy`） |
 | `paths` | `p2c_map` | プロジェクタ-カメラ間のピクセル対応マップ（`.npy`） |
 | `paths` | `warp_method` | ワーピング時に使う対応方向（`c2p` / `p2c`） |

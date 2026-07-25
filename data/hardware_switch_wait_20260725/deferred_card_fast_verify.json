@@ -1,0 +1,14 @@
+{
+  "patterns": 8,
+  "transfer": "deferred_card",
+  "initial_wait_ms": 300,
+  "switch_wait_ms": 1,
+  "capture_seconds": 16.228812100365758,
+  "later_card_drain_seconds": 9.088528599590063,
+  "later_development_seconds": 3.1642387993633747,
+  "total_seconds": 28.481579499319196,
+  "leave_on_card": false,
+  "rank": 4,
+  "fit_rmse": 0.03872278026689907,
+  "fit_max_abs": 0.08519281280864188
+}

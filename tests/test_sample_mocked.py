@@ -228,7 +228,8 @@ def test_capture_projection_patterns_defers_canon_development(monkeypatch) -> No
         camera=types.SimpleNamespace(
             backend="canon_edsdk",
             tv="1/30",
-            wait_key_ms=0,
+            wait_key_ms=300,
+            trigger_wait_key_ms=1,
         )
     )
     monkeypatch.setattr(
@@ -237,7 +238,12 @@ def test_capture_projection_patterns_defers_canon_development(monkeypatch) -> No
         lambda camera_cfg: FakeCamera(),
     )
     monkeypatch.setattr(sample.cv2, "imshow", lambda *args, **kwargs: None)
-    monkeypatch.setattr(sample.cv2, "waitKey", lambda *args, **kwargs: 0)
+    waits: list[int] = []
+    monkeypatch.setattr(
+        sample.cv2,
+        "waitKey",
+        lambda wait_ms: waits.append(wait_ms) or 0,
+    )
 
     captured = sample.capture_projection_patterns(
         patterns,
@@ -252,6 +258,7 @@ def test_capture_projection_patterns_defers_canon_development(monkeypatch) -> No
         [float(frame[0, 0, 0]) for frame in captured],
         [0.0, 0.1, 0.2],
     )
+    assert waits == [300, 1, 1]
 
 
 def test_sample_uses_camera_space_compensation_for_c2p(

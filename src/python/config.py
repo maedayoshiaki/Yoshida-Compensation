@@ -97,6 +97,9 @@ class CameraConfig:
             OpenCV バックエンドで使用するカメラインデックス。
         wait_key_ms: Delay in milliseconds between projecting a pattern and capturing.
             パターン投影からキャプチャまでの待機時間（ミリ秒）。
+        trigger_wait_key_ms: Short display-event wait after the first frame
+            in a Canon triggered batch. The synchronous EDSDK trigger supplies
+            the remaining projector-settle time while transferring RAW data.
         half_size: Develop the Canon RAW at half resolution (~1/4 the memory).
             Essential on low-RAM machines; the ROI-mean measurement is
             unaffected, but ROI coordinates must then be in half-res pixels.
@@ -115,6 +118,7 @@ class CameraConfig:
     image_quality: str = "LR"
     device_index: int = 0
     wait_key_ms: int = 200
+    trigger_wait_key_ms: int = 200
     half_size: bool = False
 
 

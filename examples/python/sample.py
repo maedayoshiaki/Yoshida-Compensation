@@ -560,10 +560,10 @@ def capture_projection_patterns(
     backend_name = cfg.camera.backend.strip().lower()
     captured_images: list[np.ndarray] = []
 
-    def project(pattern: np.ndarray) -> None:
+    def project(pattern: np.ndarray, wait_ms: int) -> None:
         bgr_pattern = cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR)
         cv2.imshow(window_name, bgr_pattern)
-        cv2.waitKey(cfg.camera.wait_key_ms)
+        cv2.waitKey(wait_ms)
 
     try:
         if backend_name == "canon_edsdk":
@@ -576,12 +576,25 @@ def capture_projection_patterns(
                     )
                 print(
                     f"Triggered capture: projecting and capturing "
-                    f"{len(patterns)} pattern(s) before RAW development."
+                    f"{len(patterns)} pattern(s) before RAW development "
+                    f"(first wait={cfg.camera.wait_key_ms}ms, "
+                    f"switch wait="
+                    f"{getattr(cfg.camera, 'trigger_wait_key_ms', cfg.camera.wait_key_ms)}ms)."
                 )
                 with triggered_batch(cfg.camera.tv) as batch:
                     capture_started = time.perf_counter()
-                    for pattern in patterns:
-                        project(pattern)
+                    switch_wait_ms = int(
+                        getattr(
+                            cfg.camera,
+                            "trigger_wait_key_ms",
+                            cfg.camera.wait_key_ms,
+                        )
+                    )
+                    for index, pattern in enumerate(patterns):
+                        project(
+                            pattern,
+                            cfg.camera.wait_key_ms if index == 0 else switch_wait_ms,
+                        )
                         batch.trigger()
                     capture_seconds = time.perf_counter() - capture_started
                     print(
@@ -604,7 +617,7 @@ def capture_projection_patterns(
                     )
         else:
             for pattern in patterns:
-                project(pattern)
+                project(pattern, cfg.camera.wait_key_ms)
                 captured_image = capture_image()
                 if captured_image is None:
                     return None

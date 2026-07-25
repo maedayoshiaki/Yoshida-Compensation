@@ -120,13 +120,12 @@ def _stub_window_calls(monkeypatch) -> None:
         "namedWindow",
         "setWindowProperty",
         "moveWindow",
+        "resizeWindow",
         "imshow",
         "destroyWindow",
     ):
         monkeypatch.setattr(new_sample.cv2, func_name, lambda *args, **kwargs: None)
     monkeypatch.setattr(new_sample.cv2, "waitKey", lambda *args, **kwargs: 0)
-    # Skip the real projection-settle sleep so the test stays fast.
-    monkeypatch.setattr(new_sample.time, "sleep", lambda *args, **kwargs: None)
 
 
 def test_sample_inverse_lut_runs_and_linearizes_with_lut(tmp_path, monkeypatch) -> None:

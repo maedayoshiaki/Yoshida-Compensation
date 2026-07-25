@@ -1,0 +1,10 @@
+{
+  "patterns": 27,
+  "initial_wait_ms": 300,
+  "switch_wait_ms": 1,
+  "half_size": true,
+  "capture_and_development_seconds": 76.96535449940711,
+  "rank": 4,
+  "fit_rmse": 0.058459944853092416,
+  "fit_max_abs": 0.18361301535268082
+}

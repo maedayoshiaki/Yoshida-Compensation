@@ -35,7 +35,6 @@ from __future__ import annotations
 import importlib.util
 import os
 import sys
-import time
 from pathlib import Path
 
 import cv2
@@ -211,26 +210,32 @@ def main(argv: list[str] | None = None) -> None:
     # 2. Display each LUT-linearized pattern and capture the camera response.
     #    LUT 線形化パターンを表示し、カメラ応答を撮影する。
     window_name = "projection_window"
-    cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
-    cv2.setWindowProperty(window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+    cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
     cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
+    cv2.resizeWindow(window_name, proj.width, proj.height)
+    cv2.waitKey(50)
+    cv2.setWindowProperty(
+        window_name,
+        cv2.WND_PROP_FULLSCREEN,
+        cv2.WINDOW_FULLSCREEN,
+    )
+    if hasattr(cv2, "WND_PROP_TOPMOST"):
+        cv2.setWindowProperty(window_name, cv2.WND_PROP_TOPMOST, 1)
 
     os.makedirs(paths.captured_image_dir, exist_ok=True)
-    captured_images = []
-    for pattern in lut_patterns:
-        cv2.imshow(window_name, cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR))
-        cv2.waitKey(cfg.camera.wait_key_ms)
-        # Settle: let the projector display fully switch to the new pattern
-        # before capturing (same buffer as calibration/validation).
-        time.sleep(ilut._PROJECTION_SETTLE_SECONDS)
-
-        captured_image = sample.capture_image()
-        if captured_image is None:
+    try:
+        captured_images = sample.capture_projection_patterns(
+            lut_patterns,
+            cfg=cfg,
+            window_name=window_name,
+        )
+        if captured_images is None:
             print("Aborting pipeline because image capture failed.", file=sys.stderr)
-            cv2.destroyWindow(window_name)
             return
+    finally:
+        cv2.destroyWindow(window_name)
 
-        captured_images.append(captured_image)
+    for captured_image in captured_images:
         # Saved PNGs are sRGB-encoded for viewing only; the pipeline keeps
         # using the linear array in `captured_images`.
         cv2.imwrite(
@@ -242,8 +247,6 @@ def main(argv: list[str] | None = None) -> None:
                 sample.capture_to_srgb_uint8(captured_image), cv2.COLOR_RGB2BGR
             ),
         )
-
-    cv2.destroyWindow(window_name)
 
     # 3. Calculate color mixing matrices from linear patterns and captures.
     #    リニアパターンと撮影画像からカラーミキシング行列を計算する。
