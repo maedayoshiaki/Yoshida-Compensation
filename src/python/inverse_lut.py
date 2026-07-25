@@ -585,6 +585,33 @@ def _frame_and_ratio(ret, nominal_scale: float) -> Tuple[np.ndarray, float]:
     return np.asarray(ret, dtype=np.float32), float(nominal_scale)
 
 
+def _merge_hdr_exposures(
+    exposures: Sequence[Tuple[np.ndarray, float]],
+    *,
+    trust_high: float,
+) -> np.ndarray:
+    """Merge already captured exposures using the HDR selection policy."""
+    if not exposures:
+        raise ValueError("At least one exposure is required for HDR merge.")
+
+    high = float(trust_high) / 255.0
+    base = np.asarray(exposures[0][0], dtype=np.float32)
+    result = base.copy()
+    chosen = np.zeros(base.shape, dtype=np.float32)
+    for frame, ratio in sorted(exposures, key=lambda item: -item[1]):
+        frame = np.asarray(frame, dtype=np.float32)
+        take = (frame < high) & (ratio > chosen)
+        result = np.where(take, frame / ratio, result)
+        chosen = np.where(take, np.float32(ratio), chosen)
+    shortest_frame, shortest_ratio = min(exposures, key=lambda item: item[1])
+    result = np.where(
+        chosen == 0.0,
+        np.asarray(shortest_frame, dtype=np.float32) / shortest_ratio,
+        result,
+    )
+    return result.astype(np.float32)
+
+
 def capture_hdr_linear(
     capture_at_fn: Callable[[float], "np.ndarray | Tuple[np.ndarray, float]"],
     *,
@@ -701,15 +728,7 @@ def capture_hdr_linear(
     # channel decides its own saturation/crush from its own value; a bright
     # channel is not held back by a dark one and vice versa. Elements saturated
     # in every exposure fall back to the shortest one.
-    result = base.copy()
-    chosen = np.zeros(base.shape, dtype=np.float32)  # ratio of chosen exposure; 0 = none
-    for frame, ratio in sorted(exposures, key=lambda e: -e[1]):  # longest first
-        take = (frame < high) & (ratio > chosen)
-        result = np.where(take, frame / ratio, result)
-        chosen = np.where(take, np.float32(ratio), chosen)
-    shortest_frame, shortest_ratio = min(exposures, key=lambda e: e[1])
-    result = np.where(chosen == 0.0, shortest_frame / shortest_ratio, result)
-    return result.astype(np.float32)
+    return _merge_hdr_exposures(exposures, trust_high=trust_high)
 
 
 def _query_supported_shutter_speeds(camera_backend: Any) -> Optional[List[str]]:
@@ -897,50 +916,95 @@ def run_calibration_capture(
             result = np.where(mask, recovered, result)
         return result
 
-    def capture_fn(sample: CalibrationSample) -> np.ndarray:
-        tag = ""
-        exp = {"n": 0}
-        exposures: list = []  # (png_path, ratio) per exposure, base ratio 1.0
-        if debug:
-            r, g, b = (int(round(v * 255)) for v in sample.input_rgb)
-            tag = f"{debug_state['idx']:02d}_{sample.kind}_r{r:03d}g{g:03d}b{b:03d}"
+    debug_records: dict[Tuple[float, float, float], dict] = {}
 
-        def _prepare(frame: np.ndarray, tv_label: str, ratio: float) -> np.ndarray:
-            # Always reduce to the ROI mean (1,1,3) for the in-memory HDR merge
-            # -- that is the exact measurement and stays memory-light. In debug
-            # also save the full-res crop to disk for later image inspection.
-            if debug:
-                crop = _roi_crop(frame)  # full-res copy (frees the 390 MB frame)
-                safe_tv = tv_label.replace("/", "-").replace('"', "s").replace(" ", "")
-                path = _save_crop(crop, f"{tag}_pre{exp['n']:02d}_tv{safe_tv}")
-                exposures.append((path, float(ratio)))
-                mean = crop.reshape(-1, 3).mean(axis=0)
-                debug_state["rows"].append(
-                    (tag, f"pre:{tv_label}", *[float(x) for x in mean])
-                )
-                exp["n"] += 1
-                return mean.reshape(1, 1, 3).astype(np.float32)
-            return reduce_frame(frame, roi).reshape(1, 1, 3)
+    def _sample_key(sample: CalibrationSample) -> Tuple[float, float, float]:
+        return tuple(round(float(v), 6) for v in sample.input_rgb)
+
+    def _debug_record(sample: CalibrationSample) -> dict:
+        key = _sample_key(sample)
+        record = debug_records.get(key)
+        if record is None:
+            r, g, b = (int(round(v * 255)) for v in sample.input_rgb)
+            tag = (
+                f"{debug_state['idx']:02d}_{sample.kind}_"
+                f"r{r:03d}g{g:03d}b{b:03d}"
+            )
+            record = {"tag": tag, "n": 0, "exposures": []}
+            debug_records[key] = record
+            debug_state["idx"] += 1
+        return record
+
+    def _prepare_frame(
+        sample: CalibrationSample,
+        frame: np.ndarray,
+        tv_label: str,
+        ratio: float,
+    ) -> np.ndarray:
+        # Reduce immediately after deferred RAW development. This keeps only a
+        # 1x1 RGB mean per exposure in memory even for a large calibration.
+        if debug:
+            record = _debug_record(sample)
+            crop = _roi_crop(frame)
+            safe_tv = tv_label.replace("/", "-").replace('"', "s").replace(" ", "")
+            path = _save_crop(
+                crop,
+                f"{record['tag']}_pre{record['n']:02d}_tv{safe_tv}",
+            )
+            record["exposures"].append((path, float(ratio)))
+            mean = crop.reshape(-1, 3).mean(axis=0)
+            debug_state["rows"].append(
+                (record["tag"], f"pre:{tv_label}", *[float(x) for x in mean])
+            )
+            record["n"] += 1
+            return mean.reshape(1, 1, 3).astype(np.float32)
+        return reduce_frame(frame, roi).reshape(1, 1, 3)
+
+    def _finish_debug(sample: CalibrationSample, merged: np.ndarray) -> None:
+        if not debug:
+            return
+        record = _debug_record(sample)
+        mean = np.asarray(merged, dtype=np.float32).reshape(-1, 3).mean(axis=0)
+        debug_state["rows"].append(
+            (record["tag"], "post_hdr", *[float(x) for x in mean])
+        )
+        post = _merge_saved_crops(
+            record["exposures"],
+            ilut_cfg.trust_low / 255.0,
+            ilut_cfg.trust_high / 255.0,
+        )
+        _save_crop(post, f"{record['tag']}_HDR")
+
+    def _project(sample: CalibrationSample, *, settle: bool) -> None:
+        if not show_window:
+            return
+        bgr = cv2.cvtColor(sample.image, cv2.COLOR_RGB2BGR)
+        cv2.imshow(window_name, bgr)
+        cv2.waitKey(cfg.camera.wait_key_ms)
+        if settle:
+            time.sleep(_PROJECTION_SETTLE_SECONDS)
+
+    def capture_fn(sample: CalibrationSample) -> np.ndarray:
+        """Legacy immediate path for non-trigger-capable camera backends."""
 
         def capture_at(scale: float):
-            if show_window:
-                bgr = cv2.cvtColor(sample.image, cv2.COLOR_RGB2BGR)
-                cv2.imshow(window_name, bgr)
-                cv2.waitKey(cfg.camera.wait_key_ms)
-                # Settle once per pattern: the base exposure (scale == 1.0) is
-                # the first shot after this (new) pattern is projected, so wait
-                # for the display to fully switch before capturing. HDR brackets
-                # (scale != 1.0) keep the same pattern up and need no extra wait.
-                if scale == 1.0:
-                    time.sleep(_PROJECTION_SETTLE_SECONDS)
+            # HDR brackets retain the same pattern, so only the first exposure
+            # needs the extra projector settle delay.
+            _project(sample, settle=scale == 1.0)
             if not hdr_enabled:
-                return _prepare(camera_backend.capture_linear_rgb(), base_tv, 1.0)
+                return _prepare_frame(
+                    sample,
+                    camera_backend.capture_linear_rgb(),
+                    base_tv,
+                    1.0,
+                )
             # HDR bracket (Canon only): set the shutter explicitly per shot on
             # the persistent session -- base tv for the reference exposure, a
             # snapped realizable Tv for brackets -- and report the *actual*
             # exposure ratio so the merge does not assume the nominal scale.
             if scale == 1.0:
-                return _prepare(
+                return _prepare_frame(
+                    sample,
                     camera_backend.capture_linear_rgb(tv=base_tv), base_tv, 1.0
                 )
             scaled_tv = scale_shutter_tv(
@@ -948,7 +1012,8 @@ def run_calibration_capture(
             )
             actual_ratio = tv_to_seconds(scaled_tv) / base_seconds
             return (
-                _prepare(
+                _prepare_frame(
+                    sample,
                     camera_backend.capture_linear_rgb(tv=scaled_tv),
                     scaled_tv,
                     actual_ratio,
@@ -967,16 +1032,143 @@ def run_calibration_capture(
             # useless long-exposure brackets.
             channels=sample.recorded_channels,
         )
-        if debug:
-            mean = np.asarray(merged, dtype=np.float32).reshape(-1, 3).mean(axis=0)
-            debug_state["rows"].append((tag, "post_hdr", *[float(x) for x in mean]))
-            # Build a viewable full-res post-HDR image from the saved crops.
-            post = _merge_saved_crops(
-                exposures, ilut_cfg.trust_low / 255.0, ilut_cfg.trust_high / 255.0
-            )
-            _save_crop(post, f"{tag}_HDR")
-            debug_state["idx"] += 1
+        _finish_debug(sample, merged)
         return merged
+
+    def _run_triggered_capture() -> CalibrationData:
+        """Capture a pass first, then develop/reduce its RAW files."""
+        unique: list[CalibrationSample] = []
+        seen: set[Tuple[float, float, float]] = set()
+        for sample in samples:
+            key = _sample_key(sample)
+            if key not in seen:
+                seen.add(key)
+                unique.append(sample)
+
+        exposures: dict[
+            Tuple[float, float, float], list[Tuple[np.ndarray, float]]
+        ] = {_sample_key(sample): [] for sample in unique}
+
+        def capture_pass(
+            pass_samples: Sequence[CalibrationSample],
+            tv_label: str,
+            ratio: float,
+        ) -> dict[Tuple[float, float, float], np.ndarray]:
+            if not pass_samples:
+                return {}
+            print(
+                f"inverse_lut: triggered capture {len(pass_samples)} pattern(s) "
+                f"at Tv={tv_label}; RAW development follows the pass.",
+                file=sys.stderr,
+            )
+            prepared: dict[Tuple[float, float, float], np.ndarray] = {}
+            with camera_backend.triggered_batch(tv_label) as batch:
+                for sample in pass_samples:
+                    # Every item in a pass changes the projected pattern.
+                    _project(sample, settle=True)
+                    batch.trigger()
+                for sample, frame in zip(
+                    pass_samples, batch.iter_linear_rgb(), strict=True
+                ):
+                    prepared[_sample_key(sample)] = _prepare_frame(
+                        sample, frame, tv_label, ratio
+                    )
+            return prepared
+
+        base_frames = capture_pass(unique, base_tv, 1.0)
+        for sample in unique:
+            key = _sample_key(sample)
+            exposures[key].append((base_frames[key], 1.0))
+
+        if hdr_enabled:
+            low = float(ilut_cfg.trust_low) / 255.0
+            high = float(ilut_cfg.trust_high) / 255.0
+
+            def needs_short(sample: CalibrationSample, frame: np.ndarray) -> bool:
+                return bool(
+                    np.any(
+                        frame[..., list(sample.recorded_channels)] >= high
+                    )
+                )
+
+            def needs_long(sample: CalibrationSample, frame: np.ndarray) -> bool:
+                return bool(
+                    np.any(
+                        frame[..., list(sample.recorded_channels)] <= low
+                    )
+                )
+
+            pending = [
+                sample
+                for sample in unique
+                if needs_short(sample, base_frames[_sample_key(sample)])
+            ]
+            for stop in range(1, int(ilut_cfg.hdr_max_stops) + 1):
+                if not pending:
+                    break
+                scale = 0.5**stop
+                tv_label = scale_shutter_tv(
+                    base_tv,
+                    scale,
+                    supported=supported_tv,
+                    refresh_hz=refresh_hz,
+                )
+                ratio = tv_to_seconds(tv_label) / base_seconds
+                frames = capture_pass(pending, tv_label, ratio)
+                for sample in pending:
+                    exposures[_sample_key(sample)].append(
+                        (frames[_sample_key(sample)], ratio)
+                    )
+                pending = [
+                    sample
+                    for sample in pending
+                    if needs_short(sample, frames[_sample_key(sample)])
+                ]
+
+            pending = [
+                sample
+                for sample in unique
+                if needs_long(sample, base_frames[_sample_key(sample)])
+            ]
+            for stop in range(1, int(ilut_cfg.hdr_max_stops) + 1):
+                if not pending:
+                    break
+                scale = 2.0**stop
+                tv_label = scale_shutter_tv(
+                    base_tv,
+                    scale,
+                    supported=supported_tv,
+                    refresh_hz=refresh_hz,
+                )
+                ratio = tv_to_seconds(tv_label) / base_seconds
+                frames = capture_pass(pending, tv_label, ratio)
+                for sample in pending:
+                    exposures[_sample_key(sample)].append(
+                        (frames[_sample_key(sample)], ratio)
+                    )
+                pending = [
+                    sample
+                    for sample in pending
+                    if needs_long(sample, frames[_sample_key(sample)])
+                ]
+
+        merged_by_key = {
+            key: _merge_hdr_exposures(
+                captured,
+                trust_high=ilut_cfg.trust_high,
+            )
+            for key, captured in exposures.items()
+        }
+        for sample in unique:
+            _finish_debug(sample, merged_by_key[_sample_key(sample)])
+
+        data = measure_calibration_samples(
+            samples,
+            lambda sample: merged_by_key[_sample_key(sample)],
+            roi,
+        )
+        data.meta["capture_mode"] = "edsdk_triggered_batch"
+        return data
 
     with session_cm:
         # Query the body's actual Tv menu once (reusing the open session) so
@@ -985,13 +1177,22 @@ def run_calibration_capture(
             supported_tv = _query_supported_shutter_speeds(camera_backend)
         if show_window:
             proj = cfg.projector
-            cv2.namedWindow(window_name, cv2.WND_PROP_FULLSCREEN)
+            # Move the normal window onto the target display before entering
+            # fullscreen. On this multi-monitor Windows setup, fullscreen-first
+            # can pin the window to the primary monitor even after moveWindow.
+            cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
+            cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
+            cv2.resizeWindow(window_name, proj.width, proj.height)
+            cv2.waitKey(50)
             cv2.setWindowProperty(
                 window_name, cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN
             )
-            cv2.moveWindow(window_name, proj.pos_x, proj.pos_y)
         try:
-            data = measure_calibration_samples(samples, capture_fn, roi)
+            if callable(getattr(camera_backend, "triggered_batch", None)):
+                data = _run_triggered_capture()
+            else:
+                data = measure_calibration_samples(samples, capture_fn, roi)
+                data.meta["capture_mode"] = "immediate"
         finally:
             if show_window:
                 cv2.destroyWindow(window_name)

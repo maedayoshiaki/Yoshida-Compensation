@@ -11,7 +11,11 @@ Canon カメラから RAW を取得し、測光パイプライン向けのリニ
 from __future__ import annotations
 
 import io
+import tempfile
+from pathlib import Path
+from typing import Iterator
 
+import cv2
 import numpy as np
 
 from .base import CameraBackend, CameraCaptureError
@@ -153,6 +157,121 @@ def capture_srgb_uint8(camera_controller, image_quality: str) -> np.ndarray:
     return np.clip(srgb * 255.0, 0.0, 255.0).astype(np.uint8)
 
 
+def _captured_bytes_to_linear_rgb(
+    payload: bytes,
+    filename: str,
+    image_quality: str,
+    *,
+    half_size: bool = False,
+) -> np.ndarray:
+    """Develop one triggered-capture asset into linear RGB."""
+    suffix = Path(filename).suffix.lower()
+    if suffix in {".cr2", ".cr3", ".raw"}:
+        return _raw_to_linear_rgb(payload, half_size=half_size)
+
+    encoded = np.frombuffer(payload, dtype=np.uint8)
+    bgr = cv2.imdecode(encoded, cv2.IMREAD_COLOR)
+    if bgr is None:
+        raise CameraCaptureError(
+            f"Failed to decode triggered capture asset {filename!r}."
+        )
+    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    return _normalize_capture_output(rgb, image_quality)
+
+
+class CanonEdsdkTriggeredBatch:
+    """Spool fast triggered captures, then develop them sequentially.
+
+    The camera transfers each asset to memory, but RAW development is deferred
+    until every projection in the batch has been captured. Assets are spooled
+    to a temporary directory to avoid retaining an entire calibration pass in
+    RAM.
+    """
+
+    def __init__(self, camera: "CanonEdsdkCamera", tv: str) -> None:
+        controller = camera._controller
+        if controller is None:
+            raise CameraCaptureError(
+                "Triggered batch capture requires an open camera session."
+            )
+        if not hasattr(controller, "arm_triggered_capture"):
+            raise CameraCaptureError(
+                "edsdk-python >= 0.2.0 is required for triggered batch capture."
+            )
+
+        self._camera = camera
+        self._temporary = tempfile.TemporaryDirectory(
+            prefix="yoshida-edsdk-trigger-"
+        )
+        self._paths: list[tuple[Path, str]] = []
+        self._mode = controller.arm_triggered_capture(
+            transfer="memory",
+            defaults={"tv": tv},
+        )
+        self._armed = True
+
+    @staticmethod
+    def _select_asset(frame, wants_raw: bool):
+        assets = list(frame.assets)
+        if not assets:
+            raise CameraCaptureError(
+                "Triggered capture completed without an image asset."
+            )
+        if wants_raw:
+            for asset in assets:
+                if Path(asset.filename).suffix.lower() in {".cr2", ".cr3", ".raw"}:
+                    return asset
+        return assets[0]
+
+    def trigger(self) -> None:
+        """Capture exactly one frame and spool its encoded bytes."""
+        if not self._armed:
+            raise CameraCaptureError("Triggered capture batch is already closed.")
+        frame = self._mode.trigger(wait=True)
+        asset = self._select_asset(
+            frame,
+            _image_quality_looks_raw(self._camera.config.image_quality),
+        )
+        if asset.data is None:
+            raise CameraCaptureError(
+                f"Triggered capture asset {asset.filename!r} has no memory data."
+            )
+        index = len(self._paths)
+        suffix = Path(asset.filename).suffix or ".bin"
+        path = Path(self._temporary.name) / f"{index:06d}{suffix}"
+        path.write_bytes(asset.data)
+        self._paths.append((path, asset.filename))
+
+    def _disarm(self) -> None:
+        if self._armed:
+            self._mode.disarm(leave_on_card=True)
+            self._armed = False
+
+    def iter_linear_rgb(self) -> Iterator[np.ndarray]:
+        """Disarm capture and develop the spooled frames in trigger order."""
+        self._disarm()
+        half = bool(getattr(self._camera.config, "half_size", False))
+        for path, filename in self._paths:
+            try:
+                yield _captured_bytes_to_linear_rgb(
+                    path.read_bytes(),
+                    filename,
+                    self._camera.config.image_quality,
+                    half_size=half,
+                )
+            finally:
+                path.unlink(missing_ok=True)
+
+    def __enter__(self) -> "CanonEdsdkTriggeredBatch":
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        try:
+            self._disarm()
+        finally:
+            self._temporary.cleanup()
+
+
 class CanonEdsdkCamera(CameraBackend):
     """Capture backend backed by Canon EDSDK.
 
@@ -277,6 +396,10 @@ class CanonEdsdkCamera(CameraBackend):
                 tolerate_not_supported=True,
             )
             return self._capture_via(camera, None)
+
+    def triggered_batch(self, tv: str) -> CanonEdsdkTriggeredBatch:
+        """Create a triggered batch that defers RAW development."""
+        return CanonEdsdkTriggeredBatch(self, tv)
 
     def supported_shutter_speeds(self) -> list[str]:
         """List the Tv (shutter) values this camera body accepts.

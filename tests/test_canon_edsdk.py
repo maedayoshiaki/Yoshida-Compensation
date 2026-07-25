@@ -1,9 +1,11 @@
 import io
 import sys
 import types
+from types import SimpleNamespace
 
 import numpy as np
 
+from src.python.camera import canon_edsdk
 from src.python.camera.canon_edsdk import CanonEdsdkCamera, _raw_to_linear_rgb
 from src.python.config import CameraConfig
 
@@ -91,3 +93,64 @@ def test_capture_linear_rgb_converts_jpeg_output_to_linear(monkeypatch) -> None:
     assert np.isclose(linear_rgb[0, 0, 0], 1.0)
     assert np.isclose(linear_rgb[0, 0, 1], _srgb_to_linear(128 / 255.0))
     assert np.isclose(linear_rgb[0, 0, 2], 0.0)
+
+
+def test_triggered_batch_captures_before_developing(monkeypatch) -> None:
+    events: list[str] = []
+
+    class FakeMode:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def trigger(self, *, wait):
+            assert wait is True
+            events.append(f"trigger:{self.index}")
+            frame = SimpleNamespace(
+                assets=(
+                    SimpleNamespace(
+                        filename=f"frame-{self.index}.CR3",
+                        data=f"raw-{self.index}".encode(),
+                    ),
+                )
+            )
+            self.index += 1
+            return frame
+
+        def disarm(self, *, leave_on_card):
+            assert leave_on_card is True
+            events.append("disarm")
+
+    class FakeController:
+        def arm_triggered_capture(self, **kwargs):
+            assert kwargs == {
+                "transfer": "memory",
+                "defaults": {"tv": "1/30"},
+            }
+            return FakeMode()
+
+    def fake_develop(payload, filename, image_quality, *, half_size):
+        events.append(f"develop:{filename}")
+        return np.full((1, 1, 3), int(payload[-1:]), dtype=np.float32)
+
+    monkeypatch.setattr(
+        canon_edsdk,
+        "_captured_bytes_to_linear_rgb",
+        fake_develop,
+    )
+    camera = CanonEdsdkCamera(CameraConfig(image_quality="LR"))
+    camera._controller = FakeController()
+
+    with camera.triggered_batch("1/30") as batch:
+        batch.trigger()
+        batch.trigger()
+        assert events == ["trigger:0", "trigger:1"]
+        frames = list(batch.iter_linear_rgb())
+
+    assert events == [
+        "trigger:0",
+        "trigger:1",
+        "disarm",
+        "develop:frame-0.CR3",
+        "develop:frame-1.CR3",
+    ]
+    assert [float(frame[0, 0, 0]) for frame in frames] == [0.0, 1.0]

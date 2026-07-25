@@ -6,8 +6,15 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import numpy as np
+import pytest
 
-from src.python.config import AppConfig, InverseLutConfig, reload_config
+from src.python.config import (
+    AppConfig,
+    CameraConfig,
+    InverseLutConfig,
+    ProjectorConfig,
+    reload_config,
+)
 from src.python import inverse_lut as ilut
 
 
@@ -195,7 +202,14 @@ def test_measure_gray_records_all_channels():
 
 
 def test_run_calibration_capture_projects_and_measures(monkeypatch):
-    for name in ("namedWindow", "setWindowProperty", "moveWindow", "imshow", "destroyWindow"):
+    for name in (
+        "namedWindow",
+        "setWindowProperty",
+        "moveWindow",
+        "resizeWindow",
+        "imshow",
+        "destroyWindow",
+    ):
         monkeypatch.setattr(ilut.cv2, name, lambda *a, **k: None)
     monkeypatch.setattr(ilut.cv2, "waitKey", lambda *a, **k: 0)
     # Skip the real projection-settle sleep so the test stays fast.
@@ -225,6 +239,87 @@ def test_run_calibration_capture_projects_and_measures(monkeypatch):
     # 単独ランプ先頭 (0,0,0) は投影チャンネル(0)のみ記録
     assert data.measurements[0].measured_rgb[0] == 0.5
     assert np.isnan(data.measurements[0].measured_rgb[1])
+
+
+def test_run_calibration_capture_batches_triggered_hdr_by_need():
+    samples = ilut.generate_calibration_patterns(
+        2, 2, num_levels=3, source="gray", dtype=np.uint8
+    )
+
+    class FakeBatch:
+        def __init__(self, camera, tv):
+            self.camera = camera
+            self.tv = tv
+            self.shots = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            self.camera.batches.append((self.tv, self.shots))
+
+        def trigger(self):
+            self.shots += 1
+
+        def iter_linear_rgb(self):
+            values = {
+                "1/30": [0.02, 0.5, 1.0],
+                "1/60": [0.6],
+                "1/15": [0.04],
+            }[self.tv]
+            assert len(values) == self.shots
+            for value in values:
+                yield np.full((2, 2, 3), value, dtype=np.float32)
+
+    class FakeTriggeredCamera:
+        def __init__(self):
+            self.batches = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def supported_shutter_speeds(self):
+            return ["1/60", "1/30", "1/15"]
+
+        def triggered_batch(self, tv):
+            return FakeBatch(self, tv)
+
+        def capture_linear_rgb(self, tv=None):
+            raise AssertionError("immediate capture path must not be used")
+
+    cfg = AppConfig(
+        projector=ProjectorConfig(width=2, height=2, refresh_rate=0),
+        camera=CameraConfig(
+            backend="canon_edsdk",
+            tv="1/30",
+            wait_key_ms=0,
+        ),
+        inverse_lut=InverseLutConfig(
+            num_levels=3,
+            source="gray",
+            hdr_enabled=True,
+            hdr_max_stops=3,
+        ),
+    )
+    camera = FakeTriggeredCamera()
+
+    data = ilut.run_calibration_capture(
+        samples,
+        config=cfg,
+        camera_backend=camera,
+        show_window=False,
+    )
+
+    # Base: all patterns. Short/long: only the saturated/crushed pattern.
+    assert camera.batches == [("1/30", 3), ("1/60", 1), ("1/15", 1)]
+    assert data.meta["capture_mode"] == "edsdk_triggered_batch"
+    means = [measurement.measured_rgb[0] for measurement in data.measurements]
+    assert means[0] == pytest.approx(0.02, abs=1e-6)
+    assert means[1] == pytest.approx(0.5, abs=1e-6)
+    assert means[2] == pytest.approx(1.2, abs=1e-6)
 
 
 def test_capture_hdr_linear_single_exposure_when_disabled():
@@ -579,7 +674,14 @@ def test_save_and_load_inverse_lut_roundtrip(tmp_path):
 def test_cli_main_builds_and_saves_lut(tmp_path, monkeypatch):
     import importlib.util
 
-    for name in ("namedWindow", "setWindowProperty", "moveWindow", "imshow", "destroyWindow"):
+    for name in (
+        "namedWindow",
+        "setWindowProperty",
+        "moveWindow",
+        "resizeWindow",
+        "imshow",
+        "destroyWindow",
+    ):
         monkeypatch.setattr(ilut.cv2, name, lambda *a, **k: None)
     monkeypatch.setattr(ilut.cv2, "waitKey", lambda *a, **k: 0)
 

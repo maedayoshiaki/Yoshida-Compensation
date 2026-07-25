@@ -2,9 +2,9 @@
 
 [projector]
 gamma = 2.2
-width = 1920
-height = 1080
-pos_x = 1920            # プロジェクタウィンドウの X 位置 (DISPLAY2 の左端)
+width = 1280
+height = 720
+pos_x = 3440            # 投影ウィンドウ5（このPCでは \\.\DISPLAY4）の左端
 pos_y = 0               # プロジェクタウィンドウの Y 位置
 refresh_rate = 60.0     # リフレッシュレート(Hz)。露光をこの周期の整数倍へスナップ(フリッカー防止)。0で無効
 

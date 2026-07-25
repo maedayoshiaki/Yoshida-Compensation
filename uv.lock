@@ -81,6 +81,32 @@ wheels = [
 ]
 
 [[package]]
+name = "edsdk-python"
+version = "0.2.0"
+source = { url = "https://github.com/youme-town/edsdk-python/releases/download/v0.2.0/edsdk_python-0.2.0-cp313-cp313-win_amd64.whl" }
+dependencies = [
+    { name = "pywin32", marker = "sys_platform == 'win32'" },
+]
+wheels = [
+    { url = "https://github.com/youme-town/edsdk-python/releases/download/v0.2.0/edsdk_python-0.2.0-cp313-cp313-win_amd64.whl", hash = "sha256:b0f6bef3ef3ed0bb92baafb705c745b6a9ca5d216989828274cb33c5366e2032" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "black", marker = "extra == 'dev'", specifier = ">=23.12" },
+    { name = "imageio", marker = "extra == 'examples'", specifier = ">=2.34" },
+    { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.8" },
+    { name = "numpy", marker = "extra == 'examples'", specifier = ">=1.24" },
+    { name = "opencv-python", marker = "extra == 'examples'", specifier = ">=4.9" },
+    { name = "pillow", marker = "extra == 'examples'", specifier = ">=10.0" },
+    { name = "pytest", marker = "extra == 'dev'", specifier = ">=7.4" },
+    { name = "pywin32", marker = "sys_platform == 'win32'", specifier = ">=228" },
+    { name = "rawpy", marker = "extra == 'examples'", specifier = ">=0.21.0" },
+    { name = "tomli", marker = "python_full_version < '3.11' and extra == 'dev'", specifier = ">=2.0.1" },
+]
+provides-extras = ["examples", "dev"]
+
+[[package]]
 name = "filelock"
 version = "3.20.0"
 source = { registry = "https://pypi.org/simple" }
@@ -888,6 +914,7 @@ name = "yoshida-compensation"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "edsdk-python", marker = "python_full_version < '3.14' and sys_platform == 'win32'" },
     { name = "numpy" },
     { name = "opencv-contrib-python" },
     { name = "pillow" },
@@ -899,7 +926,6 @@ dependencies = [
 sample = [
     { name = "matplotlib" },
     { name = "psutil" },
-    { name = "pywin32", marker = "sys_platform == 'win32'" },
     { name = "rawpy" },
 ]
 
@@ -910,12 +936,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "edsdk-python", marker = "python_full_version == '3.13.*' and sys_platform == 'win32'", url = "https://github.com/youme-town/edsdk-python/releases/download/v0.2.0/edsdk_python-0.2.0-cp313-cp313-win_amd64.whl" },
     { name = "matplotlib", marker = "extra == 'sample'" },
     { name = "numpy", specifier = ">=2.3.4" },
     { name = "opencv-contrib-python", specifier = ">=4.11.0.86" },
     { name = "pillow", specifier = ">=12.0.0" },
     { name = "psutil", marker = "extra == 'sample'" },
-    { name = "pywin32", marker = "sys_platform == 'win32' and extra == 'sample'" },
     { name = "rawpy", marker = "extra == 'sample'" },
     { name = "scipy", specifier = ">=1.16.3" },
     { name = "torch", specifier = ">=2.9.1", index = "https://download.pytorch.org/whl/cu128" },
