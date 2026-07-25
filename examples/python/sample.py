@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import sys
+import time
 import traceback
 from pathlib import Path
 import numpy as np
@@ -568,9 +569,16 @@ def capture_projection_patterns(
                     f"{len(patterns)} pattern(s) before RAW development."
                 )
                 with triggered_batch(cfg.camera.tv) as batch:
+                    capture_started = time.perf_counter()
                     for pattern in patterns:
                         project(pattern)
                         batch.trigger()
+                    capture_seconds = time.perf_counter() - capture_started
+                    print(
+                        f"Triggered capture complete in {capture_seconds:.2f}s; "
+                        "starting deferred RAW development."
+                    )
+                    development_started = time.perf_counter()
                     for frame in batch.iter_linear_rgb():
                         captured_images.append(
                             np.clip(
@@ -579,6 +587,11 @@ def capture_projection_patterns(
                                 1.0,
                             )
                         )
+                    development_seconds = time.perf_counter() - development_started
+                    print(
+                        f"Deferred RAW development complete in "
+                        f"{development_seconds:.2f}s."
+                    )
         else:
             for pattern in patterns:
                 project(pattern)

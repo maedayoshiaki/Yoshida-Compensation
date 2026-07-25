@@ -1063,16 +1063,30 @@ def run_calibration_capture(
             )
             prepared: dict[Tuple[float, float, float], np.ndarray] = {}
             with camera_backend.triggered_batch(tv_label) as batch:
+                capture_started = time.perf_counter()
                 for sample in pass_samples:
                     # Every item in a pass changes the projected pattern.
                     _project(sample, settle=True)
                     batch.trigger()
+                capture_seconds = time.perf_counter() - capture_started
+                print(
+                    f"inverse_lut: trigger pass complete in "
+                    f"{capture_seconds:.2f}s; developing RAW files.",
+                    file=sys.stderr,
+                )
+                development_started = time.perf_counter()
                 for sample, frame in zip(
                     pass_samples, batch.iter_linear_rgb(), strict=True
                 ):
                     prepared[_sample_key(sample)] = _prepare_frame(
                         sample, frame, tv_label, ratio
                     )
+                development_seconds = time.perf_counter() - development_started
+                print(
+                    f"inverse_lut: RAW development complete in "
+                    f"{development_seconds:.2f}s.",
+                    file=sys.stderr,
+                )
             return prepared
 
         base_frames = capture_pass(unique, base_tv, 1.0)

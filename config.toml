@@ -10,9 +10,9 @@ refresh_rate = 60.0     # リフレッシュレート(Hz)。露光をこの周�
 
 [camera]
 backend = "canon_edsdk" # "canon_edsdk" | "opencv"
-av = "7.1"              # 絞り。1/30基準で白がHDR短露光(1/60)で回復できる明るさ
-tv = "1/30"             # HDR基準露光。フリッカーフリー(60Hz整数倍)。短露光1/60で白飛び回復、長露光1/15,1/6…で暗部持ち上げ
-iso = "200"
+av = "13"               # 実機検証済み。白投影でもROI内に飽和なし
+tv = "1/15"             # 60Hzの4周期を積分するフリッカーフリー露光
+iso = "100"
 image_quality = "LR"
 device_index = 0        # OpenCV backend 使用時のカメラインデックス
 wait_key_ms = 300       # パターン表示後の待機時間 (ms)
@@ -41,10 +41,10 @@ use_gpu = true                 # 色混合行列計算で GPU を使用するか
 num_levels = 17                 # 各ランプ（グレー / 単独チャンネル）の階調数
 source = "channel_ramp"         # "channel_ramp" | "gray"（一方のみ使用・混在不可）
 lut_resolution = 256            # 密な [0,1] 逆LUT のエントリ数
-roi_x = 4312                    # 計測 ROI 左端 x（撮影解像度px, 投影領域の内側）
-roi_y = 995                     # 計測 ROI 上端 y（撮影解像度px, 投影領域の内側）
-roi_width = 1775                # 計測 ROI 幅（0 なら全フレーム平均）
-roi_height = 1513               # 計測 ROI 高さ（0 なら全フレーム平均）
+roi_x = 2778                    # 実機の投影面内側 ROI 左端 x（フル解像度）
+roi_y = 826                     # 実機の投影面内側 ROI 上端 y（フル解像度）
+roi_width = 1837                # 実機の投影面内側 ROI 幅
+roi_height = 2324               # 実機の投影面内側 ROI 高さ
 trust_low = 10                  # 信頼下限（8bit画素値, ≤は非信頼/黒潰れ）
 trust_high = 245                # 信頼上限（8bit画素値, ≥は非信頼/サチュ）
 hdr_enabled = true              # 簡易HDRブラケット撮影
