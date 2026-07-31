@@ -101,10 +101,15 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
             params[p.name] = raw
 
     result = spec.render(context, params)
-    body = np.ascontiguousarray(result.data, dtype="<f4").tobytes()
     height, width = result.data.shape[0], result.data.shape[1]
     channels = result.data.shape[2] if result.data.ndim == 3 else 1
 
+    # Checked before serialising: ``.tobytes()`` copies the whole array, which
+    # is 1.5 GB for a camera-space matrix, and there is no point paying that
+    # for a response that is about to fail.
+    # 直列化の前に検査する。``.tobytes()`` は全体を複製するため、失敗する
+    # 応答のために払う必要はない。
+    #
     # ``/api/views`` advertises ``spec.channels`` and the frontend builds that
     # many tiles and readout cells from it, while ``X-Channels`` is derived
     # from the array. A view that declares 99 and renders 3 used to get a
@@ -119,6 +124,7 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
             ),
         )
 
+    body = np.ascontiguousarray(result.data, dtype="<f4").tobytes()
     headers = {
         "X-Height": str(height),
         "X-Width": str(width),
