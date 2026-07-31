@@ -1275,3 +1275,57 @@ Task 10 の import 検査対象モジュール名は Task 1〜9 で作ったも�
 **リスク:** Task 2 の `_PROJECT_ROOT` 階層変更を誤ると config が既定値にフォールバックし、
 テストは通るのに実行時の挙動だけが変わる。Task 2 Step 5 で
 `get_config().projector.active_width == 722` を確認すること。
+
+---
+
+## 完了記録と申し送り
+
+実行日: 2026-07-31。`v1.0-hdr-lut` (`1322538`) から 37コミット。テスト 70 → 101 passed。
+
+### 検証
+
+- 実データ（カメラ座標行列 1.56GB + 現行P2C）で3方式・30枚のPNGが移行前と
+  **バイト一致**することを、パイプライン抽出後と最終修正後の2回確認した。
+- `yoshidacomp` 配下18モジュールを、リポジトリ外のCWDから全て import 可能。
+  その後 `sys.modules` に `graycode` / `edsdk` / `rawpy` は現れない。
+- `packages/core` は `yoshidacomp` とその4サブパッケージを正しく同梱し、
+  `rawpy` / `edsdk-python` は `camera` extra にゲートされている。
+
+### 移行中に見つかった実バグ
+
+`calc_compensation_image` が float 出力時にも `np.floor(x + 0.5)` を適用しており、
+`max_value = 1.0` のため [0,1] の値を 0.0 / 1.0 に二値化していた。既存の呼び出しは
+すべて `dtype=np.uint8` を明示していたため実害は出ていなかったが、Web層のビューは
+float32 を返す設計なので必須の修正だった（`8318a99`、回帰テスト付き）。
+
+### 計画Bに引き継ぐ事項
+
+**すぐ効くもの**
+
+- `generate_projection_image` は `dtype` と `clip` を受け付ける。仕様書 §5 の
+  float32 ビュー、および §5.1 の `gamut` ビューが必要とする clip 前の値は
+  `clip=False, dtype=np.float32` で取得する。`clip=False` は
+  `linearizer="none"` 以外および整数 dtype と併用できない（いずれも `ValueError`）。
+- GrayCode の `sys.path` 挿入は `yoshidacomp.geometry.graycode_path.ensure_on_syspath()`
+  に集約済み。Web層もこれを呼ぶこと。環境変数 `YOSHIDACOMP_GRAYCODE_SRC` で上書きできる。
+- `apply_inverse_gamma_correction` の `gamma` は必須引数になった。指数はそのまま
+  `pow` に渡されるので、明るくするには `1 / projector.gamma` を渡す。
+
+**未着手の技術的負債**
+
+- `examples/python/sample.py` の `main` は依然 inline で補償ループを持ち、
+  `generate_projection_image` を通らない。したがって GUI と CLI の結果一致は
+  `rebuild_compensation_with_map.py` についてのみ成立する（仕様書 §10 に明記済み）。
+  `1 / proj.gamma` が4箇所に散在している。
+- `sample.py` は偶発的なAPIになっており、7つの example スクリプトが33個の属性を
+  参照している。その多くは `yoshidacomp` から直接 import できる純関数である。
+- `examples/python/sample_inverse_lut.py` は `importlib.util.spec_from_file_location`
+  で `sample.py` を直接ロードし、未移動の私的デバッグ補助を含む約30属性に依存する。
+- sRGB 伝達関数の実装が `pipeline.py`（両方向）、`capture/canon_edsdk.py`、
+  `capture/opencv.py` の4箇所に重複している。`yoshidacomp/color.py` が自然な集約先。
+- `config.py` の `_PROJECT_ROOT = parents[3]` は editable install 前提。wheel から
+  インストールすると `.venv/` を指し、既定値へ静かにフォールバックする。現在は
+  `warnings.warn` で気づけるようにしてあるだけ。Densoten のような配布形態を取るなら要対応。
+- `examples/python/capture.py` は `sys.path` 挿入を持たないため単体実行できない。
+- `data/` 配下の実験スクリプト約30本は `src.python.*` を import しており動作しない。
+  意図した状態（`data/README.md` §4 に記録）。動く組み合わせはタグ `v1.0-hdr-lut`。
