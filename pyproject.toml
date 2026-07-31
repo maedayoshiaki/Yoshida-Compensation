@@ -14,12 +14,16 @@ sample = [
     # Plotting for validate_inverse_lut.py (linearity check plots).
     "matplotlib",
 ]
+web = [
+    "yoshidacomp-web",
+]
 
 [tool.uv.workspace]
 members = ["packages/*"]
 
 [tool.uv.sources]
 yoshidacomp = { workspace = true }
+yoshidacomp-web = { workspace = true }
 torch = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 
@@ -30,6 +34,7 @@ explicit = true
 
 [dependency-groups]
 dev = [
+    "httpx2>=2.9.1",
     "pytest>=9.0.1",
 ]
 
