@@ -50,7 +50,6 @@ from yoshidacomp.compensation.photometric_compensation import (
     calc_compensation_image,
 )
 from yoshidacomp.config import (
-    PathsConfig,
     get_config,
     reload_config,
     split_cli_config_path,
@@ -59,6 +58,18 @@ from yoshidacomp.compensation.projection_region import (
     embed_in_active_region,
     mask_to_active_region,
     resolve_active_region,
+)
+from yoshidacomp.compensation.pipeline import (
+    SUPPORTED_TARGET_IMAGE_SUFFIXES,
+    TargetImageSpace,
+    capture_to_srgb_uint8,
+    compensation_space_from_warp_method,
+    linear_to_srgb,
+    load_target_images as _load_target_images,
+    prepare_target_image_for_compensation,
+    resolve_target_image_space,
+    resolve_warp_settings,
+    srgb_to_linear,
 )
 from yoshidacomp.geometry.warp import (
     WarpMethod,
@@ -69,10 +80,8 @@ from yoshidacomp.geometry.warp import (
 )
 
 
-TargetImageSpace = Literal["camera", "projector"]
 WARP_DEBUG_DIR = Path("data") / "sample_warp_debug_DEBUG_ONLY"
 WARP_ONLY_GROUP_DIRNAME = "warp_only_targets"
-SUPPORTED_TARGET_IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg")
 WARP_DEBUG_README = """# DEBUG ONLY
 
 This folder stores warp-debug artifacts emitted by `examples/python/sample.py`.
@@ -81,37 +90,6 @@ This folder stores warp-debug artifacts emitted by `examples/python/sample.py`.
 - Safe to delete and regenerate
 - Not intended as final pipeline output
 """
-
-
-def resolve_warp_settings(paths: PathsConfig) -> tuple[WarpMethod, str]:
-    """Resolve warp method and map path from configuration."""
-    warp_method_raw = paths.warp_method.strip().lower()
-    if warp_method_raw not in ("c2p", "p2c"):
-        raise ValueError("Invalid `paths.warp_method`. Use \"c2p\" or \"p2c\".")
-
-    warp_method = cast(WarpMethod, warp_method_raw)
-    map_path = paths.c2p_map if warp_method == "c2p" else paths.p2c_map
-    if map_path.strip() == "":
-        key = "paths.c2p_map" if warp_method == "c2p" else "paths.p2c_map"
-        raise ValueError(f"`{key}` is empty. Set a valid .npy path.")
-    return warp_method, map_path
-
-
-def resolve_target_image_space(paths: PathsConfig) -> TargetImageSpace:
-    """Resolve the configured target-image coordinate system."""
-    target_image_space_raw = paths.target_image_space.strip().lower()
-    if target_image_space_raw not in ("camera", "projector"):
-        raise ValueError(
-            "Invalid `paths.target_image_space`. Use \"camera\" or \"projector\"."
-        )
-    return cast(TargetImageSpace, target_image_space_raw)
-
-
-def compensation_space_from_warp_method(
-    warp_method: WarpMethod,
-) -> TargetImageSpace:
-    """Return the coordinate system where compensation is computed."""
-    return "camera" if warp_method == "c2p" else "projector"
 
 
 def _sanitize_debug_name(name: str) -> str:
@@ -273,21 +251,6 @@ def _save_grouped_warp_only_image(
     return file_name
 
 
-def _load_target_images(target_dir: str) -> list[tuple[str, np.ndarray]]:
-    """Load target images in a deterministic order."""
-    target_images: list[tuple[str, np.ndarray]] = []
-    for img_name in sorted(os.listdir(target_dir), key=str.casefold):
-        if not img_name.lower().endswith(SUPPORTED_TARGET_IMAGE_SUFFIXES):
-            continue
-        img_path = os.path.join(target_dir, img_name)
-        bgr = cv2.imread(img_path, cv2.IMREAD_COLOR)
-        if bgr is None:
-            continue
-        target_img_array = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-        target_images.append((img_name, target_img_array))
-    return target_images
-
-
 def _ensure_matching_spatial_shape(
     image: np.ndarray,
     color_mixing_matrices: np.ndarray,
@@ -299,77 +262,6 @@ def _ensure_matching_spatial_shape(
             f"{context}: target_image shape {image.shape[:2]} does not match "
             f"color_mixing_matrices shape {color_mixing_matrices.shape[:2]}."
         )
-
-
-def linear_to_srgb(linear_rgb: np.ndarray) -> np.ndarray:
-    """Convert linear RGB values in [0, 1] to sRGB values in [0, 1].
-
-    Apply the standard piecewise sRGB transfer function.
-
-    範囲 [0, 1] のリニア RGB を sRGB に変換する。
-
-    標準の区分的 sRGB 伝達関数を適用する。
-
-    Args:
-        linear_rgb: Linear RGB image array.
-            リニア RGB 画像配列。
-
-    Returns:
-        sRGB image array in range [0, 1].
-            範囲 [0, 1] の sRGB 画像配列。
-    """
-    linear_rgb = np.clip(linear_rgb, 0.0, 1.0)
-    return np.where(
-        linear_rgb <= 0.0031308,
-        12.92 * linear_rgb,
-        1.055 * np.power(linear_rgb, 1 / 2.4) - 0.055,
-    )
-
-
-def srgb_to_linear(srgb: np.ndarray) -> np.ndarray:
-    """Convert sRGB values in [0, 1] to linear RGB values in [0, 1].
-
-    Inverse of :func:`linear_to_srgb`. The compensation pipeline operates
-    on linear light, so sRGB-encoded inputs (e.g. target images loaded
-    from PNG/JPEG) must pass through this before any computation.
-
-    範囲 [0, 1] の sRGB をリニア RGB に変換する。
-
-    :func:`linear_to_srgb` の逆変換。補償パイプラインはリニア光量で
-    計算するため、sRGB エンコードされた入力（PNG/JPEG のターゲット画像
-    など）は計算前に必ずこの変換を通す。
-
-    Args:
-        srgb: sRGB image array in range [0, 1].
-            範囲 [0, 1] の sRGB 画像配列。
-
-    Returns:
-        Linear RGB image array in range [0, 1].
-            範囲 [0, 1] のリニア RGB 画像配列。
-    """
-    srgb = np.clip(srgb, 0.0, 1.0)
-    return np.where(
-        srgb <= 0.04045,
-        srgb / 12.92,
-        np.power((srgb + 0.055) / 1.055, 2.4),
-    )
-
-
-def capture_to_srgb_uint8(image: np.ndarray) -> np.ndarray:
-    """Encode a linear capture as sRGB uint8 for saving/viewing only.
-
-    The pipeline itself stays linear; this exists solely so captured
-    frames written to disk are viewable. uint8 input passes through.
-
-    リニア撮影値を保存・表示用に sRGB uint8 へエンコードする。
-    パイプライン本体はリニアのまま。uint8 入力はそのまま返す。
-    """
-    arr = np.asarray(image)
-    if arr.dtype == np.uint8:
-        return arr
-    return (
-        (linear_to_srgb(arr.astype(np.float32)) * 255.0).round().astype(np.uint8)
-    )
 
 
 def apply_rpcc_correction(
@@ -728,43 +620,6 @@ def capture_projection_patterns(
         )
         return None
     return captured_images
-
-
-def prepare_target_image_for_compensation(
-    target_image: np.ndarray,
-    target_image_space: TargetImageSpace,
-    pixel_map_path: str,
-    proj_width: int,
-    proj_height: int,
-    cam_width: int,
-    cam_height: int,
-    warp_method: WarpMethod,
-) -> np.ndarray:
-    """Convert the target image into the coordinate system used for compensation."""
-    compensation_space = compensation_space_from_warp_method(warp_method)
-    if target_image_space == compensation_space:
-        return target_image
-
-    if target_image_space == "projector":
-        return invwarp_image(
-            target_image,
-            pixel_map_path,
-            proj_width,
-            proj_height,
-            cam_width,
-            cam_height,
-            warp_method=warp_method,
-        )
-
-    return warp_image(
-        target_image,
-        pixel_map_path,
-        proj_width,
-        proj_height,
-        target_image.shape[1],
-        target_image.shape[0],
-        warp_method=warp_method,
-    )
 
 
 def main(argv: list[str] | None = None):

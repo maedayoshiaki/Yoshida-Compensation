@@ -18,11 +18,18 @@ import numpy as np
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+_GRAYCODE_SRC = _REPO_ROOT / "external" / "GrayCode" / "src"
+if str(_GRAYCODE_SRC) not in sys.path:
+    sys.path.insert(0, str(_GRAYCODE_SRC))
 
-from examples.python import sample
 from yoshidacomp.compensation import inverse_lut
+from yoshidacomp.compensation.pipeline import (
+    generate_projection_image,
+    load_target_images,
+)
 from yoshidacomp.config import reload_config
-from yoshidacomp.compensation.projection_region import mask_to_active_region, resolve_active_region
+from yoshidacomp.compensation.projection_region import resolve_active_region
+from yoshidacomp.geometry.warp import warp_color_mixing_matrices_to_projector
 
 
 def _parse_args() -> argparse.Namespace:
@@ -64,25 +71,6 @@ def _save_rgb(path: Path, image: np.ndarray) -> None:
     cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
 
 
-def _decode_target(
-    target_uint8: np.ndarray,
-    *,
-    mode: str,
-    gamma: float,
-) -> np.ndarray:
-    """Convert uint8 target values into the compensation target domain."""
-    normalized = target_uint8.astype(np.float32) / 255.0
-    if mode == "none":
-        return normalized
-    if mode == "srgb":
-        return sample.srgb_to_linear(normalized).astype(np.float32)
-    if mode == "gamma":
-        if not np.isfinite(gamma) or gamma <= 0:
-            raise ValueError("--target-gamma must be a finite positive number.")
-        return np.power(normalized, gamma).astype(np.float32)
-    raise ValueError(f"Unsupported target decode mode: {mode!r}")
-
-
 def main() -> None:
     args = _parse_args()
     cfg = reload_config(args.config)
@@ -98,7 +86,7 @@ def main() -> None:
     proj = cfg.projector
     active_region = resolve_active_region(proj)
     target_dir = args.target_dir or Path(cfg.paths.target_image_dir)
-    targets = sample._load_target_images(str(target_dir))
+    targets = load_target_images(str(target_dir))
     if not targets:
         raise FileNotFoundError(
             f"No target images found in {target_dir}"
@@ -113,7 +101,7 @@ def main() -> None:
     load_seconds = time.perf_counter() - started
 
     warp_started = time.perf_counter()
-    warped_matrix = sample.warp_color_mixing_matrices_to_projector(
+    warped_matrix = warp_color_mixing_matrices_to_projector(
         matrix,
         cfg.paths.p2c_map,
         proj.width,
@@ -133,38 +121,16 @@ def main() -> None:
     per_target: list[dict[str, object]] = []
     for index, (target_name, target_uint8) in enumerate(targets):
         target_started = time.perf_counter()
-        target_linear = _decode_target(
+        compensation, projector_image = generate_projection_image(
             target_uint8,
-            mode=args.target_decode,
-            gamma=args.target_gamma,
+            warped_matrix,
+            projector=proj,
+            active_region=active_region,
+            linearizer=args.linearizer,
+            lut=lut,
+            target_decode=args.target_decode,
+            target_gamma=args.target_gamma,
         )
-        target_linear = sample.embed_in_active_region(
-            target_linear,
-            (proj.width, proj.height),
-            active_region,
-        )
-        compensation = sample.calc_compensation_image(
-            target_image=target_linear,
-            color_mixing_matrices=warped_matrix,
-            dtype=np.uint8,
-        )
-        compensation = mask_to_active_region(compensation, active_region)
-
-        if args.linearizer == "none":
-            projector_image = compensation
-        elif args.linearizer == "gamma":
-            projector_image = sample.apply_inverse_gamma_correction(
-                compensation,
-                gamma=1 / proj.gamma,
-            )
-            if hasattr(projector_image, "cpu"):
-                projector_image = projector_image.cpu().numpy()
-        else:
-            projector_image = inverse_lut.apply_inverse_lut(
-                compensation,
-                lut,
-                dtype=np.uint8,
-            )
 
         _save_rgb(
             linear_dir / f"compensation_image_{index:02d}.png",
@@ -177,7 +143,7 @@ def main() -> None:
         }[args.linearizer]
         _save_rgb(
             projector_dir / f"{suffix}_comp_image_{index:02d}.png",
-            np.asarray(projector_image, dtype=np.uint8),
+            projector_image,
         )
         per_target.append(
             {
