@@ -72,6 +72,11 @@ from yoshidacomp.compensation.pipeline import (
     srgb_to_linear,
 )
 from yoshidacomp.geometry.warp import (
+    # invwarp_image is not referenced anywhere else in this file; it is kept
+    # as a deliberate compatibility re-export because
+    # tests/test_sample_mocked.py's _patch_warp_helper() monkeypatches
+    # `sample.invwarp_image`, and four tests would fail with AttributeError
+    # if this import were removed. Do not delete it as "unused".
     WarpMethod,
     center_rect,
     invwarp_image,

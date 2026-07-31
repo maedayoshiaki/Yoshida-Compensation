@@ -10,6 +10,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+# Import smoke for the CLI itself. Once ``_decode_target`` moved into
+# yoshidacomp.compensation.pipeline (see module docstring above), this file
+# stopped referencing rebuild_compensation_with_map.py entirely, so its
+# module-level code -- including the sys.path inserts for the repo root and
+# external/GrayCode/src, and its yoshidacomp/GrayCode imports -- had zero
+# test coverage. Importing it here, even unused, re-exercises that code at
+# collection time so a broken import in the CLI fails the suite. Do not
+# remove as "unused".
+from examples.python import rebuild_compensation_with_map as rebuild  # noqa: F401
 from yoshidacomp.compensation.pipeline import decode_target, srgb_to_linear
 
 

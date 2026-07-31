@@ -62,3 +62,37 @@ def test_generate_projection_image_identity_matrix() -> None:
     # 白のsRGBは線形1.0 → 恒等行列 → 255
     assert int(linear[0, 0, 0]) == 255
     assert np.array_equal(linear, projected)  # linearizer="none" は素通し
+
+
+def test_gamma_linearizer_brightens_midtones() -> None:
+    """逆ガンマは中間調を明るくする（指数は 1/gamma でなければならない）。
+
+    apply_inverse_gamma_correction は与えた指数をそのまま pow に使うため、
+    誤って projector.gamma を渡すと逆に暗くなる。
+    """
+    from dataclasses import dataclass
+
+    import numpy as np
+
+    from yoshidacomp.compensation.pipeline import LINEARIZERS
+
+    @dataclass(frozen=True)
+    class Projector:
+        gamma: float = 2.2
+
+    mid = np.full((1, 1, 3), 64, dtype=np.uint8)
+    brightened = LINEARIZERS["gamma"](mid, projector=Projector(), lut=None)
+    passed_through = LINEARIZERS["none"](mid, projector=Projector(), lut=None)
+
+    assert int(brightened[0, 0, 0]) > int(passed_through[0, 0, 0])
+
+
+def test_inverse_lut_linearizer_requires_a_lut() -> None:
+    import numpy as np
+    import pytest
+
+    from yoshidacomp.compensation.pipeline import LINEARIZERS
+
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+    with pytest.raises(ValueError):
+        LINEARIZERS["inverse_lut"](image, projector=None, lut=None)
