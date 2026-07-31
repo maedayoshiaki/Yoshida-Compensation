@@ -1,14 +1,23 @@
+from __future__ import annotations
+
 import time
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+from typing import TYPE_CHECKING
 
 import cv2
 import numpy as np
 
-from edsdk.camera_controller import CameraController
 from yoshidacomp.capture.canon_edsdk import capture_srgb_uint8
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
+
+if TYPE_CHECKING:
+    # edsdk is an optional extra (`camera`); keep it out of module scope so
+    # `import yoshidacomp.calibration.cap_chess` works without it installed.
+    # `from __future__ import annotations` above makes the type hints below
+    # lazy strings, so this TYPE_CHECKING-only import is enough for them.
+    from edsdk.camera_controller import CameraController
 
 
 @dataclass(frozen=True)
@@ -118,6 +127,8 @@ def load_camera_settings(argv: list[str]) -> tuple[str, str, str, str]:
 
 
 def main(argv: list[str] | None = None) -> None:
+    from edsdk.camera_controller import CameraController
+
     if argv is None:
         argv = sys.argv
 

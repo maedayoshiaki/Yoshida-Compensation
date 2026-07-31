@@ -6,7 +6,6 @@ import sys
 import cv2
 import numpy as np
 
-from edsdk.camera_controller import CameraController
 from yoshidacomp.capture.canon_edsdk import capture_srgb_uint8
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
@@ -101,6 +100,8 @@ def capture_one_image_from_canon(
     image_quality: str,
 ) -> np.ndarray:
     """Capture one still image from the Canon camera and convert it to BGR."""
+    from edsdk.camera_controller import CameraController
+
     with CameraController(register_property_events=False) as camera:
         camera.set_properties(
             av=av,

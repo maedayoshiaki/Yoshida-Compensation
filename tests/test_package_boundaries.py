@@ -35,6 +35,14 @@ def test_core_imports_without_camera_sdk() -> None:
     venv, so an unblocked import would otherwise succeed) before trusting
     the rest of the run, and re-checks that none of the blocked names
     leaked into ``sys.modules`` via a transitive import.
+
+    Includes ``yoshidacomp.calibration.{cap_chess,solve_pnp,cam_in_calib}``
+    in addition to the modules this test originally covered: those two
+    scripts had a module-scope ``from edsdk.camera_controller import
+    CameraController`` (carried over verbatim from ``src/python/``) that
+    this test previously didn't exercise, silently violating the plan's
+    "rawpy / edsdk-python stay behind the optional `camera` extra, never
+    imported from module scope" constraint.
     """
     script = """
 import sys
@@ -67,6 +75,9 @@ import yoshidacomp.capture
 import yoshidacomp.compensation.pipeline
 import yoshidacomp.compensation.inverse_lut
 import yoshidacomp.geometry.warp
+import yoshidacomp.calibration.cap_chess
+import yoshidacomp.calibration.solve_pnp
+import yoshidacomp.calibration.cam_in_calib
 
 leaked = BLOCKED & set(sys.modules)
 assert not leaked, f"blocked modules leaked into sys.modules: {leaked}"
