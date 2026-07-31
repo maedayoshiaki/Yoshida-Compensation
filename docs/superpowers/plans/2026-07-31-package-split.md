@@ -1010,43 +1010,44 @@ Expected: 86 passed（82 + 新規4）
 保存済みの行列とターゲットで `rebuild_compensation_with_map.py` を実行し、
 `v1.0-hdr-lut` 時点の出力と画素一致することを確認する:
 
-先に基準となる出力を `v1.0-hdr-lut` で作る（作業ツリーを汚さないよう worktree を使う）:
+基準出力は**リファクタ前のコードで事前に生成済み**である。`v1.0-hdr-lut` の
+worktree を使う必要はない（その worktree には `data/` の実体も `.venv` も無く、
+`config.toml` の相対パスも解決しないため）。Task 9 が変えるのは
+`rebuild_compensation_with_map.py` の内部実装だけなので、直前のコミットで作った
+出力と比較すれば十分である。
 
-```bash
-git worktree add ../ycomp-baseline v1.0-hdr-lut
-cd ../ycomp-baseline && git submodule update --init
-.venv/Scripts/python.exe examples/python/rebuild_compensation_with_map.py \
-  --config config.toml \
-  --matrix data/linear_pipeline_1080/matrices_linear_gamma.npy \
-  --linearizer gamma \
-  --target-dir data/comp_test_targets_square \
-  --output-dir ../rebuild_baseline
+**行列はカメラ座標のものを使うこと。** `rebuild_compensation_with_map.py` は
+カメラ座標行列を P2C でプロジェクタ座標へワープする前提である。
+`data/linear_pipeline_1080/matrices_linear_*.npy` のような**既にプロジェクタ座標**の
+行列を渡すと、P2C がカメラ座標 (x: 2183–5075, y: 282–3631) を参照して
+1920×1080 配列の外側になり、zero padding で**出力が全画素ゼロ**になる。
+真っ黒同士を比較しても何も検証できないので注意する。
+
+基準出力の場所（コントローラが `--matrix
+data/hdr_recalibration_20260730_iso400/gamma_4level/color_mixing_matrices.npy`
+で生成済み。3方式とも相互に異なる出力であることを確認済み）:
+
+```text
+<scratchpad>/rebuild_baseline              # --linearizer gamma
+<scratchpad>/rebuild_baseline_none         # --linearizer none
+<scratchpad>/rebuild_baseline_inverse_lut  # --linearizer inverse_lut --lut data/inverse_lut.npz
 ```
 
-`v1.0-hdr-lut` の worktree には `data/` の実体が無いため、`--matrix` と
-`--target-dir` は元リポジトリの絶対パスを指定する。次に現在のブランチで同じ入力を通す:
+リファクタ後に同じ3コマンドを別の出力先で実行し、それぞれ比較する:
 
 ```bash
-.venv/Scripts/python.exe examples/python/rebuild_compensation_with_map.py \
-  --config config.toml \
-  --matrix data/linear_pipeline_1080/matrices_linear_gamma.npy \
-  --linearizer gamma \
-  --target-dir data/comp_test_targets_square \
-  --output-dir ../rebuild_after
+M=data/hdr_recalibration_20260730_iso400/gamma_4level/color_mixing_matrices.npy
+for lz in gamma none inverse_lut; do
+  extra=""; [ "$lz" = "inverse_lut" ] && extra="--lut data/inverse_lut.npz"
+  .venv/Scripts/python.exe examples/python/rebuild_compensation_with_map.py \
+    --config config.toml --matrix "$M" --linearizer $lz $extra \
+    --target-dir data/comp_test_targets_square --output-dir <scratchpad>/after_$lz
+done
 ```
 
-両者を比較する。差分が無いこと:
-
-```bash
-diff -r ../rebuild_baseline/compensation_projector ../rebuild_after/compensation_projector
-diff -r ../rebuild_baseline/compensation_linear    ../rebuild_after/compensation_linear
-```
-
-確認後に worktree を片付ける:
-
-```bash
-git worktree remove ../ycomp-baseline
-```
+各方式について `compensation_linear/` と `compensation_projector/` の PNG が
+**バイト一致**すること。`rebuild_metadata.json` は処理時間を含むため一致しない
+（比較対象外）。1方式あたり約6秒で終わる。
 
 - [ ] **Step 7: コミット**
 
