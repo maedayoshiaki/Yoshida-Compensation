@@ -102,7 +102,7 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(1)
 
     if len(clean_argv) != 1:
-        print("Usage: python src/python/project_and_capture.py [--config <config.toml>]")
+        print("Usage: python examples/python/project_and_capture.py [--config <config.toml>]")
         raise SystemExit(1)
 
     default_config_path = PROJECT_ROOT / "config.toml"

@@ -98,11 +98,10 @@ def load_camera_settings(argv: list[str]) -> tuple[str, str, str, str]:
     """Load camera capture settings from config.toml."""
     clean_argv, config_path = split_cli_config_path(argv)
     if len(clean_argv) != 1:
-        print("Usage: python src/python/cap_chess.py [--config <config.toml>]")
+        print("Usage: python -m yoshidacomp.calibration.cap_chess [--config <config.toml>]")
         raise SystemExit(1)
 
-    default_config_path = Path(__file__).resolve().parents[2] / "config.toml"
-    reload_config(config_path if config_path is not None else default_config_path)
+    reload_config(config_path)
     camera_config = get_config().camera
 
     if camera_config.backend.strip().lower() != "canon_edsdk":
