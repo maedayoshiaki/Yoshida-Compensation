@@ -7,7 +7,7 @@ from src.python.color_mixing_matrix import (
     calc_color_mixing_matrices,
     generate_projection_patterns,
 )
-from src.python.projection_region import (
+from yoshidacomp.compensation.projection_region import (
     embed_in_active_region,
     mask_to_active_region,
     resolve_active_region,

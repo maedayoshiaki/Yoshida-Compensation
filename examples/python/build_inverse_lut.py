@@ -31,7 +31,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from src.python import inverse_lut as ilut
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
-from src.python.projection_region import mask_to_active_region, resolve_active_region
+from yoshidacomp.compensation.projection_region import mask_to_active_region, resolve_active_region
 
 
 def _split_flag(argv: list[str], flag: str) -> tuple[list[str], str | None]:

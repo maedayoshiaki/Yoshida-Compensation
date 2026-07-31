@@ -17,7 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from examples.python import sample
 from yoshidacomp.config import reload_config
-from src.python.projection_region import mask_to_active_region, resolve_active_region
+from yoshidacomp.compensation.projection_region import mask_to_active_region, resolve_active_region
 
 
 def _statistics(image: np.ndarray) -> dict[str, object]:

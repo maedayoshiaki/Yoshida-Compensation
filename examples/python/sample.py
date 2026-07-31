@@ -55,7 +55,7 @@ from yoshidacomp.config import (
     reload_config,
     split_cli_config_path,
 )
-from src.python.projection_region import (
+from yoshidacomp.compensation.projection_region import (
     embed_in_active_region,
     mask_to_active_region,
     resolve_active_region,

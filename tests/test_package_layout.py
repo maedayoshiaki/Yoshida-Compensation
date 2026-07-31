@@ -39,3 +39,19 @@ def test_config_still_reads_the_repository_config_toml() -> None:
     assert cfg.projector.active_width == 722
     assert cfg.projector.active_height == 722
     assert cfg.compensation.num_divisions == 4
+
+
+def test_projection_region_lives_in_core() -> None:
+    import numpy as np
+    from yoshidacomp.compensation.projection_region import (
+        embed_in_active_region,
+        mask_to_active_region,
+    )
+
+    image = np.ones((4, 4, 3), dtype=np.uint8)
+    masked = mask_to_active_region(image, (1, 1, 2, 2))
+    assert masked[0, 0].tolist() == [0, 0, 0]
+    assert masked[1, 1].tolist() == [1, 1, 1]
+
+    embedded = embed_in_active_region(image, (8, 6), (2, 1, 4, 4))
+    assert embedded.shape == (6, 8, 3)
