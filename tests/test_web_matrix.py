@@ -23,10 +23,14 @@ def _default_projector_config():
     """Ensure the real ``config.toml`` (1920x1080 projector) is loaded.
 
     ``yoshidacomp.config`` はプロセス全体で共有されるシングルトンで、
-    ``tests/test_sample_mocked.py`` などが ``reload_config`` で幅4x高さ3の
-    テスト用設定に書き換えたまま復元しない（``tests/test_inverse_lut.py`` は
-    同様のケースを都度既定へ戻している）。ここで明示的に既定へ戻すことで、
-    実行順序に関わらず projector 判定が本来の解像度で行われるようにする。
+    ``tests/test_sample_mocked.py`` / ``tests/test_sample_inverse_lut_mocked.py``
+    が ``reload_config`` を直接呼ぶわけではないが、``sample.main(...)`` を
+    経由して間接的に汚染したまま復元しない。``sample.main()`` の内部
+    （``examples/python/sample.py:626``）が幅4x高さ3のテスト用一時configで
+    ``reload_config`` を呼び出しており、その呼び出し元の2ファイルは
+    後始末をしない（``tests/test_inverse_lut.py`` は :74 と :744 で
+    明示的に既定へ戻している）。ここで明示的に既定へ戻すことで、実行順序に
+    関わらず projector 判定が本来の解像度で行われるようにする。
     """
     reload_config(_REPO_ROOT / "config.toml")
     yield
