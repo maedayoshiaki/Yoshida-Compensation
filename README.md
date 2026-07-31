@@ -293,6 +293,10 @@ uv run --no-sync python -m uvicorn yoshidacomp_web.app:app --host 127.0.0.1 --po
 
 使用中のプロセスは `Get-NetTCPConnection -LocalPort 8000` で確認できる。
 
+実測した性能（1080pで0.70秒、カメラ空間1.56 GBで18.2秒、ヒープ2980 MB）は
+[`docs/web_viewer_performance_20260731.md`](docs/web_viewer_performance_20260731.md)
+にまとめてある。
+
 ## ライブラリとしての利用
 
 `yoshidacomp` パッケージ（`packages/core/yoshidacomp/`）を直接インポートして利用することもできます。
