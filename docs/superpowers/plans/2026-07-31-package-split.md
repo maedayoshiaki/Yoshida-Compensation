@@ -246,7 +246,7 @@ grep -rn "src\.python\.config" src tests examples --include='*.py'
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 72 passed
+Expected: 73 passed（71 + 新規2）
 
 - [ ] **Step 6: コミット**
 
@@ -328,7 +328,7 @@ grep -rn "src\.python\.projection_region" src tests examples --include='*.py'
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 73 passed
+Expected: 74 passed（73 + 新規1）
 
 - [ ] **Step 6: コミット**
 
@@ -411,7 +411,7 @@ grep -rn "src\.python\.photometric_compensation\|src\.python\.color_mixing_matri
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 74 passed
+Expected: 75 passed（74 + 新規1）
 
 - [ ] **Step 6: コミット**
 
@@ -472,7 +472,7 @@ grep -rn "src\.python\.camera" src tests examples --include='*.py'
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 75 passed
+Expected: 76 passed（75 + 新規1）
 
 - [ ] **Step 6: コミット**
 
@@ -560,7 +560,7 @@ grep -rn "src\.python.*inverse_lut" src tests examples --include='*.py'
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 76 passed
+Expected: 77 passed（76 + 新規1）
 
 `tests/test_sample_inverse_lut_mocked.py` と `tests/test_validate_inverse_lut_mocked.py` は
 `sys.modules` にスタブを差し込む形式なので、スタブ側のキー名も `src.python.*` から
@@ -649,7 +649,7 @@ grep -rn "src\.python" . --include='*.py'
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 77 passed
+Expected: 78 passed（77 + 新規1）
 
 - [ ] **Step 6: コミット**
 
@@ -822,7 +822,7 @@ from yoshidacomp.geometry.warp import (
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 80 passed（77 + 新規3）
+Expected: 81 passed（78 + 新規3）
 
 - [ ] **Step 6: コミット**
 
@@ -995,7 +995,7 @@ LINEARIZERS = {
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 84 passed（80 + 新規4）
+Expected: 85 passed（81 + 新規4）
 
 - [ ] **Step 6: 既存CLIとの出力一致を実データで確認**
 
@@ -1143,7 +1143,7 @@ module scope にあればメソッド内へ移す。
 - [ ] **Step 4: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 86 passed（84 + 新規2）
+Expected: 87 passed（85 + 新規2）
 
 - [ ] **Step 5: README を更新**
 
