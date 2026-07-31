@@ -9,24 +9,7 @@ import numpy as np
 from yoshidacomp.compensation import pipeline as pipeline_module
 
 
-def _install_optional_dependency_stubs() -> None:
-    if "colour" not in sys.modules:
-        colour = types.ModuleType("colour")
-        colour.characterisation = types.SimpleNamespace(
-            polynomial_expansion_Finlayson2015=lambda *args, **kwargs: None
-        )
-        colour.algebra = types.SimpleNamespace(vecmul=lambda *args, **kwargs: None)
-        colour.XYZ_to_sRGB = lambda image, apply_cctf_encoding=False: image
-        sys.modules["colour"] = colour
-
-    if "psutil" not in sys.modules:
-        psutil = types.ModuleType("psutil")
-        psutil.virtual_memory = lambda: types.SimpleNamespace(available=1 << 30)
-        sys.modules["psutil"] = psutil
-
-
 def _load_sample_module():
-    _install_optional_dependency_stubs()
     repo_root = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(repo_root))
     sample_path = repo_root / "examples" / "python" / "sample.py"

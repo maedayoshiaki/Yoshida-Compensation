@@ -60,8 +60,31 @@ def test_generate_projection_image_identity_matrix() -> None:
     assert linear.shape == (4, 4, 3)
     assert projected.shape == (4, 4, 3)
     # 白のsRGBは線形1.0 → 恒等行列 → 255
-    assert int(linear[0, 0, 0]) == 255
-    assert np.array_equal(linear, projected)  # linearizer="none" は素通し
+    assert linear[0, 0].tolist() == [255, 255, 255]
+
+    # linearizer="none" の契約は「補償画像をそのまま投影コード値にする」こと。
+    # これを独立に計算した期待値と突き合わせる。
+    #
+    # NOTE: `assert np.array_equal(linear, projected)` では検証にならない。
+    # _linearize_none() は受け取ったオブジェクトをそのまま返し、np.asarray()
+    # も dtype が一致すれば同一オブジェクトを返すため、`linear is projected`
+    # は常に真であり、その比較は決して失敗しない。同じ理由で、将来この2つの
+    # 戻り値のどちらかを in-place で書き換える呼び出し側はもう一方も壊す。
+    #
+    # NOTE: comparing the two return values against each other cannot fail --
+    # they are the same object for linearizer="none" -- and an in-place writer
+    # of either would silently corrupt the other.
+    from yoshidacomp.compensation.pipeline import decode_target
+    from yoshidacomp.compensation.photometric_compensation import (
+        calc_compensation_image,
+    )
+
+    expected = calc_compensation_image(
+        target_image=decode_target(target, mode="srgb"),
+        color_mixing_matrices=matrices,
+        dtype=np.uint8,
+    )
+    assert np.array_equal(projected, expected)
 
 
 def _out_of_gamut_setup() -> tuple[np.ndarray, np.ndarray]:
