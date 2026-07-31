@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.python.camera import canon_edsdk
-from src.python.camera.base import CameraCaptureError
-from src.python.camera.canon_edsdk import CanonEdsdkCamera, _raw_to_linear_rgb
+from yoshidacomp.capture import canon_edsdk
+from yoshidacomp.capture.base import CameraCaptureError
+from yoshidacomp.capture.canon_edsdk import CanonEdsdkCamera, _raw_to_linear_rgb
 from yoshidacomp.config import CameraConfig
 
 

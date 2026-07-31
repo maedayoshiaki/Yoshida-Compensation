@@ -106,3 +106,10 @@ def test_calc_compensation_image_float_dtype_is_not_binarized() -> None:
     uint8_out = calc_compensation_image(uint8_target, identity, dtype=np.uint8)
     assert uint8_out.dtype == np.uint8
     assert int(uint8_out[0, 0, 0]) == 128
+
+
+def test_capture_package_imports_without_sdk() -> None:
+    """edsdk / rawpy が無くても import できること（遅延importの確認）。"""
+    import yoshidacomp.capture as capture
+
+    assert hasattr(capture, "create_camera_backend")

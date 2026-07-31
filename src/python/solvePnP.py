@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 
 from edsdk.camera_controller import CameraController
-from src.python.camera.canon_edsdk import capture_srgb_uint8
+from yoshidacomp.capture.canon_edsdk import capture_srgb_uint8
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
 

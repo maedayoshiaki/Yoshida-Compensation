@@ -27,7 +27,7 @@ from graycode.gen_graycode import generate_expanded_patterns
 from graycode.interpolate_p2c import interpolate_p2c_delaunay
 
 from examples.python.sample import capture_to_srgb_uint8
-from src.python.camera import create_camera_backend
+from yoshidacomp.capture import create_camera_backend
 from yoshidacomp.config import reload_config
 from yoshidacomp.compensation.projection_region import mask_to_active_region, resolve_active_region
 

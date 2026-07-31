@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
-from src.python.camera import create_camera_backend
+from yoshidacomp.capture import create_camera_backend
 from yoshidacomp.config import get_config
 
 

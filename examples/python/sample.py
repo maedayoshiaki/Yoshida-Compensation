@@ -45,7 +45,7 @@ from yoshidacomp.compensation.color_mixing_matrix import (
     apply_inverse_gamma_correction,
     calc_color_mixing_matrices,
 )
-from src.python.camera import CameraCaptureError, create_camera_backend
+from yoshidacomp.capture import CameraCaptureError, create_camera_backend
 from yoshidacomp.compensation.photometric_compensation import (
     calc_compensation_image,
 )

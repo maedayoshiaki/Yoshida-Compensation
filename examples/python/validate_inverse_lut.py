@@ -369,7 +369,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     import cv2
     from dataclasses import replace
 
-    from src.python.camera import create_camera_backend
+    from yoshidacomp.capture import create_camera_backend
 
     if argv is None:
         argv = sys.argv
