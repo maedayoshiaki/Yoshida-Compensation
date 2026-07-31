@@ -72,17 +72,41 @@ RAW現像などの処理を順次行います。逆LUTのHDRも、基準露光�
 
 > 撮影が上記のいずれかで失敗する場合、まずカメラの電源を入れ直し、EOS Utility など他の Canon アプリを閉じ、モードダイヤルを Manual/Av/Tv にしてから再試行してください。
 
+## パッケージ構成
+
+- `packages/core`（配布名 `yoshidacomp`）— ハードウェア非依存の計算コア
+- `examples/python/` — 撮影を含むCLI
+
+```python
+from yoshidacomp.config import get_config
+from yoshidacomp.compensation.pipeline import generate_projection_image
+```
+
+撮影機能を使う場合は `uv sync --extra sample` を実行する。
+
+このリポジトリは [uv workspace](https://docs.astral.sh/uv/concepts/projects/workspaces/) で、
+ルートの `pyproject.toml` が `packages/core`（`yoshidacomp`）に依存する形になっている。
+`src/python/` は廃止済みで存在しない。
+
 ## プロジェクト構成
 
 ```text
 Yoshida-Compensation/
 ├── config.toml                  # プロジェクト設定ファイル
-├── pyproject.toml               # パッケージ定義・依存関係
-├── src/python/
-│   ├── config.py                # 設定ローダー
-│   ├── camera/                  # カメラ抽象層と各バックエンド実装
-│   ├── color_mixing_matrix.py   # パターン生成・カラーミキシング行列算出
-│   └── photometric_compensation.py  # 補償画像の計算
+├── pyproject.toml               # ワークスペース定義（yoshidacomp に依存）
+├── packages/core/
+│   ├── pyproject.toml           # yoshidacomp パッケージ定義
+│   └── yoshidacomp/
+│       ├── config.py                    # 設定ローダー
+│       ├── capture/                     # カメラ抽象層と各バックエンド実装
+│       ├── calibration/                 # 校正スクリプト（チェッカーボード・PnP等）
+│       ├── geometry/warp.py             # 幾何ワーピング（c2p/p2c）
+│       └── compensation/
+│           ├── color_mixing_matrix.py       # パターン生成・カラーミキシング行列算出
+│           ├── photometric_compensation.py  # 補償画像の計算
+│           ├── projection_region.py         # 投影領域の絞り込み
+│           ├── inverse_lut.py                # 逆LUT計測・適用
+│           └── pipeline.py                   # 生成パイプライン一式
 ├── examples/python/
 │   ├── sample.py                # 補償パイプラインのサンプル実装
 │   └── capture.py               # キャプチャ＆ワーピングのサンプル
@@ -106,7 +130,7 @@ CLI で別設定を使いたい場合は、`--config <path>`（または `-c <pa
 `config.toml` が未作成の場合は、Python からデフォルト設定ファイルを生成できます。
 
 ```python
-from src.python.config import generate_config_file
+from yoshidacomp.config import generate_config_file
 
 generate_config_file()  # プロジェクトルートに config.toml を生成
 ```
@@ -251,16 +275,17 @@ uv run python examples/python/capture.py --config path/to/config.toml
 
 ## ライブラリとしての利用
 
-`src/python/` 内のモジュールを直接インポートして利用することもできます。
+`yoshidacomp` パッケージ（`packages/core/yoshidacomp/`）を直接インポートして利用することもできます。
 
 ```python
-from src.python.color_mixing_matrix import (
+from yoshidacomp.compensation.color_mixing_matrix import (
     generate_projection_patterns,
     apply_inverse_gamma_correction,
     calc_color_mixing_matrices,
 )
-from src.python.photometric_compensation import calc_compensation_image
-from src.python.config import get_config, generate_config_file
+from yoshidacomp.compensation.photometric_compensation import calc_compensation_image
+from yoshidacomp.compensation.pipeline import generate_projection_image
+from yoshidacomp.config import get_config, generate_config_file
 ```
 
 ## 開発
