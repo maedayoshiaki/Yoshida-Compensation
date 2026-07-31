@@ -144,3 +144,11 @@ def test_inverse_lut_lives_in_core(tmp_path) -> None:
     image = np.full((1, 1, 3), 0.25, dtype=np.float32)
     out = apply_inverse_lut(image, reloaded, dtype=np.float32)
     assert np.allclose(out, 0.25, atol=1e-3)
+
+
+def test_src_python_is_gone() -> None:
+    """移行完了後、src/python は存在しないこと。"""
+    from pathlib import Path
+
+    repo_root = Path(__file__).resolve().parents[1]
+    assert not (repo_root / "src" / "python").exists()
