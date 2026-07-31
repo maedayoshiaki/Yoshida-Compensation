@@ -113,11 +113,16 @@ module scope で import しない。ハードウェア依存は optional extra �
 - `_load_target_images`
 - `resolve_warp_settings`, `resolve_target_image_space`, `compensation_space_from_warp_method`
 - `center_rect`
-- `_warp_camera_array_to_projector`, `warp_color_mixing_matrices_to_projector`, `warp_image`, `invwarp_image`
+- `warp_camera_array_to_projector`, `warp_color_mixing_matrices_to_projector`, `warp_image`, `invwarp_image`
 - `prepare_target_image_for_compensation`
 
-これにより `examples/python/rebuild_compensation_with_map.py` が
-`importlib.util.spec_from_file_location` で `sample.py` を直接ロードしている現状の歪みも解消する。
+これにより `examples/python/rebuild_compensation_with_map.py` は `sample.py` を
+まったく import せずに済むようになる。従来は `from examples.python import sample` で
+CLIスクリプトをライブラリとして参照していた。
+
+なお `examples/python/sample_inverse_lut.py` は `importlib.util.spec_from_file_location`
+で `sample.py` を直接ロードしており、未移動の私的デバッグ補助を含む約30個の
+`sample.*` 属性に依存する。その解消は本計画の対象外とし、別タスクとする。
 
 GrayCode は `external/GrayCode` の submodule のままとし、`geometry/warp.py` の
 import 1箇所で吸収する。submodule は `340b7fe`（`fix/c2p-inpaint-propagation`、push済み）

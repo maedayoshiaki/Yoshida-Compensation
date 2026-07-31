@@ -1152,9 +1152,69 @@ module scope にあればメソッド内へ移す。
 - [ ] **Step 4: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 88 passed（86 + 新規2）
+Expected: 88 passed（86 + 新規2）。Step 5 の追加分を含めると最終 90 passed
 
-- [ ] **Step 5: README を更新**
+- [ ] **Step 5: レビューで判明したカバレッジの穴を塞ぐ**
+
+Task 9 のレビューが指摘した3点を閉じる。いずれも小さいが、放置すると
+リグレッションが CI をすり抜ける。
+
+**(a) 線形化の向きを固定するテスト。** 現在 `tests/test_pipeline.py` は
+`LINEARIZERS` のキー存在しか見ていない。`pipeline.py` の
+`_linearize_gamma` から `1.0 /` を落としても suite は緑のままになる。
+これは計画が唯一名指しした罠であり、実測バイト比較でしか守られていない。
+`tests/test_pipeline.py` に追記:
+
+```python
+def test_gamma_linearizer_brightens_midtones() -> None:
+    """逆ガンマは中間調を明るくする（指数は 1/gamma でなければならない）。
+
+    apply_inverse_gamma_correction は与えた指数をそのまま pow に使うため、
+    誤って projector.gamma を渡すと逆に暗くなる。
+    """
+    from dataclasses import dataclass
+
+    import numpy as np
+
+    from yoshidacomp.compensation.pipeline import LINEARIZERS
+
+    @dataclass(frozen=True)
+    class Projector:
+        gamma: float = 2.2
+
+    mid = np.full((1, 1, 3), 64, dtype=np.uint8)
+    brightened = LINEARIZERS["gamma"](mid, projector=Projector(), lut=None)
+    passed_through = LINEARIZERS["none"](mid, projector=Projector(), lut=None)
+
+    assert int(brightened[0, 0, 0]) > int(passed_through[0, 0, 0])
+
+
+def test_inverse_lut_linearizer_requires_a_lut() -> None:
+    import numpy as np
+    import pytest
+
+    from yoshidacomp.compensation.pipeline import LINEARIZERS
+
+    image = np.zeros((1, 1, 3), dtype=np.uint8)
+    with pytest.raises(ValueError):
+        LINEARIZERS["inverse_lut"](image, projector=None, lut=None)
+```
+
+**(b) rebuild CLI の import スモークを戻す。** Task 9 で
+`tests/test_rebuild_compensation_with_map.py` から
+`from examples.python import rebuild_compensation_with_map` が落ち、当該CLIの
+カバレッジがゼロになった。Task 9 こそがそのファイルに新しい `sys.path` 挿入と
+import ブロックを足した張本人なので、import が壊れても誰も気づかない。
+同ファイルに import スモークを1つ戻すこと。
+
+**(c) 互換 re-export に注記。** `examples/python/sample.py` の
+`invwarp_image` import は `sample.py` 自身からは参照されていないが、
+`tests/test_sample_mocked.py` の `_patch_warp_helper` が
+`monkeypatch.setattr(sample, "invwarp_image", ...)` するため、削除すると
+4テストが `AttributeError` で落ちる。import ブロックに、これらが意図的な
+互換 re-export であり削除してはならない旨のコメントを1行入れる。
+
+- [ ] **Step 6: README を更新**
 
 `README.md` のセットアップとインポート例を新レイアウトに合わせる。
 
@@ -1172,7 +1232,13 @@ from yoshidacomp.compensation.pipeline import generate_projection_image
 撮影機能を使う場合は `uv sync --extra sample` を実行する。
 ```
 
-- [ ] **Step 6: コミット**
+あわせて `data/README.md` の「実験記録」節に、移行の帰結を1段落追記する。
+`src/python/` を削除したため、`data/` 配下の実験スクリプト約30本は
+`src.python.*` を import できなくなっている。これは意図した状態であり、
+各実験のデータ・config と対になった凍結記録なので移行しない。動作する
+組み合わせはタグ `v1.0-hdr-lut` が保存している旨を書く。
+
+- [ ] **Step 7: コミット**
 
 ```bash
 git add -A
