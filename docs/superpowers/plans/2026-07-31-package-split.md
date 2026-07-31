@@ -592,7 +592,7 @@ git commit -m "refactor: inverse_lut を yoshidacomp.compensation へ移行"
 
 **Interfaces:**
 - Consumes: Task 2 の `yoshidacomp.config`、Task 5 の `yoshidacomp.capture`
-- Produces: `yoshidacomp.calibration.{cam_in_calib, cap_chess, solve_pnp}`（いずれも `main(argv=None)` を持つ）
+- Produces: `yoshidacomp.calibration.{cam_in_calib, cap_chess, solve_pnp}`。`cap_chess` と `solve_pnp` は `main(argv=None)`、`cam_in_calib` は引数なしの `main()` を持つ
 
 - [ ] **Step 1: 失敗するテストを追加**
 
