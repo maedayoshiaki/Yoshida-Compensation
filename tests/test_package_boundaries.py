@@ -23,6 +23,20 @@ def test_core_does_not_import_web() -> None:
     assert offenders == [], f"core must not import the web layer: {offenders}"
 
 
+def test_web_does_not_import_matplotlib_or_qt() -> None:
+    """Web層は描画ライブラリを引かない（描画はブラウザ側）。"""
+    import re
+
+    web_dir = _REPO_ROOT / "packages" / "web" / "yoshidacomp_web"
+    pattern = re.compile(r"^\s*(?:from|import)\s+(matplotlib|PyQt6|PyQt5)\b", re.MULTILINE)
+    offenders = [
+        str(path.relative_to(_REPO_ROOT))
+        for path in web_dir.rglob("*.py")
+        if pattern.search(path.read_text(encoding="utf-8"))
+    ]
+    assert offenders == [], f"web must not import a plotting stack: {offenders}"
+
+
 def test_core_imports_without_camera_sdk() -> None:
     """edsdk / rawpy / fastapi を遮断しても core が import できること。
 

@@ -273,6 +273,15 @@ uv run python examples/python/capture.py --config path/to/config.toml
 4. 実際に通った warp / inverse warp の出力画像
 5. 対象ごとの `metadata.json` と実行全体の `session.json`
 
+## 色変換行列ビューア
+
+```bash
+uv sync --extra sample --extra web
+uv run --no-sync python -m yoshidacomp_web
+```
+
+`http://127.0.0.1:8000` を開き、行列の `.npy` パスを入力する。
+
 ## ライブラリとしての利用
 
 `yoshidacomp` パッケージ（`packages/core/yoshidacomp/`）を直接インポートして利用することもできます。
