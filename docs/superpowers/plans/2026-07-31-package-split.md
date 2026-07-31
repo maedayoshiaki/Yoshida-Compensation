@@ -773,8 +773,11 @@ Expected: FAIL — `ModuleNotFoundError: No module named 'yoshidacomp.geometry'`
 | `warp_color_mixing_matrices_to_projector` | 872 |
 | `invwarp_image` | 936 |
 
-GrayCode の import は Densoten 互換のため次の形にする（ファイル先頭ではなく
-`create_warper` の中で行い、`import yoshidacomp` が torch を引かないようにする）:
+GrayCode の import は**関数内で行う**。`graycode` は submodule であり
+インストール済みパッケージではないため、`sys.path` へ `external/GrayCode/src` を
+挿入した文脈でしか import できない。module scope に置くと、その挿入を持たない
+素のプロセスから `yoshidacomp.geometry.warp` を import した時点で失敗する。
+Task 10 の境界テストがまさにその形で import するため、遅延化は必須である。
 
 ```python
 def create_warper(pixel_map_path: str, warp_method: WarpMethod) -> "PixelMapWarperTorch":
@@ -782,14 +785,11 @@ def create_warper(pixel_map_path: str, warp_method: WarpMethod) -> "PixelMapWarp
 
     与えられた対応マップから PixelMapWarperTorch を構築する。
 
-    GrayCode は submodule 配置とベンダリング配置の両方があり得るため、
-    その差異をこの関数だけで吸収する。import を関数内に置くことで
-    ``import yoshidacomp`` が torch を引かないようにしている。
+    GrayCode は submodule であり、``external/GrayCode/src`` を ``sys.path`` へ
+    挿入した文脈でしか import できない。そのため import は module scope ではなく
+    ここで行い、``import yoshidacomp`` 自体は GrayCode 非依存に保つ。
     """
-    try:
-        from procam.graycode.warp_image import PixelMapWarperTorch  # vendored layout
-    except ImportError:
-        from graycode.warp_image import PixelMapWarperTorch  # submodule layout
+    from graycode.warp_image import PixelMapWarperTorch
 
     if warp_method == "p2c":
         from graycode.interpolate_p2c import load_p2c_numpy_array
@@ -805,9 +805,6 @@ def create_warper(pixel_map_path: str, warp_method: WarpMethod) -> "PixelMapWarp
     return PixelMapWarperTorch(pixel_map)
 ```
 
-`interpolate_p2c` / `interpolate_c2p` の import も、ベンダリング配置では
-`procam.graycode.*` になる。上の `try/except` と同じ形で吸収するか、
-モジュール参照を1つの変数にまとめてから属性アクセスする。
 `sample.py:315` の `_create_warper` の分岐条件と読み込み関数はそのまま引き継ぐこと。
 
 - [ ] **Step 4: sample.py を re-export に置き換える**
