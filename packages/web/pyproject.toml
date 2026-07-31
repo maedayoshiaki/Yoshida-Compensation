@@ -11,6 +11,9 @@ dependencies = [
     "yoshidacomp",
     "fastapi>=0.115",
     "uvicorn>=0.34",
+    # yoshidacomp_web/matrix.py imports numpy directly; it has resolved so far
+    # only because yoshidacomp pulls numpy into the same venv.
+    "numpy>=2.3.4",
 ]
 
 [tool.setuptools.packages.find]

@@ -1213,6 +1213,7 @@ version = "0.1.0"
 source = { editable = "packages/web" }
 dependencies = [
     { name = "fastapi" },
+    { name = "numpy" },
     { name = "uvicorn" },
     { name = "yoshidacomp" },
 ]
@@ -1220,6 +1221,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "fastapi", specifier = ">=0.115" },
+    { name = "numpy", specifier = ">=2.3.4" },
     { name = "uvicorn", specifier = ">=0.34" },
     { name = "yoshidacomp", editable = "packages/core" },
 ]
