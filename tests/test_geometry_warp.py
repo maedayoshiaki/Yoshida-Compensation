@@ -17,7 +17,11 @@ def test_center_rect_centers_and_clamps() -> None:
 
 
 def test_identity_p2c_preserves_matrix(tmp_path) -> None:
-    """恒等P2C（proj座標=cam座標）なら行列がほぼそのまま返ること。"""
+    """恒等P2C（proj座標=cam座標）なら行列が位置ごとそのまま返ること。
+
+    係数を空間的に変化させるのが要点。一様な値を入れると、反転マップでも
+    シフトマップでも同じ結果になり、ワープの正しさを検出できない。
+    """
     from yoshidacomp.geometry.warp import warp_color_mixing_matrices_to_projector
 
     width, height = 8, 6
@@ -29,15 +33,15 @@ def test_identity_p2c_preserves_matrix(tmp_path) -> None:
     np.save(map_path, rows)
 
     matrices = np.zeros((height, width, 4, 3), dtype=np.float32)
-    matrices[:, :, 0, 0] = 2.0
-    matrices[:, :, 3, 1] = -0.5
+    matrices[:, :, 0, 0] = xs.astype(np.float32)
+    matrices[:, :, 3, 1] = ys.astype(np.float32)
 
     warped = warp_color_mixing_matrices_to_projector(
         matrices, str(map_path), width, height, width, height, warp_method="p2c"
     )
     assert warped.shape == (height, width, 4, 3)
-    assert warped[height // 2, width // 2, 0, 0] == pytest.approx(2.0, abs=1e-4)
-    assert warped[height // 2, width // 2, 3, 1] == pytest.approx(-0.5, abs=1e-4)
+    np.testing.assert_allclose(warped[:, :, 0, 0], xs, atol=1e-4)
+    np.testing.assert_allclose(warped[:, :, 3, 1], ys, atol=1e-4)
 
 
 def test_rejects_wrong_matrix_shape(tmp_path) -> None:
