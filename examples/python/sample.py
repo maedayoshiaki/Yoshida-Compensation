@@ -60,9 +60,15 @@ from yoshidacomp.compensation.projection_region import (
     mask_to_active_region,
     resolve_active_region,
 )
+from yoshidacomp.geometry.warp import (
+    WarpMethod,
+    center_rect,
+    invwarp_image,
+    warp_color_mixing_matrices_to_projector,
+    warp_image,
+)
 
 
-WarpMethod = Literal["c2p", "p2c"]
 TargetImageSpace = Literal["camera", "projector"]
 WARP_DEBUG_DIR = Path("data") / "sample_warp_debug_DEBUG_ONLY"
 WARP_ONLY_GROUP_DIRNAME = "warp_only_targets"
@@ -106,36 +112,6 @@ def compensation_space_from_warp_method(
 ) -> TargetImageSpace:
     """Return the coordinate system where compensation is computed."""
     return "camera" if warp_method == "c2p" else "projector"
-
-
-def center_rect(
-    image_width: int, image_height: int, proj_width: int, proj_height: int
-) -> Tuple[int, int, int, int]:
-    """Calculate the rectangle coordinates to center an image within the projector frame.
-
-    プロジェクタフレーム内に画像を中央配置するための矩形座標を計算する。
-
-    Args:
-        image_width: Width of the image to be centered.
-            中央配置する画像の幅。
-        image_height: Height of the image to be centered.
-            中央配置する画像の高さ。
-        proj_width: Width of the projector display.
-            プロジェクタディスプレイの幅。
-        proj_height: Height of the projector display.
-            プロジェクタディスプレイの高さ。
-
-    Returns:
-        A tuple ``(x_start, y_start, width, height)`` representing the
-        centered rectangle. When the image is larger than the projector,
-        the returned width/height are clamped to the projector frame.
-        中央配置された矩形を表すタプル ``(x_start, y_start, width, height)``。
-    """
-    crop_width = min(image_width, proj_width)
-    crop_height = min(image_height, proj_height)
-    x_start = max((proj_width - crop_width) // 2, 0)
-    y_start = max((proj_height - crop_height) // 2, 0)
-    return x_start, y_start, crop_width, crop_height
 
 
 def _sanitize_debug_name(name: str) -> str:
@@ -310,67 +286,6 @@ def _load_target_images(target_dir: str) -> list[tuple[str, np.ndarray]]:
         target_img_array = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         target_images.append((img_name, target_img_array))
     return target_images
-
-
-def _create_warper(
-    pixel_map_path: str,
-    warp_method: WarpMethod,
-) -> PixelMapWarperTorch:
-    """Load the configured correspondence map and return a warper."""
-    if warp_method == "c2p":
-        pixel_map = load_c2p_numpy(pixel_map_path)
-    elif warp_method == "p2c":
-        pixel_map = load_p2c_numpy_array(pixel_map_path)
-    else:
-        raise ValueError("warp_method must be 'c2p' or 'p2c'.")
-
-    return PixelMapWarperTorch(pixel_map)
-
-
-def _warp_camera_array_to_projector(
-    src_array: np.ndarray,
-    pixel_map_path: str,
-    proj_width: int,
-    proj_height: int,
-    image_width: int,
-    image_height: int,
-    warp_method: WarpMethod,
-) -> np.ndarray:
-    """Warp an array from camera coordinates into projector coordinates."""
-    if src_array.ndim < 3:
-        raise ValueError("src_array must have shape (H, W, ...).")
-
-    crop_rect = center_rect(image_width, image_height, proj_width, proj_height)
-    src_shape = src_array.shape
-    src_tensor = torch.from_numpy(src_array.reshape(src_shape[0], src_shape[1], -1))
-    src_tensor = src_tensor.permute(2, 0, 1)
-    warper = _create_warper(pixel_map_path, warp_method)
-
-    if warp_method == "c2p":
-        warped_tensor = warper.forward_warp(
-            src_tensor,
-            dst_size=(proj_width, proj_height),
-            splat_method=SplatMethod.BILINEAR,
-            crop_rect=crop_rect,
-            # GrayCode maps may use projector blocks larger than one pixel.
-            # Bilinear splatting alone then leaves a regular hole grid between
-            # block centers; convolution inpainting reconstructs those cells.
-            inpaint=InpaintMethod.CONV,
-            inpaint_iter=3,
-            aggregation=AggregationMethod.MEAN,
-        )
-    else:
-        full_warped = warper.backward_warp(
-            src_tensor,
-            dst_size=(proj_width, proj_height),
-            inpaint=InpaintMethod.NONE,
-        )
-        cx, cy, cw, ch = crop_rect
-        warped_tensor = full_warped[:, cy : cy + ch, cx : cx + cw]
-
-    warped_array = warped_tensor.permute(1, 2, 0).numpy()
-    warped_height, warped_width = warped_array.shape[:2]
-    return warped_array.reshape(warped_height, warped_width, *src_shape[2:])
 
 
 def _ensure_matching_spatial_shape(
@@ -815,87 +730,6 @@ def capture_projection_patterns(
     return captured_images
 
 
-def warp_image(
-    src_image: np.ndarray,
-    pixel_map_path: str,
-    proj_width: int,
-    proj_height: int,
-    image_width: int,
-    image_height: int,
-    warp_method: WarpMethod = "c2p",
-) -> np.ndarray:
-    """Warp an image from camera view to projector view using a pixel correspondence map.
-
-    Perform forward warping to transform an image captured by the camera
-    into the projector's coordinate system using pre-computed
-    camera-to-projector mapping.
-
-    ピクセル対応マップを使用してカメラビューからプロジェクタビューに画像をワーピングする。
-
-    事前計算されたカメラ-プロジェクタ間マッピングを使用して、カメラで
-    キャプチャされた画像をプロジェクタの座標系に順方向ワーピングで変換する。
-
-    Args:
-        src_image: Source image in camera coordinates with shape
-            ``(H, W, 3)``.
-            形状 ``(H, W, 3)`` のカメラ座標系のソース画像。
-        pixel_map_path: Path to the correspondence map (``.npy`` file).
-            対応マップ（``.npy`` ファイル）のパス。
-        proj_width: Width of the projector display.
-            プロジェクタディスプレイの幅。
-        proj_height: Height of the projector display.
-            プロジェクタディスプレイの高さ。
-        image_width: Width of the target image region.
-            目標画像領域の幅。
-        image_height: Height of the target image region.
-            目標画像領域の高さ。
-        warp_method: Correspondence direction (``"c2p"`` or ``"p2c"``).
-            対応の向き（``"c2p"`` または ``"p2c"``）。
-
-    Returns:
-        Warped image in projector coordinates with shape
-        ``(proj_height, proj_width, 3)``.
-        形状 ``(proj_height, proj_width, 3)`` のプロジェクタ座標系の
-        ワーピング済み画像。
-    """
-    return _warp_camera_array_to_projector(
-        src_image,
-        pixel_map_path,
-        proj_width,
-        proj_height,
-        image_width,
-        image_height,
-        warp_method,
-    )
-
-
-def warp_color_mixing_matrices_to_projector(
-    color_mixing_matrices: np.ndarray,
-    pixel_map_path: str,
-    proj_width: int,
-    proj_height: int,
-    image_width: int,
-    image_height: int,
-    warp_method: WarpMethod = "p2c",
-) -> np.ndarray:
-    """Warp camera-space color mixing matrices into projector coordinates."""
-    if color_mixing_matrices.ndim != 4 or color_mixing_matrices.shape[2:] != (4, 3):
-        raise ValueError(
-            "color_mixing_matrices must have shape (H, W, 4, 3)."
-        )
-
-    warped = _warp_camera_array_to_projector(
-        color_mixing_matrices,
-        pixel_map_path,
-        proj_width,
-        proj_height,
-        image_width,
-        image_height,
-        warp_method,
-    )
-    return warped.astype(color_mixing_matrices.dtype, copy=False)
-
-
 def prepare_target_image_for_compensation(
     target_image: np.ndarray,
     target_image_space: TargetImageSpace,
@@ -931,80 +765,6 @@ def prepare_target_image_for_compensation(
         target_image.shape[0],
         warp_method=warp_method,
     )
-
-
-def invwarp_image(
-    src_image: np.ndarray,
-    pixel_map_path: str,
-    proj_width: int,
-    proj_height: int,
-    cam_width: int,
-    cam_height: int,
-    warp_method: WarpMethod = "c2p",
-) -> np.ndarray:
-    """Inverse warp an image from projector view to camera view.
-
-    Perform backward warping to transform an image from projector
-    coordinates into the camera's coordinate system using pre-computed
-    mapping.
-
-    プロジェクタビューからカメラビューに画像を逆ワーピングする。
-
-    事前計算されたマッピングを使用して、プロジェクタ座標系の画像を
-    カメラの座標系に逆方向ワーピングで変換する。
-
-    Args:
-        src_image: Source image in projector coordinates with shape
-            ``(H, W, 3)``.
-            形状 ``(H, W, 3)`` のプロジェクタ座標系のソース画像。
-        pixel_map_path: Path to the correspondence map (``.npy`` file).
-            対応マップ（``.npy`` ファイル）のパス。
-        proj_width: Width of the projector display.
-            プロジェクタディスプレイの幅。
-        proj_height: Height of the projector display.
-            プロジェクタディスプレイの高さ。
-        cam_width: Width of the camera image.
-            カメラ画像の幅。
-        cam_height: Height of the camera image.
-            カメラ画像の高さ。
-        warp_method: Correspondence direction (``"c2p"`` or ``"p2c"``).
-            対応の向き（``"c2p"`` または ``"p2c"``）。
-
-    Returns:
-        Inverse warped image in camera coordinates with shape
-        ``(cam_height, cam_width, 3)``.
-        形状 ``(cam_height, cam_width, 3)`` のカメラ座標系の
-        逆ワーピング済み画像。
-    """
-    src_rect = center_rect(
-        src_image.shape[1], src_image.shape[0], proj_width, proj_height
-    )
-    src_image_tensor = torch.from_numpy(src_image).permute(2, 0, 1)
-    if warp_method == "c2p":
-        pixel_map = load_c2p_numpy(pixel_map_path)
-        warper = PixelMapWarperTorch(pixel_map)
-        invwarped_image_tensor = warper.backward_warp(
-            src_image_tensor,
-            dst_size=(cam_width, cam_height),
-            src_rect=src_rect,
-            inpaint=InpaintMethod.NONE,
-        )
-    elif warp_method == "p2c":
-        pixel_map = load_p2c_numpy_array(pixel_map_path)
-        warper = PixelMapWarperTorch(pixel_map)
-        invwarped_image_tensor = warper.forward_warp(
-            src_image_tensor,
-            dst_size=(cam_width, cam_height),
-            src_offset=(src_rect[0], src_rect[1]),
-            splat_method=SplatMethod.BILINEAR,
-            inpaint=InpaintMethod.NONE,
-            aggregation=AggregationMethod.MEAN,
-        )
-    else:
-        raise ValueError("warp_method must be 'c2p' or 'p2c'.")
-
-    invwarped_image = invwarped_image_tensor.permute(1, 2, 0).numpy()
-    return invwarped_image
 
 
 def main(argv: list[str] | None = None):
