@@ -145,7 +145,29 @@ export class GLView {
 
   resize() {
     const dpr = window.devicePixelRatio || 1;
+    const old = this.dpr;
     this.dpr = dpr;
+
+    // view.scale/tx/ty are device pixels measured from the canvas origin, so a
+    // ratio change invalidates them: at 1.0 -> 1.5 the backing store grows by
+    // half while the transform does not, leaving the image two-thirds size in
+    // the top-left corner until someone hits 表示リセット.
+    //
+    // Rescaling by newDpr/oldDpr is a similarity about that same origin, and the
+    // element's CSS size has not changed, so what the user sees is unmoved and
+    // unresized -- their pan and zoom survive being dragged to another monitor.
+    // fit() would also clear the artefact, but by discarding the view, and it
+    // fires onViewChange from all 12 tiles at once; this needs no propagation
+    // because every tile derives the same ratio from the same global.
+    // DPR比で相似変換すれば見た目は不変でパン/ズームも保たれる。fit() だと
+    // 視点を捨ててしまい、12枚が同時に onViewChange を撃つ。
+    if (old && old !== dpr) {
+      const k = dpr / old;
+      this.view.scale *= k;
+      this.view.tx *= k;
+      this.view.ty *= k;
+    }
+
     const w = Math.max(1, Math.round(this.canvas.clientWidth * dpr));
     const h = Math.max(1, Math.round(this.canvas.clientHeight * dpr));
     if (this.canvas.width !== w || this.canvas.height !== h) {

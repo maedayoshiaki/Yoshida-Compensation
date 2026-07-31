@@ -75,8 +75,15 @@ float hash12(vec2 p) {
 // to prevent. Integer ops are not subject to float fast-math, so this holds.
 // isnan() も (v != v) も実測で最適化により消え、有効領域外が「濃い負の値」に
 // 見えてしまった。整数演算なら fast-math の影響を受けないため確実に判定できる。
+// highp is not optional here. ESSL 3.00 gives the fragment language a default
+// of mediump for int (and uint follows int), and only float is declared highp
+// above. Desktop ANGLE happens to implement mediump int as 32-bit, but where it
+// is 16-bit the 0x7F800000u mask truncates and every NaN reads as finite --
+// reintroducing the exact plausible-wrong-pixel bug this function exists to fix.
+// highp は必須。ESSL 3.00 の int/uint 既定は mediump で、16bit 実装では
+// マスクが切り捨てられ NaN 判定が壊れる。
 bool isNaNBits(float x) {
-    uint b = floatBitsToUint(x);
+    highp uint b = floatBitsToUint(x);
     return (b & 0x7F800000u) == 0x7F800000u && (b & 0x007FFFFFu) != 0u;
 }
 

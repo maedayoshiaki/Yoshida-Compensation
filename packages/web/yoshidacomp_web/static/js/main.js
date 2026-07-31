@@ -371,8 +371,8 @@ async function reload() {
       ? { rows: state.rows, cols: state.cols }
       : fallbackAxes(payload.labels, payload.channels));
   const axesChanged =
-    axes.rows.join(" ") !== state.rows.join(" ") ||
-    axes.cols.join(" ") !== state.cols.join(" ");
+    axes.rows.join(" ") !== state.rows.join(" ") ||
+    axes.cols.join(" ") !== state.cols.join(" ");
   state.rows = axes.rows;
   state.cols = axes.cols;
   if (views.length !== payload.channels || axesChanged) {
