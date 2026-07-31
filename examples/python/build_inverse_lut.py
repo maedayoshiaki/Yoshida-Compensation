@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> None:
         clean_argv, load_path = _split_flag(clean_argv, "--load")
         clean_argv, apply_path = _split_flag(clean_argv, "--apply")
         clean_argv, debug_dir = _split_flag(clean_argv, "--debug-dir")
+        clean_argv, source_override = _split_flag(clean_argv, "--source")
+        clean_argv, output_override = _split_flag(clean_argv, "--output")
     except ValueError as exc:
         print(f"Invalid CLI arguments: {exc}")
         raise SystemExit(1)
@@ -75,7 +77,8 @@ def main(argv: list[str] | None = None) -> None:
         print(
             "Usage: python examples/python/build_inverse_lut.py "
             "[--config <config.toml>] [--load <lut.npz>] [--apply <image>] "
-            "[--debug-dir <dir>]"
+            "[--debug-dir <dir>] [--source channel_ramp|gray] "
+            "[--output <lut.npz>]"
         )
         raise SystemExit(1)
 
@@ -83,6 +86,9 @@ def main(argv: list[str] | None = None) -> None:
     reload_config(config_path if config_path is not None else default_config_path)
     cfg = get_config()
     ilut_cfg = cfg.inverse_lut
+    source = source_override or ilut_cfg.source
+    if source not in {"channel_ramp", "gray"}:
+        raise SystemExit("--source must be 'channel_ramp' or 'gray'.")
 
     if load_path is not None:
         lut = ilut.load_inverse_lut(load_path)
@@ -92,7 +98,7 @@ def main(argv: list[str] | None = None) -> None:
             cfg.projector.width,
             cfg.projector.height,
             num_levels=ilut_cfg.num_levels,
-            source=ilut_cfg.source,
+            source=source,
             dtype=np.uint8,
         )
         active_region = resolve_active_region(cfg.projector)
@@ -107,11 +113,32 @@ def main(argv: list[str] | None = None) -> None:
         ]
         print(
             f"Projecting {len(samples)} calibration patterns "
-            f"(source={ilut_cfg.source})..."
+            f"(source={source})..."
         )
         data = ilut.run_calibration_capture(samples, debug_dir=debug_dir)
-        lut = ilut.build_inverse_lut(data, source=ilut_cfg.source)
-        out_path = ilut.save_inverse_lut(ilut_cfg.inverse_lut_path, lut)
+        lut = ilut.build_inverse_lut(data, source=source)
+        lut.meta.update(
+            {
+                "hdr_enabled": bool(data.meta.get("hdr_enabled", False)),
+                "capture_mode": data.meta.get("capture_mode"),
+                "base_tv": cfg.camera.tv,
+                "iso": cfg.camera.iso,
+                "av": cfg.camera.av,
+                "half_size": cfg.camera.half_size,
+                "hdr_max_stops": ilut_cfg.hdr_max_stops,
+                "refresh_rate": cfg.projector.refresh_rate,
+                "roi": [
+                    ilut_cfg.roi_x,
+                    ilut_cfg.roi_y,
+                    ilut_cfg.roi_width,
+                    ilut_cfg.roi_height,
+                ],
+            }
+        )
+        out_path = ilut.save_inverse_lut(
+            output_override or ilut_cfg.inverse_lut_path,
+            lut,
+        )
         print(f"Saved inverse LUT to: {out_path}")
 
     if apply_path is not None:

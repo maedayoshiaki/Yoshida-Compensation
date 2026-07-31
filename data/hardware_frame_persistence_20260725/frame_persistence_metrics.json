@@ -1,0 +1,85 @@
+{
+  "display": "Win32 DISPLAY4",
+  "projector_size": [
+    1920,
+    1080
+  ],
+  "active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "camera_half_size": true,
+  "camera_roi": [
+    1389,
+    413,
+    918,
+    1162
+  ],
+  "initial_wait_ms": 300,
+  "switch_wait_ms": [
+    1,
+    300
+  ],
+  "total_capture_and_development_seconds": {
+    "1": 23.55719820037484,
+    "300": 25.447550100274384
+  },
+  "frames": [
+    {
+      "index": 0,
+      "label": "RED_0",
+      "rmse_1ms_vs_300ms": 0.007837913839938268
+    },
+    {
+      "index": 1,
+      "label": "CYAN_1",
+      "rmse_1ms_vs_300ms": 0.015413684514352816,
+      "previous_frame_mix_alpha": 0.03476646671135156,
+      "rmse_1ms_vs_previous_300ms": 0.26083339270869316
+    },
+    {
+      "index": 2,
+      "label": "GREEN_2",
+      "rmse_1ms_vs_300ms": 0.007470397191905272,
+      "previous_frame_mix_alpha": -0.005224478101397239,
+      "rmse_1ms_vs_previous_300ms": 0.20837396382182446
+    },
+    {
+      "index": 3,
+      "label": "MAGENTA_3",
+      "rmse_1ms_vs_300ms": 0.011859890339209138,
+      "previous_frame_mix_alpha": 0.001543288636535824,
+      "rmse_1ms_vs_previous_300ms": 0.2992039656051226
+    },
+    {
+      "index": 4,
+      "label": "LEFT_4",
+      "rmse_1ms_vs_300ms": 0.008878015654496882,
+      "previous_frame_mix_alpha": 0.00035168192576459504,
+      "rmse_1ms_vs_previous_300ms": 0.2559566182487979
+    },
+    {
+      "index": 5,
+      "label": "RIGHT_5",
+      "rmse_1ms_vs_300ms": 0.008316519664594063,
+      "previous_frame_mix_alpha": 0.0006456258290342304,
+      "rmse_1ms_vs_previous_300ms": 0.34080279487903997
+    },
+    {
+      "index": 6,
+      "label": "QUAD_6",
+      "rmse_1ms_vs_300ms": 0.009298418593105748,
+      "previous_frame_mix_alpha": -0.0009138469091456725,
+      "rmse_1ms_vs_previous_300ms": 0.2067363754002213
+    },
+    {
+      "index": 7,
+      "label": "INVQUAD_7",
+      "rmse_1ms_vs_300ms": 0.008912980248566394,
+      "previous_frame_mix_alpha": -0.0013094377678962994,
+      "rmse_1ms_vs_previous_300ms": 0.31796685237160965
+    }
+  ]
+}

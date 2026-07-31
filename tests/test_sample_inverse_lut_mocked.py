@@ -183,6 +183,10 @@ def test_sample_inverse_lut_runs_and_linearizes_with_lut(tmp_path, monkeypatch) 
         len(list((data_dir / "inv_lut_proj_patterns").glob("inv_lut_pattern_*.png")))
         == 8
     )
+    assert (
+        len(list((data_dir / "captured_images").glob("captured_image_*.png")))
+        == 8
+    )
     assert (data_dir / "inv_lut_comp_images" / "inv_lut_comp_image_00.png").exists()
     assert (data_dir / "compensation_images" / "compensation_image_00.png").exists()
 

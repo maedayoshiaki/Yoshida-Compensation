@@ -1,0 +1,73 @@
+{
+  "method": "white-black quadrilateral homography",
+  "camera_shape_full": [
+    4660,
+    6984,
+    3
+  ],
+  "threshold": 50,
+  "projector_active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "projector_corners_tl_tr_br_bl": [
+    [
+      613.0,
+      201.0
+    ],
+    [
+      1334.0,
+      201.0
+    ],
+    [
+      1334.0,
+      922.0
+    ],
+    [
+      613.0,
+      922.0
+    ]
+  ],
+  "camera_corners_tl_tr_br_bl_full": [
+    [
+      2354.0,
+      602.0
+    ],
+    [
+      5074.0,
+      278.0
+    ],
+    [
+      5048.0,
+      3634.0
+    ],
+    [
+      2182.0,
+      3288.0
+    ]
+  ],
+  "homography_projector_to_camera": [
+    [
+      2.0391446345933444,
+      -0.3373915995929507,
+      813.055588580226
+    ],
+    [
+      -0.4443577762350013,
+      2.953892823222149,
+      188.91025864936276
+    ],
+    [
+      -0.0002283080166086258,
+      -6.195770795545738e-05,
+      1.0
+    ]
+  ],
+  "map_file": "data\\hardware_recalibration_20260729\\maps\\p2c_homography_1920x1080.npy",
+  "map_shape": [
+    2073600,
+    4
+  ]
+}

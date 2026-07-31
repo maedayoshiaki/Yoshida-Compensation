@@ -1,0 +1,18 @@
+{
+  "target_name": "nature_1_sq.png",
+  "target_image_space": "projector",
+  "compensation_space": "projector",
+  "target_shape": [
+    1080,
+    1920,
+    3
+  ],
+  "target_crop_rect": [
+    0,
+    0,
+    1920,
+    1080
+  ],
+  "target_exceeds_projector": false,
+  "warps": []
+}

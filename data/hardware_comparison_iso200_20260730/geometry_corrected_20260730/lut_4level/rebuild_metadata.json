@@ -1,0 +1,37 @@
+{
+  "config": "data\\hardware_comparison_iso200_20260730\\config_lut_4level.toml",
+  "camera_half_size": false,
+  "matrix": "data\\hardware_comparison_iso200_20260730\\lut_4level\\color_mixing_matrices.npy",
+  "matrix_shape": [
+    4660,
+    6984,
+    4,
+    3
+  ],
+  "p2c_map": "data/graycode_recalibration_20260730/p2c_dense_active_1920x1080.npy",
+  "linearizer": "inverse_lut",
+  "inverse_lut": "data\\hardware_comparison_iso200_20260730\\inverse_lut\\inverse_lut.npz",
+  "active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "matrix_load_seconds": 0.01194750051945448,
+  "matrix_warp_seconds": 0.4304919997230172,
+  "targets": [
+    {
+      "name": "nature_1_sq.png",
+      "seconds": 0.32985240034759045
+    },
+    {
+      "name": "nature_2_sq.png",
+      "seconds": 0.3405368998646736
+    },
+    {
+      "name": "nature_3_sq.png",
+      "seconds": 0.34399820026010275
+    }
+  ],
+  "total_seconds": 1.460586099885404
+}

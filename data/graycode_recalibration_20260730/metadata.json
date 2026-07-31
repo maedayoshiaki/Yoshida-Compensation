@@ -1,0 +1,43 @@
+{
+  "graycode_source": "external/GrayCode/src/graycode",
+  "projector_size": [
+    1920,
+    1080
+  ],
+  "active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "camera_capture_shape": [
+    4660,
+    6984
+  ],
+  "camera_coordinate_scale": 1.0,
+  "camera_full_shape": [
+    4660,
+    6984
+  ],
+  "graycode_step": [
+    4,
+    4
+  ],
+  "pattern_count": 38,
+  "correspondence_count": 8448330,
+  "black_threshold": 20,
+  "white_threshold": 5,
+  "active_extrapolated_fraction": 0.009514966889449897,
+  "timing_seconds": {
+    "trigger_capture": 90.9942772006616,
+    "raw_development": 164.98166240006685,
+    "decode": 185.72961619962007,
+    "p2c_interpolation": 15.46345069911331
+  },
+  "outputs": {
+    "c2p_sparse": "c2p_sparse_full_camera.npy",
+    "p2c_sparse": "p2c_sparse_full_camera.npy",
+    "p2c_dense": "p2c_dense_active_1920x1080.npy",
+    "p2c_dense_unmasked": "p2c_dense_unmasked_1920x1080.npy"
+  }
+}

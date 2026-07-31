@@ -1,7 +1,7 @@
 {
   "warp_method": "p2c",
   "target_image_space": "projector",
-  "pixel_map_path": "result_p2c_compensated_delaunay.npy",
+  "pixel_map_path": "data/hardware_recalibration_20260729/maps/p2c_homography_1920x1080.npy",
   "projector_size": {
     "width": 1920,
     "height": 1080

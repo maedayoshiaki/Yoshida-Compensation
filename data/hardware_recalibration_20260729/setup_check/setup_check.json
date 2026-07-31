@@ -1,0 +1,28 @@
+{
+  "image_shape": [
+    2330,
+    3492,
+    3
+  ],
+  "projector_active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "threshold_components": [
+    {
+      "x": 1090,
+      "y": 139,
+      "width": 1451,
+      "height": 1680,
+      "area": 2177397,
+      "centroid": [
+        1852.9622108416609,
+        978.67029668912
+      ]
+    }
+  ],
+  "difference_mean": 0.08154509216547012,
+  "difference_max": 0.7456778883934021
+}

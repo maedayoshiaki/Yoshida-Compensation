@@ -25,6 +25,8 @@ projector's gamma is cancelled: analytic ``t**(1/gamma)`` vs. a measured
 Usage:
     uv run python examples/python/sample_inverse_lut.py [--config config.toml]
                                                         [--lut data/inverse_lut.npz]
+                                                        [--lut-pattern-dir dir]
+                                                        [--lut-comp-dir dir]
 
 Prerequisite: build the inverse LUT first, e.g.
     uv run python examples/python/build_inverse_lut.py --config config.toml
@@ -140,6 +142,10 @@ def main(argv: list[str] | None = None) -> None:
     try:
         clean_argv, config_path = split_cli_config_path(argv)
         clean_argv, lut_path_arg = _split_flag(clean_argv, "--lut")
+        clean_argv, lut_pattern_dir_arg = _split_flag(
+            clean_argv, "--lut-pattern-dir"
+        )
+        clean_argv, lut_comp_dir_arg = _split_flag(clean_argv, "--lut-comp-dir")
     except ValueError as exc:
         print(f"Invalid CLI arguments: {exc}")
         return
@@ -147,7 +153,8 @@ def main(argv: list[str] | None = None) -> None:
     if len(clean_argv) != 1:
         print(
             "Usage: python examples/python/sample_inverse_lut.py "
-            "[--config <config.toml>] [--lut <lut.npz>]"
+            "[--config <config.toml>] [--lut <lut.npz>] "
+            "[--lut-pattern-dir <dir>] [--lut-comp-dir <dir>]"
         )
         return
 
@@ -171,6 +178,12 @@ def main(argv: list[str] | None = None) -> None:
         lut_path_arg if lut_path_arg is not None else cfg.inverse_lut.inverse_lut_path
     )
     lut = _load_inverse_lut_or_exit(lut_path)
+    lut_pattern_dir = Path(
+        lut_pattern_dir_arg if lut_pattern_dir_arg is not None else LUT_PATTERN_DIR
+    )
+    lut_comp_dir = Path(
+        lut_comp_dir_arg if lut_comp_dir_arg is not None else LUT_COMP_DIR
+    )
 
     try:
         warp_method, pixel_map_path = sample.resolve_warp_settings(paths)
@@ -190,7 +203,7 @@ def main(argv: list[str] | None = None) -> None:
         for pattern in linear_model_patterns
     ]
     os.makedirs(paths.linear_pattern_dir, exist_ok=True)
-    os.makedirs(LUT_PATTERN_DIR, exist_ok=True)
+    lut_pattern_dir.mkdir(parents=True, exist_ok=True)
 
     lut_patterns = []
     for i, pattern in enumerate(linear_proj_patterns):
@@ -203,7 +216,7 @@ def main(argv: list[str] | None = None) -> None:
         lut_pattern = ilut.apply_inverse_lut(pattern, lut, dtype=np.uint8)
         lut_patterns.append(lut_pattern)
         cv2.imwrite(
-            os.path.join(LUT_PATTERN_DIR, f"inv_lut_pattern_{i:02d}.png"),
+            str(lut_pattern_dir / f"inv_lut_pattern_{i:02d}.png"),
             cv2.cvtColor(lut_pattern, cv2.COLOR_RGB2BGR),
         )
 
@@ -235,13 +248,13 @@ def main(argv: list[str] | None = None) -> None:
     finally:
         cv2.destroyWindow(window_name)
 
-    for captured_image in captured_images:
+    for capture_index, captured_image in enumerate(captured_images):
         # Saved PNGs are sRGB-encoded for viewing only; the pipeline keeps
         # using the linear array in `captured_images`.
         cv2.imwrite(
             os.path.join(
                 paths.captured_image_dir,
-                f"captured_image_{len(captured_images) - 1:02d}.png",
+                f"captured_image_{capture_index:02d}.png",
             ),
             cv2.cvtColor(
                 sample.capture_to_srgb_uint8(captured_image), cv2.COLOR_RGB2BGR
@@ -260,7 +273,7 @@ def main(argv: list[str] | None = None) -> None:
     target_images = sample._load_target_images(paths.target_image_dir)
 
     compensation_output_dir = Path(paths.compensation_image_dir)
-    lut_comp_output_dir = Path(LUT_COMP_DIR)
+    lut_comp_output_dir = lut_comp_dir
     sample._clear_generated_pngs(compensation_output_dir, "compensation_image_*.png")
     sample._clear_generated_pngs(lut_comp_output_dir, "inv_lut_comp_image_*.png")
 
@@ -360,7 +373,7 @@ def main(argv: list[str] | None = None) -> None:
 
     print(
         "Done. LUT-linearized patterns -> "
-        f"{LUT_PATTERN_DIR}, compensation -> {LUT_COMP_DIR}"
+        f"{lut_pattern_dir}, compensation -> {lut_comp_output_dir}"
     )
 
 

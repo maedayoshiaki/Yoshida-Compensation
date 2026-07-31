@@ -1,0 +1,40 @@
+{
+  "config": "config.full_recalibration_20260730_iso400.toml",
+  "camera_half_size": false,
+  "matrix": "data\\hdr_recalibration_20260730_iso400\\raw_4level\\color_mixing_matrices.npy",
+  "matrix_shape": [
+    4660,
+    6984,
+    4,
+    3
+  ],
+  "p2c_map": "data/graycode_recalibration_20260730/p2c_dense_active_1920x1080.npy",
+  "linearizer": "none",
+  "inverse_lut": null,
+  "target_decode": "srgb",
+  "target_gamma": null,
+  "target_dir": "data\\comp_test_targets_nature_srgb",
+  "active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "matrix_load_seconds": 0.001357000321149826,
+  "matrix_warp_seconds": 0.4271219000220299,
+  "targets": [
+    {
+      "name": "nature_1_sq.png",
+      "seconds": 0.1808847999200225
+    },
+    {
+      "name": "nature_2_sq.png",
+      "seconds": 0.18173979967832565
+    },
+    {
+      "name": "nature_3_sq.png",
+      "seconds": 0.1838603001087904
+    }
+  ],
+  "total_seconds": 0.9750429000705481
+}

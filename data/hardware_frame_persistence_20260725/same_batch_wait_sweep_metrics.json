@@ -1,0 +1,63 @@
+{
+  "sequence": "red digit (300ms) -> cyan C (variable wait), same triggered batch",
+  "waits_ms": [
+    1,
+    5,
+    10,
+    20,
+    50,
+    300
+  ],
+  "trigger_seconds": [
+    2.4391499999910593,
+    2.3505997005850077,
+    2.3271302999928594,
+    2.2802026998251677,
+    2.38636829983443,
+    2.328824800439179,
+    2.212951200082898,
+    2.327031100168824,
+    2.31498060002923,
+    2.587271399796009,
+    2.220287900418043,
+    2.699727199971676
+  ],
+  "frames": [
+    {
+      "wait_ms": 1,
+      "previous_digit": 0,
+      "rmse_vs_300ms": 0.016118648052630854,
+      "previous_frame_mix_alpha_vs_300ms": 0.026834448594215264
+    },
+    {
+      "wait_ms": 5,
+      "previous_digit": 1,
+      "rmse_vs_300ms": 0.013362144346671082,
+      "previous_frame_mix_alpha_vs_300ms": 0.03172957296795347
+    },
+    {
+      "wait_ms": 10,
+      "previous_digit": 2,
+      "rmse_vs_300ms": 0.01355405101780173,
+      "previous_frame_mix_alpha_vs_300ms": 0.028910905798058512
+    },
+    {
+      "wait_ms": 20,
+      "previous_digit": 3,
+      "rmse_vs_300ms": 0.015416795300639122,
+      "previous_frame_mix_alpha_vs_300ms": 0.03224958829572169
+    },
+    {
+      "wait_ms": 50,
+      "previous_digit": 4,
+      "rmse_vs_300ms": 0.013530030806124535,
+      "previous_frame_mix_alpha_vs_300ms": 0.027866490350899522
+    },
+    {
+      "wait_ms": 300,
+      "previous_digit": 5,
+      "rmse_vs_300ms": 0.0,
+      "previous_frame_mix_alpha_vs_300ms": 0.0
+    }
+  ]
+}

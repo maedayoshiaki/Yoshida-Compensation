@@ -1,0 +1,164 @@
+{
+  "setup_date": "2026-07-30",
+  "camera": {
+    "iso": "400",
+    "av": "14",
+    "tv": "1/15",
+    "image_quality": "LR",
+    "initial_wait_ms": 300,
+    "trigger_switch_wait_ms": 300,
+    "half_size": false,
+    "hdr_enabled": true,
+    "hdr_max_stops": 3,
+    "hdr_trust_low": 10,
+    "hdr_trust_high": 245
+  },
+  "p2c_map": "data/graycode_recalibration_20260730/p2c_dense_active_1920x1080.npy",
+  "target_dir": "data\\comp_test_targets_nature_srgb",
+  "requested_conditions": [
+    "no_comp",
+    "comp_no_gamma",
+    "comp_gamma",
+    "comp_inverse_lut",
+    "comp_inverse_lut_gray"
+  ],
+  "color_levels_per_channel": 4,
+  "calibration_patterns_per_compensation_matrix": 64,
+  "capture_and_development_seconds": 249.21819340065122,
+  "warp_seconds": [
+    0.13759380020201206,
+    0.14119109977036715,
+    0.14629950001835823,
+    0.14731259923428297,
+    0.13667350076138973,
+    0.15358689986169338,
+    0.12565540056675673,
+    0.13133350014686584,
+    0.14338930044323206,
+    0.14179830066859722,
+    0.12967240065336227,
+    0.1384535999968648,
+    0.1549482997506857,
+    0.1395365996286273,
+    0.1356851002201438
+  ],
+  "images": [
+    {
+      "name": "nature_1_sq",
+      "conditions": {
+        "no_comp": {
+          "psnr_db": 21.478377486998156,
+          "ssim": 0.8497583866119385,
+          "delta_e76": 20.495349884033203
+        },
+        "comp_no_gamma": {
+          "psnr_db": 18.909079760168275,
+          "ssim": 0.6580780148506165,
+          "delta_e76": 20.56102752685547
+        },
+        "comp_gamma": {
+          "psnr_db": 18.624266651383316,
+          "ssim": 0.6840402483940125,
+          "delta_e76": 25.460391998291016
+        },
+        "comp_inverse_lut": {
+          "psnr_db": 22.936604993242142,
+          "ssim": 0.7804391384124756,
+          "delta_e76": 12.267516136169434
+        },
+        "comp_inverse_lut_gray": {
+          "psnr_db": 20.898990582096786,
+          "ssim": 0.6771250367164612,
+          "delta_e76": 16.996726989746094
+        }
+      }
+    },
+    {
+      "name": "nature_2_sq",
+      "conditions": {
+        "no_comp": {
+          "psnr_db": 19.000285524795927,
+          "ssim": 0.8177602887153625,
+          "delta_e76": 27.42446517944336
+        },
+        "comp_no_gamma": {
+          "psnr_db": 18.6403570817152,
+          "ssim": 0.6956529021263123,
+          "delta_e76": 23.835582733154297
+        },
+        "comp_gamma": {
+          "psnr_db": 19.34628043600029,
+          "ssim": 0.7451515197753906,
+          "delta_e76": 26.58331298828125
+        },
+        "comp_inverse_lut": {
+          "psnr_db": 22.937804907598714,
+          "ssim": 0.808476448059082,
+          "delta_e76": 15.981757164001465
+        },
+        "comp_inverse_lut_gray": {
+          "psnr_db": 21.6467643886807,
+          "ssim": 0.7476039528846741,
+          "delta_e76": 18.733692169189453
+        }
+      }
+    },
+    {
+      "name": "nature_3_sq",
+      "conditions": {
+        "no_comp": {
+          "psnr_db": 18.6977151458906,
+          "ssim": 0.8271812796592712,
+          "delta_e76": 24.7791748046875
+        },
+        "comp_no_gamma": {
+          "psnr_db": 17.222392179747157,
+          "ssim": 0.7800052165985107,
+          "delta_e76": 29.877370834350586
+        },
+        "comp_gamma": {
+          "psnr_db": 19.906487066800704,
+          "ssim": 0.8047060966491699,
+          "delta_e76": 21.529003143310547
+        },
+        "comp_inverse_lut": {
+          "psnr_db": 21.662031557828403,
+          "ssim": 0.8325509428977966,
+          "delta_e76": 16.48770523071289
+        },
+        "comp_inverse_lut_gray": {
+          "psnr_db": 20.73577002392671,
+          "ssim": 0.8099531531333923,
+          "delta_e76": 15.854591369628906
+        }
+      }
+    }
+  ],
+  "average": {
+    "no_comp": {
+      "psnr_db": 19.725459385894894,
+      "ssim": 0.8315666516621908,
+      "delta_e76": 24.232996622721355
+    },
+    "comp_no_gamma": {
+      "psnr_db": 18.257276340543545,
+      "ssim": 0.7112453778584799,
+      "delta_e76": 24.757993698120117
+    },
+    "comp_gamma": {
+      "psnr_db": 19.29234471806144,
+      "ssim": 0.744632621606191,
+      "delta_e76": 24.52423604329427
+    },
+    "comp_inverse_lut": {
+      "psnr_db": 22.512147152889753,
+      "ssim": 0.8071555097897848,
+      "delta_e76": 14.912326176961264
+    },
+    "comp_inverse_lut_gray": {
+      "psnr_db": 21.0938416649014,
+      "ssim": 0.7448940475781759,
+      "delta_e76": 17.195003509521484
+    }
+  }
+}

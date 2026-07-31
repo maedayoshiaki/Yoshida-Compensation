@@ -1,0 +1,46 @@
+{
+  "config": "config.full_recalibration_20260730_iso400.toml",
+  "linearizer": "gamma",
+  "inverse_lut": null,
+  "patterns": 64,
+  "color_levels_per_channel": 4,
+  "camera": {
+    "iso": "400",
+    "av": "14",
+    "base_tv": "1/15",
+    "half_size": false,
+    "hdr_enabled": true,
+    "hdr_max_stops": 3,
+    "hdr_trust_low": 10,
+    "hdr_trust_high": 245,
+    "hdr_gate_roi": [
+      4520,
+      1600,
+      480,
+      400
+    ]
+  },
+  "projector": {
+    "frame": [
+      1920,
+      1080
+    ],
+    "active_region": [
+      613,
+      201,
+      722,
+      722
+    ],
+    "refresh_rate": 60.0
+  },
+  "capture_and_development_seconds": 898.819334499538,
+  "matrix_fit_seconds": 36.87055090069771,
+  "matrix_shape": [
+    4660,
+    6984,
+    4,
+    3
+  ],
+  "matrix_dtype": "float32",
+  "matrix_path": "data\\hdr_recalibration_20260730_iso400\\gamma_4level\\color_mixing_matrices.npy"
+}

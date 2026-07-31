@@ -27,6 +27,9 @@ dev = [
     "pytest>=9.0.1",
 ]
 
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
 [project.optional-dependencies]
 sample = [
     "rawpy",

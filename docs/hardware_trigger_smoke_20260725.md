@@ -1,5 +1,9 @@
 # EDSDK trigger capture hardware smoke test (2026-07-25)
 
+> Historical record only: this early smoke test used half-size RAW.
+> Half-resolution RAW is now prohibited by the Canon backend and must not be
+> used for any new capture or calibration.
+
 ## Environment
 
 - Branch: `feature/triggered-batch-capture`

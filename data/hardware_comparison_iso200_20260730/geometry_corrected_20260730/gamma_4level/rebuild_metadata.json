@@ -1,0 +1,37 @@
+{
+  "config": "data\\hardware_comparison_iso200_20260730\\config_gamma_4level.toml",
+  "camera_half_size": false,
+  "matrix": "data\\hardware_comparison_iso200_20260730\\gamma_4level\\color_mixing_matrices.npy",
+  "matrix_shape": [
+    4660,
+    6984,
+    4,
+    3
+  ],
+  "p2c_map": "data/graycode_recalibration_20260730/p2c_dense_active_1920x1080.npy",
+  "linearizer": "gamma",
+  "inverse_lut": null,
+  "active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "matrix_load_seconds": 0.011250399984419346,
+  "matrix_warp_seconds": 2.6281232992187142,
+  "targets": [
+    {
+      "name": "nature_1_sq.png",
+      "seconds": 0.19359839987009764
+    },
+    {
+      "name": "nature_2_sq.png",
+      "seconds": 0.2046786993741989
+    },
+    {
+      "name": "nature_3_sq.png",
+      "seconds": 0.20147449988871813
+    }
+  ],
+  "total_seconds": 3.2392167998477817
+}

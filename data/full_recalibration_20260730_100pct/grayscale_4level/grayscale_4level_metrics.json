@@ -1,0 +1,185 @@
+{
+  "camera": {
+    "iso": "200",
+    "av": "14",
+    "tv": "1/15",
+    "half_size": false,
+    "capture_shape": [
+      4660,
+      6984,
+      3
+    ]
+  },
+  "projector": {
+    "display_position": [
+      3440,
+      0
+    ],
+    "frame_size": [
+      1920,
+      1080
+    ],
+    "active_region": [
+      613,
+      201,
+      722,
+      722
+    ],
+    "levels": [
+      0,
+      85,
+      170,
+      255
+    ]
+  },
+  "clean_roi_camera": [
+    4520,
+    1600,
+    480,
+    400
+  ],
+  "capture_and_development_seconds": 17.244062299840152,
+  "strictly_increasing_clean_roi_mean": true,
+  "measurements": [
+    {
+      "index": 0,
+      "projector_code": 0,
+      "projector_fraction": 0.0,
+      "camera_clean_roi": {
+        "mean_rgb_linear": [
+          0.0008538358961232007,
+          0.0003305914578959346,
+          0.0007403070922009647
+        ],
+        "mean_linear": 0.0006415878306142986,
+        "max_rgb_linear": [
+          0.005813687574118376,
+          0.0031433585099875927,
+          0.00668345158919692
+        ],
+        "fraction_any_ge_0_98": 0.0,
+        "fraction_any_ge_0_95": 0.0
+      },
+      "warped_active": {
+        "mean_rgb_linear": [
+          0.0006954873097129166,
+          0.0002495081862434745,
+          0.0005720795597881079
+        ],
+        "mean_linear": 0.0005056915688328445,
+        "max_rgb_linear": [
+          0.006848678458482027,
+          0.002978370524942875,
+          0.007511112838983536
+        ],
+        "fraction_any_ge_0_98": 0.0,
+        "fraction_any_ge_0_95": 0.0
+      }
+    },
+    {
+      "index": 1,
+      "projector_code": 85,
+      "projector_fraction": 0.3333333333333333,
+      "camera_clean_roi": {
+        "mean_rgb_linear": [
+          0.06736245006322861,
+          0.04139129817485809,
+          0.07079919427633286
+        ],
+        "mean_linear": 0.059844259172677994,
+        "max_rgb_linear": [
+          0.10536354780197144,
+          0.06066987290978432,
+          0.10357823967933655
+        ],
+        "fraction_any_ge_0_98": 0.0,
+        "fraction_any_ge_0_95": 0.0
+      },
+      "warped_active": {
+        "mean_rgb_linear": [
+          0.05119524523615837,
+          0.029863284900784492,
+          0.04886111244559288
+        ],
+        "mean_linear": 0.04330654814839363,
+        "max_rgb_linear": [
+          0.10077820718288422,
+          0.06149481236934662,
+          0.10434118658304214
+        ],
+        "fraction_any_ge_0_98": 0.0,
+        "fraction_any_ge_0_95": 0.0
+      }
+    },
+    {
+      "index": 2,
+      "projector_code": 170,
+      "projector_fraction": 0.6666666666666666,
+      "camera_clean_roi": {
+        "mean_rgb_linear": [
+          0.3127916157245636,
+          0.18910051882266998,
+          0.3284864127635956
+        ],
+        "mean_linear": 0.27678972482681274,
+        "max_rgb_linear": [
+          0.4797284007072449,
+          0.26144808530807495,
+          0.47855344414711
+        ],
+        "fraction_any_ge_0_98": 0.0,
+        "fraction_any_ge_0_95": 0.0
+      },
+      "warped_active": {
+        "mean_rgb_linear": [
+          0.2372874915599823,
+          0.13764408230781555,
+          0.22698655724525452
+        ],
+        "mean_linear": 0.20063930749893188,
+        "max_rgb_linear": [
+          0.4747038781642914,
+          0.26818397641181946,
+          0.45901426672935486
+        ],
+        "fraction_any_ge_0_98": 0.0,
+        "fraction_any_ge_0_95": 0.0
+      }
+    },
+    {
+      "index": 3,
+      "projector_code": 255,
+      "projector_fraction": 1.0,
+      "camera_clean_roi": {
+        "mean_rgb_linear": [
+          0.901094913482666,
+          0.557356595993042,
+          0.9692410230636597
+        ],
+        "mean_linear": 0.8092221617698669,
+        "max_rgb_linear": [
+          1.0,
+          0.7947203516960144,
+          1.0
+        ],
+        "fraction_any_ge_0_98": 0.5544166666666667,
+        "fraction_any_ge_0_95": 0.7654322916666667
+      },
+      "warped_active": {
+        "mean_rgb_linear": [
+          0.6893665790557861,
+          0.4040237367153168,
+          0.6761634349822998
+        ],
+        "mean_linear": 0.5898513793945312,
+        "max_rgb_linear": [
+          1.0,
+          0.8831311464309692,
+          1.0
+        ],
+        "fraction_any_ge_0_98": 0.08264784647140522,
+        "fraction_any_ge_0_95": 0.12598698598077057
+      }
+    }
+  ]
+}

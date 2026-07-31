@@ -24,16 +24,19 @@ import torch
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+_GRAYCODE_SRC = _REPO_ROOT / "external" / "GrayCode" / "src"
+if str(_GRAYCODE_SRC) not in sys.path:
+    sys.path.insert(0, str(_GRAYCODE_SRC))
 
-from external.GrayCode.src.python.warp_image import (
+from graycode.warp_image import (
     PixelMapWarperTorch,
     AggregationMethod,
     InpaintMethod,
     SplatMethod,
 )
-from external.GrayCode.src.python.interpolate_c2p import load_c2p_numpy
-from external.GrayCode.src.python.interpolate_p2c import load_p2c_numpy_array
-from external.GrayCode.src.python.config import (
+from graycode.interpolate_c2p import load_c2p_numpy
+from graycode.interpolate_p2c import load_p2c_numpy_array
+from graycode.config import (
     reload_config as reload_graycode_config,
 )
 
@@ -349,7 +352,11 @@ def _warp_camera_array_to_projector(
             dst_size=(proj_width, proj_height),
             splat_method=SplatMethod.BILINEAR,
             crop_rect=crop_rect,
-            inpaint=InpaintMethod.NONE,
+            # GrayCode maps may use projector blocks larger than one pixel.
+            # Bilinear splatting alone then leaves a regular hole grid between
+            # block centers; convolution inpainting reconstructs those cells.
+            inpaint=InpaintMethod.CONV,
+            inpaint_iter=3,
             aggregation=AggregationMethod.MEAN,
         )
     else:
@@ -559,6 +566,7 @@ def capture_projection_patterns(
     """
     backend_name = cfg.camera.backend.strip().lower()
     captured_images: list[np.ndarray] = []
+    hdr_enabled = bool(getattr(cfg.camera, "hdr_enabled", False))
 
     def project(pattern: np.ndarray, wait_ms: int) -> None:
         bgr_pattern = cv2.cvtColor(pattern, cv2.COLOR_RGB2BGR)
@@ -574,48 +582,214 @@ def capture_projection_patterns(
                     raise CameraCaptureError(
                         "edsdk-python >= 0.2.0 is required for fast triggered capture."
                     )
-                print(
-                    f"Triggered capture: projecting and capturing "
-                    f"{len(patterns)} pattern(s) before RAW development "
-                    f"(first wait={cfg.camera.wait_key_ms}ms, "
-                    f"switch wait="
-                    f"{getattr(cfg.camera, 'trigger_wait_key_ms', cfg.camera.wait_key_ms)}ms)."
+                switch_wait_ms = int(
+                    getattr(
+                        cfg.camera,
+                        "trigger_wait_key_ms",
+                        cfg.camera.wait_key_ms,
+                    )
                 )
-                with triggered_batch(cfg.camera.tv) as batch:
-                    capture_started = time.perf_counter()
-                    switch_wait_ms = int(
-                        getattr(
-                            cfg.camera,
-                            "trigger_wait_key_ms",
-                            cfg.camera.wait_key_ms,
-                        )
-                    )
-                    for index, pattern in enumerate(patterns):
-                        project(
-                            pattern,
-                            cfg.camera.wait_key_ms if index == 0 else switch_wait_ms,
-                        )
-                        batch.trigger()
-                    capture_seconds = time.perf_counter() - capture_started
+
+                def capture_pass(
+                    indices: Sequence[int],
+                    tv_label: str,
+                    consume,
+                ) -> None:
+                    """Trigger one Tv pass, then develop and consume it in order."""
+                    if not indices:
+                        return
                     print(
-                        f"Triggered capture complete in {capture_seconds:.2f}s; "
-                        "starting deferred RAW development."
+                        f"Triggered capture: {len(indices)} pattern(s) at "
+                        f"Tv={tv_label} (first wait={cfg.camera.wait_key_ms}ms, "
+                        f"switch wait={switch_wait_ms}ms)."
                     )
-                    development_started = time.perf_counter()
-                    for frame in batch.iter_linear_rgb():
-                        captured_images.append(
-                            np.clip(
-                                np.asarray(frame, dtype=np.float32),
-                                0.0,
-                                1.0,
+                    with triggered_batch(tv_label) as batch:
+                        capture_started = time.perf_counter()
+                        for pass_index, pattern_index in enumerate(indices):
+                            project(
+                                patterns[pattern_index],
+                                (
+                                    cfg.camera.wait_key_ms
+                                    if pass_index == 0
+                                    else switch_wait_ms
+                                ),
                             )
+                            batch.trigger()
+                        capture_seconds = time.perf_counter() - capture_started
+                        print(
+                            f"Triggered pass complete in {capture_seconds:.2f}s; "
+                            "starting deferred RAW development."
                         )
-                    development_seconds = time.perf_counter() - development_started
+                        development_started = time.perf_counter()
+                        for pattern_index, frame in zip(
+                            indices,
+                            batch.iter_linear_rgb(),
+                            strict=True,
+                        ):
+                            consume(
+                                pattern_index,
+                                np.clip(
+                                    np.asarray(frame, dtype=np.float32),
+                                    0.0,
+                                    1.0,
+                                ),
+                            )
+                        development_seconds = (
+                            time.perf_counter() - development_started
+                        )
+                        print(
+                            f"Deferred RAW development complete in "
+                            f"{development_seconds:.2f}s."
+                        )
+
+                if hdr_enabled:
+                    from src.python import inverse_lut as hdr_utils
+
+                    ilut_cfg = cfg.inverse_lut
+                    low = float(ilut_cfg.trust_low) / 255.0
+                    high = float(ilut_cfg.trust_high) / 255.0
+                    max_stops = int(ilut_cfg.hdr_max_stops)
+                    base_tv = str(cfg.camera.tv)
+                    base_seconds = hdr_utils.tv_to_seconds(base_tv)
+                    supported_tv = hdr_utils._query_supported_shutter_speeds(
+                        camera
+                    )
+                    refresh_hz = float(cfg.projector.refresh_rate)
+                    roi = (
+                        int(ilut_cfg.roi_x),
+                        int(ilut_cfg.roi_y),
+                        int(ilut_cfg.roi_width),
+                        int(ilut_cfg.roi_height),
+                    )
+
+                    def gate_crop(frame: np.ndarray) -> np.ndarray:
+                        x, y, width, height = roi
+                        frame_height, frame_width = frame.shape[:2]
+                        x0 = max(0, min(x, frame_width))
+                        y0 = max(0, min(y, frame_height))
+                        x1 = max(x0, min(x + width, frame_width))
+                        y1 = max(y0, min(y + height, frame_height))
+                        crop = frame[y0:y1, x0:x1, :3]
+                        return crop if crop.size else frame[..., :3]
+
+                    frames: list[Optional[np.ndarray]] = [None] * len(patterns)
+
+                    def keep_base(index: int, frame: np.ndarray) -> None:
+                        frames[index] = frame
+
+                    all_indices = list(range(len(patterns)))
+                    capture_pass(all_indices, base_tv, keep_base)
+                    base_frames = [
+                        cast(np.ndarray, frame) for frame in frames
+                    ]
+                    short_pending = [
+                        index
+                        for index, frame in enumerate(base_frames)
+                        if np.any(gate_crop(frame) >= high)
+                    ]
+                    long_pending = [
+                        index
+                        for index, frame in enumerate(base_frames)
+                        if np.any(gate_crop(frame) <= low)
+                    ]
+
+                    # Reuse the base-frame arrays as the merged HDR output.
+                    # Saturated base samples stay NaN until a shorter exposure
+                    # recovers them. Longer trustworthy exposures overwrite the
+                    # base to improve shadow SNR.
+                    for frame in base_frames:
+                        frame[frame >= high] = np.nan
+
+                    used_tvs = {base_tv}
+                    for stop in range(1, max_stops + 1):
+                        if not long_pending:
+                            break
+                        tv_label = hdr_utils.scale_shutter_tv(
+                            base_tv,
+                            2.0**stop,
+                            supported=supported_tv,
+                            refresh_hz=refresh_hz,
+                        )
+                        if tv_label in used_tvs:
+                            continue
+                        used_tvs.add(tv_label)
+                        ratio = hdr_utils.tv_to_seconds(tv_label) / base_seconds
+                        next_pending: list[int] = []
+
+                        def merge_long(index: int, frame: np.ndarray) -> None:
+                            if np.any(gate_crop(frame) <= low):
+                                next_pending.append(index)
+                            trustworthy = frame < high
+                            frame /= np.float32(ratio)
+                            np.copyto(
+                                base_frames[index],
+                                frame,
+                                where=trustworthy,
+                            )
+
+                        capture_pass(long_pending, tv_label, merge_long)
+                        long_pending = next_pending
+
+                    short_used_tvs = {base_tv}
+                    for stop in range(1, max_stops + 1):
+                        if not short_pending:
+                            break
+                        tv_label = hdr_utils.scale_shutter_tv(
+                            base_tv,
+                            0.5**stop,
+                            supported=supported_tv,
+                            refresh_hz=refresh_hz,
+                        )
+                        if tv_label in short_used_tvs:
+                            continue
+                        short_used_tvs.add(tv_label)
+                        ratio = hdr_utils.tv_to_seconds(tv_label) / base_seconds
+                        next_pending = []
+
+                        def merge_short(index: int, frame: np.ndarray) -> None:
+                            if np.any(gate_crop(frame) >= high):
+                                next_pending.append(index)
+                            trustworthy = frame < high
+                            missing = np.isnan(base_frames[index])
+                            frame /= np.float32(ratio)
+                            np.copyto(
+                                base_frames[index],
+                                frame,
+                                where=trustworthy & missing,
+                            )
+
+                        capture_pass(short_pending, tv_label, merge_short)
+                        short_pending = next_pending
+
+                    for frame in base_frames:
+                        np.nan_to_num(frame, copy=False, nan=1.0)
+                    captured_images.extend(base_frames)
                     print(
-                        f"Deferred RAW development complete in "
-                        f"{development_seconds:.2f}s."
+                        f"HDR merge complete: {len(captured_images)} pattern(s), "
+                        f"base Tv={base_tv}, max_stops={max_stops}, "
+                        f"gate_roi={roi}."
+                    )
+                else:
+                    print(
+                        f"Triggered capture: projecting and capturing "
+                        f"{len(patterns)} pattern(s) before RAW development."
+                    )
+
+                    def append_frame(_index: int, frame: np.ndarray) -> None:
+                        captured_images.append(frame)
+
+                    capture_pass(
+                        list(range(len(patterns))),
+                        str(cfg.camera.tv),
+                        append_frame,
                     )
         else:
+            if hdr_enabled:
+                print(
+                    f"HDR projection capture is only available for canon_edsdk; "
+                    f"falling back to single exposure for {backend_name!r}.",
+                    file=sys.stderr,
+                )
             for pattern in patterns:
                 project(pattern, cfg.camera.wait_key_ms)
                 captured_image = capture_image()

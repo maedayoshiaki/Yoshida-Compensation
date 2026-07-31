@@ -100,10 +100,14 @@ class CameraConfig:
         trigger_wait_key_ms: Short display-event wait after the first frame
             in a Canon triggered batch. The synchronous EDSDK trigger supplies
             the remaining projector-settle time while transferring RAW data.
-        half_size: Develop the Canon RAW at half resolution (~1/4 the memory).
-            Essential on low-RAM machines; the ROI-mean measurement is
-            unaffected, but ROI coordinates must then be in half-res pixels.
-            Only affects ``canon_edsdk`` ``capture_linear_rgb``.
+        hdr_enabled: Whether projection-pattern batches use exposure-bracket
+            HDR around ``tv``. GrayCode capture has its own path and is not
+            affected by this switch.
+        edsdk_dll_dir: Directory containing Canon ``EDSDK.dll`` and
+            ``EdsImage.dll``. It is exported as ``EDSDK_PYTHON_DLL_DIR``
+            before importing edsdk-python.
+        half_size: Compatibility field. Half-resolution RAW development is
+            prohibited by the Canon backend and this must remain ``False``.
             Canon RAW を半解像度で現像（メモリ約1/4）。低RAM機で必須。ROI平均の
             計測は不変だが、ROI座標は半解像度ピクセルで指定する必要がある。
             ``canon_edsdk`` の ``capture_linear_rgb`` のみに影響。
@@ -118,7 +122,9 @@ class CameraConfig:
     image_quality: str = "LR"
     device_index: int = 0
     wait_key_ms: int = 200
-    trigger_wait_key_ms: int = 200
+    trigger_wait_key_ms: int = 300
+    hdr_enabled: bool = False
+    edsdk_dll_dir: str = ""
     half_size: bool = False
 
 

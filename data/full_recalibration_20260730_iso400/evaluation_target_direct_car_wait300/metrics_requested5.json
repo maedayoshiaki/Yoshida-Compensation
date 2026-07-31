@@ -1,0 +1,125 @@
+{
+  "setup_date": "2026-07-30",
+  "camera": {
+    "iso": "400",
+    "av": "14",
+    "tv": "1/15",
+    "image_quality": "LR",
+    "initial_wait_ms": 300,
+    "trigger_switch_wait_ms": 300,
+    "half_size": false
+  },
+  "p2c_map": "data/graycode_recalibration_20260730/p2c_dense_active_1920x1080.npy",
+  "target_dir": "data\\comp_test_targets_car_direct",
+  "requested_conditions": [
+    "no_comp",
+    "comp_no_gamma",
+    "comp_gamma",
+    "comp_inverse_lut",
+    "comp_inverse_lut_gray"
+  ],
+  "color_levels_per_channel": 4,
+  "calibration_patterns_per_compensation_matrix": 64,
+  "capture_and_development_seconds": 46.19002650026232,
+  "warp_seconds": [
+    0.13551359996199608,
+    0.13797349948436022,
+    0.13811179995536804,
+    0.14772719983011484,
+    0.14017900079488754,
+    0.14687510021030903,
+    0.14459879975765944,
+    0.14453190006315708,
+    0.1419895002618432,
+    0.134107599966228
+  ],
+  "images": [
+    {
+      "name": "car-new_sq",
+      "conditions": {
+        "no_comp": {
+          "psnr_db": 20.98826743993403,
+          "ssim": 0.792351245880127,
+          "delta_e76": 19.107322692871094
+        },
+        "comp_no_gamma": {
+          "psnr_db": 15.8156148577332,
+          "ssim": 0.6625435948371887,
+          "delta_e76": 21.668725967407227
+        },
+        "comp_gamma": {
+          "psnr_db": 12.483861115572282,
+          "ssim": 0.6008211374282837,
+          "delta_e76": 32.929283142089844
+        },
+        "comp_inverse_lut": {
+          "psnr_db": 13.024890407737287,
+          "ssim": 0.5531936287879944,
+          "delta_e76": 28.410171508789062
+        },
+        "comp_inverse_lut_gray": {
+          "psnr_db": 11.89512114923719,
+          "ssim": 0.5262303948402405,
+          "delta_e76": 33.108089447021484
+        }
+      }
+    },
+    {
+      "name": "car_sq",
+      "conditions": {
+        "no_comp": {
+          "psnr_db": 18.639918215542714,
+          "ssim": 0.8007092475891113,
+          "delta_e76": 28.454832077026367
+        },
+        "comp_no_gamma": {
+          "psnr_db": 16.41574703377257,
+          "ssim": 0.7485978603363037,
+          "delta_e76": 19.64997673034668
+        },
+        "comp_gamma": {
+          "psnr_db": 13.091187580666013,
+          "ssim": 0.6922316551208496,
+          "delta_e76": 25.727176666259766
+        },
+        "comp_inverse_lut": {
+          "psnr_db": 14.774223578792093,
+          "ssim": 0.6704983711242676,
+          "delta_e76": 21.07335090637207
+        },
+        "comp_inverse_lut_gray": {
+          "psnr_db": 13.995225489862653,
+          "ssim": 0.6495107412338257,
+          "delta_e76": 22.83539581298828
+        }
+      }
+    }
+  ],
+  "average": {
+    "no_comp": {
+      "psnr_db": 19.81409282773837,
+      "ssim": 0.7965302467346191,
+      "delta_e76": 23.78107738494873
+    },
+    "comp_no_gamma": {
+      "psnr_db": 16.115680945752885,
+      "ssim": 0.7055707275867462,
+      "delta_e76": 20.659351348876953
+    },
+    "comp_gamma": {
+      "psnr_db": 12.787524348119147,
+      "ssim": 0.6465263962745667,
+      "delta_e76": 29.328229904174805
+    },
+    "comp_inverse_lut": {
+      "psnr_db": 13.899556993264689,
+      "ssim": 0.611845999956131,
+      "delta_e76": 24.741761207580566
+    },
+    "comp_inverse_lut_gray": {
+      "psnr_db": 12.945173319549921,
+      "ssim": 0.5878705680370331,
+      "delta_e76": 27.971742630004883
+    }
+  }
+}

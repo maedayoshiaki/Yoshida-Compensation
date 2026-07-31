@@ -1,0 +1,54 @@
+{
+  "sequence": "red/cyan alternating with changing digits",
+  "initial_wait_ms": 300,
+  "switch_wait_ms": [
+    1,
+    300
+  ],
+  "timing_seconds": {
+    "1": 17.964419100433588,
+    "300": 19.42414730042219
+  },
+  "frames": [
+    {
+      "index": 0,
+      "color": "red",
+      "rmse_1ms_vs_300ms": 0.00794010992238406
+    },
+    {
+      "index": 1,
+      "color": "cyan",
+      "rmse_1ms_vs_300ms": 0.016430211565501587,
+      "previous_frame_mix_alpha": 0.03702674528284947,
+      "rmse_1ms_vs_previous_300ms": 0.2629896090337426
+    },
+    {
+      "index": 2,
+      "color": "red",
+      "rmse_1ms_vs_300ms": 0.010605857319898899,
+      "previous_frame_mix_alpha": -0.012015596168206466,
+      "rmse_1ms_vs_previous_300ms": 0.27785927455866216
+    },
+    {
+      "index": 3,
+      "color": "cyan",
+      "rmse_1ms_vs_300ms": 0.01555488272936791,
+      "previous_frame_mix_alpha": 0.03312418817926323,
+      "rmse_1ms_vs_previous_300ms": 0.2658664465645964
+    },
+    {
+      "index": 4,
+      "color": "red",
+      "rmse_1ms_vs_300ms": 0.012283655521215527,
+      "previous_frame_mix_alpha": -0.009644189213267103,
+      "rmse_1ms_vs_previous_300ms": 0.2753862338753547
+    },
+    {
+      "index": 5,
+      "color": "cyan",
+      "rmse_1ms_vs_300ms": 0.015917334259594858,
+      "previous_frame_mix_alpha": 0.031751765117711536,
+      "rmse_1ms_vs_previous_300ms": 0.26386742342433867
+    }
+  ]
+}

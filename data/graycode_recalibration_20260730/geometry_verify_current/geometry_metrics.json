@@ -1,0 +1,44 @@
+{
+  "camera": {
+    "iso": "200",
+    "av": "14",
+    "tv": "1/15",
+    "half_size": false,
+    "capture_shape": [
+      4660,
+      6984,
+      3
+    ]
+  },
+  "active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "capture_and_development_seconds": 5.380991599522531,
+  "warps": {
+    "p2c": {
+      "map": "data\\graycode_recalibration_20260730\\p2c_dense_active_1920x1080.npy",
+      "warp_seconds": 0.5056023998185992,
+      "phase_shift_xy_px": [
+        -0.24586109105848664,
+        0.09404108912303855
+      ],
+      "phase_response": 0.4727949485596683,
+      "inner_grayscale_correlation": 0.9537375322350314,
+      "inner_grayscale_rmse": 0.23862029612064362
+    },
+    "c2p": {
+      "map": "data\\graycode_recalibration_20260730\\c2p_sparse_full_camera.npy",
+      "warp_seconds": 26.80563409999013,
+      "phase_shift_xy_px": [
+        37.50046077957569,
+        1.0878239565910235
+      ],
+      "phase_response": -0.032808437667511126,
+      "inner_grayscale_correlation": 0.27898871963625943,
+      "inner_grayscale_rmse": 0.5693215131759644
+    }
+  }
+}

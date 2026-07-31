@@ -4,8 +4,10 @@ import types
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from src.python.camera import canon_edsdk
+from src.python.camera.base import CameraCaptureError
 from src.python.camera.canon_edsdk import CanonEdsdkCamera, _raw_to_linear_rgb
 from src.python.config import CameraConfig
 
@@ -46,6 +48,14 @@ def test_raw_to_linear_rgb_reads_bytes_via_bytesio(monkeypatch) -> None:
     assert seen["postprocess_kwargs"]["output_color"] == "sRGB"
     assert image.dtype == np.float32
     assert np.allclose(image, 32768 / 65535.0)
+
+
+def test_half_resolution_raw_is_rejected() -> None:
+    with pytest.raises(CameraCaptureError, match="Half-resolution RAW"):
+        CanonEdsdkCamera(CameraConfig(half_size=True))
+
+    with pytest.raises(CameraCaptureError, match="Half-resolution RAW"):
+        _raw_to_linear_rgb(b"raw-payload", half_size=True)
 
 
 def test_capture_linear_rgb_converts_jpeg_output_to_linear(monkeypatch) -> None:

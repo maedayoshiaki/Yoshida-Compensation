@@ -11,6 +11,7 @@ Canon カメラから RAW を取得し、測光パイプライン向けのリニ
 from __future__ import annotations
 
 import io
+import os
 import tempfile
 from pathlib import Path
 from typing import Iterator
@@ -99,6 +100,12 @@ def _raw_to_linear_rgb(raw_bytes: bytes, half_size: bool = False) -> np.ndarray:
             conversion fails.
             必要な依存関係が不足している場合、または RAW 変換に失敗した場合。
     """
+    if half_size:
+        raise CameraCaptureError(
+            "Half-resolution RAW development is disabled. "
+            "Use full-resolution RAW (camera.half_size=false)."
+        )
+
     try:
         import rawpy
     except ImportError as exc:
@@ -300,15 +307,25 @@ class CanonEdsdkCamera(CameraBackend):
 
     def __init__(self, config) -> None:
         super().__init__(config)
+        if bool(getattr(config, "half_size", False)):
+            raise CameraCaptureError(
+                "Half-resolution RAW is prohibited; set camera.half_size=false."
+            )
         # Persistent CameraController while used as a context manager.
         # context manager として使う間だけ保持する永続 CameraController。
         self._controller = None
+
+    def _prepare_edsdk_import(self) -> None:
+        dll_dir = str(getattr(self.config, "edsdk_dll_dir", "")).strip()
+        if dll_dir:
+            os.environ.setdefault("EDSDK_PYTHON_DLL_DIR", dll_dir)
 
     def __enter__(self) -> "CanonEdsdkCamera":
         """Open one EDSDK session and apply capture properties once.
 
         1 つの EDSDK セッションを開き、撮影プロパティを 1 回だけ適用する。
         """
+        self._prepare_edsdk_import()
         try:
             from edsdk.camera_controller import CameraController
         except ImportError as exc:
@@ -379,6 +396,7 @@ class CanonEdsdkCamera(CameraBackend):
         if self._controller is not None:
             return self._capture_via(self._controller, tv)
 
+        self._prepare_edsdk_import()
         try:
             from edsdk.camera_controller import CameraController
         except ImportError as exc:
@@ -434,6 +452,7 @@ class CanonEdsdkCamera(CameraBackend):
         if self._controller is not None:
             return self._accepted_shutter_speeds(self._controller)
 
+        self._prepare_edsdk_import()
         try:
             from edsdk.camera_controller import CameraController
         except ImportError as exc:

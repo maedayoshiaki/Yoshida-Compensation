@@ -1143,6 +1143,7 @@ def run_calibration_capture(
                 for sample in unique
                 if needs_short(sample, base_frames[_sample_key(sample)])
             ]
+            used_short_tvs = {base_tv}
             for stop in range(1, int(ilut_cfg.hdr_max_stops) + 1):
                 if not pending:
                     break
@@ -1153,6 +1154,9 @@ def run_calibration_capture(
                     supported=supported_tv,
                     refresh_hz=refresh_hz,
                 )
+                if tv_label in used_short_tvs:
+                    continue
+                used_short_tvs.add(tv_label)
                 ratio = tv_to_seconds(tv_label) / base_seconds
                 frames = capture_pass(pending, tv_label, ratio)
                 for sample in pending:
@@ -1170,6 +1174,7 @@ def run_calibration_capture(
                 for sample in unique
                 if needs_long(sample, base_frames[_sample_key(sample)])
             ]
+            used_long_tvs = {base_tv}
             for stop in range(1, int(ilut_cfg.hdr_max_stops) + 1):
                 if not pending:
                     break
@@ -1180,6 +1185,9 @@ def run_calibration_capture(
                     supported=supported_tv,
                     refresh_hz=refresh_hz,
                 )
+                if tv_label in used_long_tvs:
+                    continue
+                used_long_tvs.add(tv_label)
                 ratio = tv_to_seconds(tv_label) / base_seconds
                 frames = capture_pass(pending, tv_label, ratio)
                 for sample in pending:

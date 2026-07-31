@@ -1,0 +1,22 @@
+{
+  "map": "data/hardware_recalibration_20260729/maps/p2c_homography_1920x1080.npy",
+  "warp_seconds": 0.4930750001221895,
+  "active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "grayscale_correlation": 0.7410681724332647,
+  "raw_grayscale_rmse": 0.4945547580718994,
+  "capture_shape": [
+    4660,
+    6984,
+    3
+  ],
+  "warped_shape": [
+    1080,
+    1920,
+    3
+  ]
+}

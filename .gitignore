@@ -224,3 +224,9 @@ data/**/*.tiff
 *.npz
 *.CR2
 *.CR3
+
+# superpowers brainstorm companion
+.superpowers/
+
+# regenerated from scratch by sample.py on every run
+data/sample_warp_debug_DEBUG_ONLY/

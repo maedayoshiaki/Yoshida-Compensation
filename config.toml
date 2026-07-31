@@ -4,7 +4,7 @@
 gamma = 2.2
 width = 1920
 height = 1080
-pos_x = 3440            # 実写確認済み Win32 \\.\DISPLAY4（1920x1080/150%）
+pos_x = 3440            # Win32 \\.\DISPLAY4（物理・論理とも1920x1080、100%）
 pos_y = 0               # プロジェクタウィンドウの Y 位置
 refresh_rate = 60.0     # リフレッシュレート(Hz)。露光をこの周期の整数倍へスナップ(フリッカー防止)。0で無効
 
@@ -15,30 +15,32 @@ active_height = 722
 
 [camera]
 backend = "canon_edsdk" # "canon_edsdk" | "opencv"
-av = "13"               # 実機検証済み。白投影でもROI内に飽和なし
+av = "14"               # ISOだけを一段上げ、Avは維持
 tv = "1/15"             # 60Hzの4周期を積分するフリッカーフリー露光
-iso = "100"
+iso = "400"             # ISO200から一段（1 stop）上げた現行設定
 image_quality = "LR"
 device_index = 0        # OpenCV backend 使用時のカメラインデックス
 wait_key_ms = 300       # バッチ初回、および非トリガ撮影の表示待機 (ms)
-trigger_wait_key_ms = 1 # Canonトリガバッチ内の2枚目以降。実機で1msまで順序・色を確認済み
-half_size = false       # trueでRAWを半解像度現像(メモリ約1/4)。ROIは撮影解像度pxで指定すること
+trigger_wait_key_ms = 300 # Canonトリガバッチ内の2枚目以降。表示更新完了を安全側で保証
+hdr_enabled = true # GrayCode以外の投影パターン撮影を露光ブラケットHDR化
+edsdk_dll_dir = "C:/py_scripts/edsdk-python/dependencies/EDSDK_64/Dll"
+half_size = false       # 必ずfalse。半解像度RAWはバックエンドでも拒否する
 
 [paths]
-c2p_map = "result_c2p_compensated_delaunay.npy"            # C2P correspondence map (.npy)
-p2c_map = "result_p2c_compensated_delaunay.npy"            # P2C correspondence map (.npy)
+c2p_map = ""                                                # 現セットアップはP2Cを使用
+p2c_map = "data/graycode_recalibration_20260730/p2c_dense_active_1920x1080.npy"
 warp_method = "p2c"     # "c2p" | "p2c"
 target_image_space = "projector"  # "camera" | "projector"
 rpcc_matrix = ""        # RPCC matrix (.npy)
 target_image_dir = "data/comp_test_targets_square"
-linear_pattern_dir = "data/linear_proj_patterns"
-inv_gamma_pattern_dir = "data/inv_gamma_proj_patterns"
-captured_image_dir = "data/captured_images"
-compensation_image_dir = "data/compensation_images"
-inv_gamma_comp_dir = "data/inv_gamma_comp_images"
+linear_pattern_dir = "data/full_recalibration_20260730_iso400/calibration/linear_patterns"
+inv_gamma_pattern_dir = "data/full_recalibration_20260730_iso400/calibration/projected_patterns"
+captured_image_dir = "data/full_recalibration_20260730_iso400/calibration/captures"
+compensation_image_dir = "data/full_recalibration_20260730_iso400/calibration/compensation_linear"
+inv_gamma_comp_dir = "data/full_recalibration_20260730_iso400/calibration/compensation_projector"
 
 [compensation]
-num_divisions = 3               # パターン生成の分割数
+num_divisions = 4               # RGB各4段階、合計64色で実機校正済み
 safety_margin = 0.5             # バッチサイズ推定時の安全マージン
 min_batch_size = 256            # 最小バッチサイズ
 use_gpu = true                 # 色混合行列計算で GPU を使用するか
@@ -47,12 +49,12 @@ use_gpu = true                 # 色混合行列計算で GPU を使用するか
 num_levels = 17                 # 各ランプ（グレー / 単独チャンネル）の階調数
 source = "channel_ramp"         # "channel_ramp" | "gray"（一方のみ使用・混在不可）
 lut_resolution = 256            # 密な [0,1] 逆LUT のエントリ数
-roi_x = 2778                    # 実機の投影面内側 ROI 左端 x（フル解像度）
-roi_y = 826                     # 実機の投影面内側 ROI 上端 y（フル解像度）
-roi_width = 1837                # 実機の投影面内側 ROI 幅
-roi_height = 2324               # 実機の投影面内側 ROI 高さ
+roi_x = 4520                    # 右側の均一な白色面（フル解像度）
+roi_y = 1600
+roi_width = 480
+roi_height = 400
 trust_low = 10                  # 信頼下限（8bit画素値, ≤は非信頼/黒潰れ）
 trust_high = 245                # 信頼上限（8bit画素値, ≥は非信頼/サチュ）
 hdr_enabled = true              # 簡易HDRブラケット撮影
 hdr_max_stops = 3               # 各方向の最大露光段数
-inverse_lut_path = "data/inverse_lut.npz"
+inverse_lut_path = "data/full_recalibration_20260730_iso400/inverse_lut/inverse_lut.npz"

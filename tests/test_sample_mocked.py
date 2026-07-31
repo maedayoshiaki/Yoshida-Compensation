@@ -261,6 +261,99 @@ def test_capture_projection_patterns_defers_canon_development(monkeypatch) -> No
     assert waits == [300, 1, 1]
 
 
+def test_capture_projection_patterns_merges_triggered_hdr_passes(
+    monkeypatch,
+) -> None:
+    from src.python import inverse_lut
+
+    patterns = [
+        np.zeros((2, 2, 3), dtype=np.uint8),
+        np.ones((2, 2, 3), dtype=np.uint8),
+    ]
+    passes: list[str] = []
+
+    class FakeBatch:
+        def __init__(self, tv: str):
+            self.tv = tv
+            self.trigger_count = 0
+
+        def __enter__(self):
+            passes.append(self.tv)
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def trigger(self):
+            self.trigger_count += 1
+
+        def iter_linear_rgb(self):
+            if self.tv == "1/15":
+                values = (1.0, 0.01)
+            elif self.tv == "1/8":
+                values = (0.08,)
+            elif self.tv == "1/30":
+                values = (0.4,)
+            else:
+                raise AssertionError(self.tv)
+            assert self.trigger_count == len(values)
+            for value in values:
+                yield np.full((2, 2, 3), value, dtype=np.float32)
+
+    class FakeCamera:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return None
+
+        def triggered_batch(self, tv):
+            return FakeBatch(tv)
+
+        def supported_shutter_speeds(self):
+            return ["1/30", "1/15", "1/8"]
+
+    cfg = types.SimpleNamespace(
+        camera=types.SimpleNamespace(
+            backend="canon_edsdk",
+            tv="1/15",
+            wait_key_ms=300,
+            trigger_wait_key_ms=300,
+            hdr_enabled=True,
+        ),
+        projector=types.SimpleNamespace(refresh_rate=60.0),
+        inverse_lut=types.SimpleNamespace(
+            trust_low=10,
+            trust_high=245,
+            hdr_max_stops=3,
+            roi_x=0,
+            roi_y=0,
+            roi_width=2,
+            roi_height=2,
+        ),
+    )
+    monkeypatch.setattr(sample, "create_camera_backend", lambda _cfg: FakeCamera())
+    monkeypatch.setattr(sample.cv2, "imshow", lambda *args, **kwargs: None)
+    monkeypatch.setattr(sample.cv2, "waitKey", lambda _wait: 0)
+    monkeypatch.setattr(
+        inverse_lut,
+        "scale_shutter_tv",
+        lambda _base, scale, **_kwargs: "1/30" if scale < 1.0 else "1/8",
+    )
+
+    captured = sample.capture_projection_patterns(
+        patterns,
+        cfg=cfg,
+        window_name="test",
+    )
+
+    assert passes == ["1/15", "1/8", "1/30"]
+    assert captured is not None
+    assert len(captured) == 2
+    assert np.allclose(captured[0], 0.8)
+    assert np.allclose(captured[1], 0.08 / (0.125 / (1 / 15)))
+
+
 def test_sample_uses_camera_space_compensation_for_c2p(
     tmp_path,
     monkeypatch,
@@ -955,11 +1048,13 @@ def test_warp_camera_array_to_projector_uses_actual_output_shape_for_c2p(
             src_tensor,
             dst_size,
             splat_method,
-            crop_rect,
-            inpaint,
-            aggregation,
-        ):
-            return sample.torch.zeros((src_tensor.shape[0], 2, 3), dtype=src_tensor.dtype)
+                crop_rect,
+                inpaint,
+                inpaint_iter,
+                aggregation,
+            ):
+                assert inpaint_iter == 3
+                return sample.torch.zeros((src_tensor.shape[0], 2, 3), dtype=src_tensor.dtype)
 
     monkeypatch.setattr(sample, "_create_warper", lambda *args, **kwargs: FakeWarper())
 

@@ -1,0 +1,47 @@
+{
+  "config": "config.full_recalibration_20260730_100pct.toml",
+  "camera_half_size": false,
+  "matrix": "data\\full_recalibration_20260730_100pct\\calibration\\color_mixing_matrices.npy",
+  "matrix_shape": [
+    4660,
+    6984,
+    4,
+    3
+  ],
+  "p2c_map": "data/graycode_recalibration_20260730/p2c_dense_active_1920x1080.npy",
+  "linearizer": "gamma",
+  "inverse_lut": null,
+  "target_decode": "gamma",
+  "target_gamma": 2.2,
+  "active_region": [
+    613,
+    201,
+    722,
+    722
+  ],
+  "matrix_load_seconds": 0.0011574998497962952,
+  "matrix_warp_seconds": 0.4230532003566623,
+  "targets": [
+    {
+      "name": "car-new_sq.png",
+      "seconds": 0.18429959937930107
+    },
+    {
+      "name": "car_sq.png",
+      "seconds": 0.18387729953974485
+    },
+    {
+      "name": "nature_1_sq.png",
+      "seconds": 0.18355200067162514
+    },
+    {
+      "name": "nature_2_sq.png",
+      "seconds": 0.1868129000067711
+    },
+    {
+      "name": "nature_3_sq.png",
+      "seconds": 0.17588420026004314
+    }
+  ],
+  "total_seconds": 1.3387378994375467
+}

@@ -21,7 +21,7 @@ from examples.python.sample import (
     resolve_warp_settings,
     warp_image,
 )
-from external.GrayCode.src.python.config import (
+from graycode.config import (
     reload_config as reload_graycode_config,
 )
 from src.python.config import get_config, reload_config, split_cli_config_path
