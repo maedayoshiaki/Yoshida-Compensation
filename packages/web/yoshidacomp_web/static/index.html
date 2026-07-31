@@ -1,5 +1,90 @@
 <!doctype html>
-<meta charset="utf-8">
-<title>色変換行列ビューア</title>
-<h1>色変換行列ビューア</h1>
-<p>準備中</p>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>色変換行列ビューア</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="toolbar">
+    <div class="brand">色変換行列ビューア</div>
+    <input id="path-input" class="mono path" type="text" spellcheck="false"
+           value="data/linear_pipeline_1080/matrices_linear_gamma.npy"
+           placeholder="行列 .npy のパス (H, W, 4, 3)" />
+    <button id="btn-load" class="primary">読み込み</button>
+    <div class="spacer"></div>
+    <div id="meta-info" class="muted mono">行列未読み込み</div>
+  </header>
+
+  <div id="space-note" class="note" hidden></div>
+
+  <main>
+    <section class="tilepane">
+      <div id="tile-grid" class="tile-grid"></div>
+      <div class="hint mono">
+        ドラッグ=パン ・ ホイール=ズーム ・ クリック=読み取り固定/解除 ・ 12枚は連動
+      </div>
+    </section>
+
+    <aside class="sidebar">
+      <div class="group">
+        <label class="lbl">露出 <span id="ev-val" class="mono">0.0</span> EV</label>
+        <input id="ev-slider" type="range" min="-6" max="6" step="0.1" value="0" />
+      </div>
+      <div class="group">
+        <label class="lbl">γ <span id="gamma-val" class="mono">1.00</span></label>
+        <input id="gamma-slider" type="range" min="0.2" max="3" step="0.05" value="1" />
+      </div>
+      <div class="group">
+        <label class="lbl">カラーマップ</label>
+        <select id="cmap-select">
+          <option value="0">発散（青−白−赤）</option>
+          <option value="1">グレースケール</option>
+        </select>
+      </div>
+      <div class="group inline">
+        <label><input id="dither-check" type="checkbox" checked /> ディザ</label>
+        <button id="btn-reset-view">表示リセット</button>
+      </div>
+
+      <hr />
+
+      <div class="group">
+        <label class="lbl">サーバ側パラメータ <span class="muted">（変更で再取得）</span></label>
+        <div id="server-params"></div>
+      </div>
+
+      <hr />
+
+      <div class="group readouts mono">
+        <div>表示レンジ <span id="range-info" class="val">—</span></div>
+        <div>転送 <span id="perf-fetch" class="val">—</span></div>
+        <div>GPU転送 <span id="perf-upload" class="val">—</span></div>
+        <div>JSヒープ <span id="perf-heap" class="val">—</span></div>
+      </div>
+
+      <div class="group legend">
+        <span class="legend-swatch nan"></span>
+        <span class="muted">マスク色 = NaN（有効投影領域の外）</span>
+      </div>
+      <div class="group legend">
+        <span class="legend-swatch grad"></span>
+        <span class="muted">負 ← 0 → 正</span>
+      </div>
+    </aside>
+  </main>
+
+  <section class="readout">
+    <div class="readout-head mono">
+      ホバー読み取り <span id="probe-pos" class="val">—</span>
+      <span id="probe-pin" class="muted"></span>
+    </div>
+    <div id="probe-grid" class="probe-grid mono"></div>
+  </section>
+
+  <footer id="status" class="mono">起動中…</footer>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
