@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-from pathlib import Path
+from yoshidacomp.geometry.graycode_path import ensure_on_syspath
 
-_GRAYCODE_SRC = Path(__file__).resolve().parents[1] / "external" / "GrayCode" / "src"
-if str(_GRAYCODE_SRC) not in sys.path:
-    sys.path.insert(0, str(_GRAYCODE_SRC))
+ensure_on_syspath()

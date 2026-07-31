@@ -18,9 +18,14 @@ import numpy as np
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
-_GRAYCODE_SRC = _REPO_ROOT / "external" / "GrayCode" / "src"
-if str(_GRAYCODE_SRC) not in sys.path:
-    sys.path.insert(0, str(_GRAYCODE_SRC))
+
+from yoshidacomp.geometry.graycode_path import ensure_on_syspath
+
+# warp_color_mixing_matrices_to_projector() imports graycode lazily, so the
+# submodule still has to be on sys.path before that call happens.
+# warp_color_mixing_matrices_to_projector() は graycode を遅延importするため、
+# 呼び出し前に submodule を sys.path に載せておく必要がある。
+ensure_on_syspath()
 
 from yoshidacomp.compensation import inverse_lut
 from yoshidacomp.compensation.pipeline import (
