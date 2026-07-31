@@ -14,6 +14,9 @@ dependencies = [
     # yoshidacomp_web/matrix.py imports numpy directly; it has resolved so far
     # only because yoshidacomp pulls numpy into the same venv.
     "numpy>=2.3.4",
+    # yoshidacomp_web/models.py imports pydantic directly, for the same reason:
+    # it resolved only because fastapi happens to depend on it.
+    "pydantic>=2",
 ]
 
 [tool.setuptools.packages.find]
