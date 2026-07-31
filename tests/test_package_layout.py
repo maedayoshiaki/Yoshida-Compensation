@@ -29,16 +29,64 @@ def test_config_lives_in_core() -> None:
 
 
 def test_config_still_reads_the_repository_config_toml() -> None:
-    """_PROJECT_ROOT の階層修正が正しいことの確認。
+    """_PROJECT_ROOT がリポジトリルートを指すことの確認。
 
     誤ると config.toml を見つけられず全既定値へ静かにフォールバックする。
-    """
-    from yoshidacomp.config import reload_config
 
-    cfg = reload_config()
-    assert cfg.projector.active_width == 722
-    assert cfg.projector.active_height == 722
-    assert cfg.compensation.num_divisions == 4
+    This guards the *path resolution*, not the tuning. ``config.toml`` is a
+    live, frequently retuned file (projector recalibration rewrites it), so
+    asserting specific tuned values here would turn the suite red for a
+    reason that has nothing to do with the package layout. Instead assert
+    that the root resolves to this repository and that the file was really
+    parsed -- ``active_width`` is ``0`` in the dataclass default, so a
+    non-zero value can only have come from disk.
+
+    ここで守るのはパス解決であって調整値ではない。``config.toml`` は
+    プロジェクタ再キャリブレーションのたびに書き換わる可変ファイルなので、
+    具体的な調整値をアサートするとパッケージ配置と無関係な理由でスイートが
+    赤くなる。代わりにルートが本リポジトリを指すことと、ファイルが実際に
+    読まれたこと（``active_width`` の既定値は ``0`` なので非ゼロなら
+    ディスク由来）を確認する。
+    """
+    from pathlib import Path
+
+    from yoshidacomp import config as config_module
+
+    assert config_module._PROJECT_ROOT == Path(__file__).resolve().parents[1]
+    assert config_module._DEFAULT_CONFIG_PATH.exists()
+
+    assert config_module.ProjectorConfig().active_width == 0
+    cfg = config_module.reload_config()
+    assert cfg.projector.active_width != 0
+
+
+def test_load_config_warns_when_the_default_file_is_missing(
+    tmp_path, monkeypatch
+) -> None:
+    """既定パスが見つからないとき、全既定値へ静かにフォールバックしないこと。
+
+    An installed (non-editable) ``yoshidacomp`` resolves ``_PROJECT_ROOT``
+    into the virtualenv, where no ``config.toml`` exists; the loader used to
+    return an all-defaults :class:`AppConfig` with no signal at all. An
+    explicitly passed path is the caller's own choice and stays silent.
+    """
+    import warnings
+
+    import pytest
+
+    from yoshidacomp import config as config_module
+
+    missing = tmp_path / "nonexistent" / "config.toml"
+    monkeypatch.setattr(config_module, "_DEFAULT_CONFIG_PATH", missing)
+
+    with pytest.warns(RuntimeWarning, match="default config file not found"):
+        defaults = config_module.load_config()
+    assert defaults == config_module.AppConfig()
+
+    # 明示パスは呼び出し側の責任なので警告しない
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert config_module.load_config(missing) == config_module.AppConfig()
 
 
 def test_projection_region_lives_in_core() -> None:

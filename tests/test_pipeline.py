@@ -64,6 +64,120 @@ def test_generate_projection_image_identity_matrix() -> None:
     assert np.array_equal(linear, projected)  # linearizer="none" は素通し
 
 
+def _out_of_gamut_setup() -> tuple[np.ndarray, np.ndarray]:
+    """A target/matrix pair whose compensation lands outside [0, 1].
+
+    R は 1 超、G は 0 未満、B は範囲内になるよう bias を仕込む。
+    """
+    matrices = np.zeros((4, 4, 4, 3), dtype=np.float32)
+    for c in range(3):
+        matrices[:, :, c, c] = 1.0
+    matrices[:, :, 3, 0] = 0.5  # R: 1.0 + 0.5  = 1.5  (1超クリップ)
+    matrices[:, :, 3, 1] = -1.5  # G: 1.0 - 1.5 = -0.5 (負クリップ)
+    target = np.full((4, 4, 3), 255, dtype=np.uint8)
+    return target, matrices
+
+
+def test_generate_projection_image_unclipped_float_keeps_out_of_gamut_values() -> None:
+    """``clip=False`` + float dtype で [0, 1] 外の値がそのまま残ること。
+
+    The ``gamut`` view has to tell 負クリップ from 1超クリップ, which is
+    exactly the distinction ``torch.clamp(0, 1)`` destroys.
+    """
+    from dataclasses import dataclass
+
+    from yoshidacomp.compensation.pipeline import generate_projection_image
+
+    @dataclass(frozen=True)
+    class Projector:
+        width: int = 4
+        height: int = 4
+        gamma: float = 2.2
+
+    target, matrices = _out_of_gamut_setup()
+    linear, projected = generate_projection_image(
+        target,
+        matrices,
+        projector=Projector(),
+        active_region=(0, 0, 4, 4),
+        linearizer="none",
+        target_decode="none",
+        dtype=np.float32,
+        clip=False,
+    )
+
+    assert linear.dtype == np.float32
+    assert projected.dtype == np.float32
+    assert np.allclose(linear[0, 0], [1.5, -0.5, 1.0], atol=1e-5)
+    assert np.allclose(projected[0, 0], [1.5, -0.5, 1.0], atol=1e-5)
+
+
+def test_generate_projection_image_defaults_are_unchanged() -> None:
+    """既定 (dtype=uint8, clip=True) は従来どおりクランプ済み uint8 を返すこと。"""
+    from dataclasses import dataclass
+
+    from yoshidacomp.compensation.pipeline import generate_projection_image
+
+    @dataclass(frozen=True)
+    class Projector:
+        width: int = 4
+        height: int = 4
+        gamma: float = 2.2
+
+    target, matrices = _out_of_gamut_setup()
+    kwargs = dict(
+        projector=Projector(),
+        active_region=(0, 0, 4, 4),
+        linearizer="none",
+        target_decode="none",
+    )
+
+    linear, projected = generate_projection_image(target, matrices, **kwargs)
+    assert linear.dtype == np.uint8
+    assert projected.dtype == np.uint8
+    # 1.5 -> クランプ後 1.0 -> 255、-0.5 -> クランプ後 0.0 -> 0
+    assert linear[0, 0].tolist() == [255, 0, 255]
+
+    explicit_linear, explicit_projected = generate_projection_image(
+        target, matrices, dtype=np.uint8, clip=True, **kwargs
+    )
+    assert np.array_equal(linear, explicit_linear)
+    assert np.array_equal(projected, explicit_projected)
+
+
+@pytest.mark.parametrize("linearizer", ["gamma", "inverse_lut"])
+def test_generate_projection_image_rejects_unclipped_linearization(
+    linearizer: str,
+) -> None:
+    """``clip=False`` は ``linearizer='none'`` 以外を拒否すること。
+
+    Both other linearizers assume [0, 1] input, so feeding them the
+    out-of-range values ``clip=False`` exists to preserve is meaningless.
+    """
+    from dataclasses import dataclass
+
+    from yoshidacomp.compensation.pipeline import generate_projection_image
+
+    @dataclass(frozen=True)
+    class Projector:
+        width: int = 4
+        height: int = 4
+        gamma: float = 2.2
+
+    target, matrices = _out_of_gamut_setup()
+    with pytest.raises(ValueError, match="clip=False requires linearizer='none'"):
+        generate_projection_image(
+            target,
+            matrices,
+            projector=Projector(),
+            active_region=(0, 0, 4, 4),
+            linearizer=linearizer,
+            target_decode="none",
+            dtype=np.float32,
+            clip=False,
+        )
+
+
 def test_gamma_linearizer_brightens_midtones() -> None:
     """逆ガンマは中間調を明るくする（指数は 1/gamma でなければならない）。
 

@@ -19,6 +19,7 @@ def calc_compensation_image(
     target_image: ndarray,
     color_mixing_matrices: ndarray,
     dtype: np.typing.DTypeLike = np.float32,
+    clip: bool = True,
 ) -> ndarray:
     """Calculate a compensation image using color mixing matrices.
 
@@ -47,13 +48,22 @@ def calc_compensation_image(
             If uint16, output is scaled to 0-65535.
             出力データ型。デフォルトは ``np.float32``。
             uint8 の場合は 0-255、uint16 の場合は 0-65535 にスケーリング。
+        clip: Clamp the result to [0, 1] before scaling. Defaults to
+            ``True``. Set ``False`` (with a float *dtype*) to keep the raw
+            values a gamut analysis needs -- which pixels the matrix drives
+            below 0 or above 1 is exactly the information clamping erases.
+            スケーリング前に結果を [0, 1] にクランプするか。デフォルトは
+            ``True``。色域解析に必要な生値を保つには（float の *dtype* と
+            併せて）``False`` を指定する。どの画素が 0 未満／1 超に振れる
+            かは、クランプが消してしまう情報そのものである。
 
     Returns:
         Compensation image with shape ``(H, W, 3)`` and the specified
         *dtype*. Values are clamped to the valid range [0, 1] before
-        scaling.
+        scaling unless ``clip=False``.
         形状 ``(H, W, 3)`` で指定された *dtype* の補償画像。
-        スケーリング前に値は有効範囲 [0, 1] にクランプされる。
+        ``clip=False`` でない限り、スケーリング前に値は有効範囲 [0, 1]
+        にクランプされる。
     """
     height, width, _ = target_image.shape
 
@@ -90,7 +100,8 @@ def calc_compensation_image(
     ).squeeze(1)  # Shape: (num_pixels, 3)
 
     # Clamp to valid range and convert back to numpy
-    compensation_tensor = torch.clamp(compensation_tensor, 0.0, 1.0)
+    if clip:
+        compensation_tensor = torch.clamp(compensation_tensor, 0.0, 1.0)
     compensation_image = compensation_tensor.view(height, width, 3).cpu().numpy()
 
     # Scale to output dtype range

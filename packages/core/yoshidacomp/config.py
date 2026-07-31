@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import tomllib
+import warnings
 from dataclasses import asdict, dataclass, field
 from fractions import Fraction
 from math import isfinite
@@ -354,10 +355,29 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
     Falls back to compiled-in defaults if the file does not exist
     or if individual fields are absent.
 
+    When *config_path* is omitted and the default ``config.toml`` cannot be
+    found, a :class:`RuntimeWarning` is emitted naming the path that was
+    searched. That fallback is silent otherwise, and every returned value
+    would be a compiled-in default rather than the project's tuning.
+    ``_PROJECT_ROOT`` is derived from this file's location, which is correct
+    for the editable workspace layout but points inside the virtualenv when
+    ``yoshidacomp`` is installed as a wheel -- exactly the case the warning
+    is meant to surface. An explicitly passed *config_path* is the caller's
+    responsibility and stays silent.
+
     TOML ファイルから設定を読み込む。
 
     ファイルが存在しない場合、または個々のフィールドが欠落している場合は
     コンパイル済みデフォルト値にフォールバックする。
+
+    *config_path* を省略し、既定の ``config.toml`` が見つからない場合は
+    探索したパスを明示した :class:`RuntimeWarning` を出す。この
+    フォールバックは本来無警告で、返る値がすべてコンパイル済み既定値に
+    なってもプロジェクトの調整値との区別が付かないため。``_PROJECT_ROOT``
+    はこのファイルの位置から導出しており、editable なワークスペース配置
+    では正しいが、``yoshidacomp`` を wheel としてインストールした場合は
+    仮想環境内を指す（警告が可視化したいのはまさにこのケース）。
+    *config_path* を明示した場合は呼び出し側の責任として警告しない。
 
     Args:
         config_path: Path to the TOML configuration file. Defaults to
@@ -369,10 +389,21 @@ def load_config(config_path: Optional[Path] = None) -> AppConfig:
         A fully populated :class:`AppConfig` instance.
         完全に設定された :class:`AppConfig` インスタンス。
     """
+    used_default_path = config_path is None
     if config_path is None:
         config_path = _DEFAULT_CONFIG_PATH
 
     if not config_path.exists():
+        if used_default_path:
+            warnings.warn(
+                f"yoshidacomp.config: default config file not found at "
+                f"'{config_path}'; every value falls back to a compiled-in "
+                f"default. The search root is '{_PROJECT_ROOT}', derived from "
+                f"the location of '{__file__}'. Pass an explicit config_path "
+                f"to silence this.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
         return AppConfig()
 
     with open(config_path, "rb") as f:

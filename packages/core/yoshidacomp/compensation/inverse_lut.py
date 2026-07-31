@@ -27,8 +27,18 @@ import cv2
 import numpy as np
 from scipy.interpolate import PchipInterpolator
 
-from yoshidacomp.capture import create_camera_backend
 from yoshidacomp.config import get_config
+
+# NOTE: ``yoshidacomp.capture`` is imported lazily inside
+# :func:`run_calibration_capture`, the only place that needs it. At module
+# scope it would drag the hardware layer (and its optional camera SDKs) into
+# every pure-computation consumer, since ``compensation.pipeline`` imports
+# this module. Same deferral pattern as the calibration scripts.
+# 注: ``yoshidacomp.capture`` は唯一の利用箇所である
+# :func:`run_calibration_capture` の内部で遅延importする。module scope に
+# 置くと、``compensation.pipeline`` が本モジュールをimportする都合で、純粋
+# 計算だけの利用者にもハードウェア層（と任意のカメラSDK）が付いてくる。
+# calibration スクリプトと同じ遅延パターン。
 
 
 # Wall-clock settle time between projecting a new pattern and capturing it, so
@@ -803,6 +813,10 @@ def run_calibration_capture(
     cfg = config if config is not None else get_config()
     ilut_cfg = cfg.inverse_lut
     if camera_backend is None:
+        # Deferred: keeps the hardware layer out of pure-computation imports.
+        # 遅延import: 純粋計算だけの利用者にハードウェア層を持ち込まない。
+        from yoshidacomp.capture import create_camera_backend
+
         camera_backend = create_camera_backend(cfg.camera)
 
     # Simple HDR needs per-shot exposure control. Only the Canon backend

@@ -240,6 +240,7 @@ class Linearizer(Protocol):
         *,
         projector: ProjectorLike,
         lut: Optional[InverseLut] = None,
+        dtype: np.typing.DTypeLike = np.uint8,
     ) -> np.ndarray:
         ...
 
@@ -249,10 +250,17 @@ def _linearize_none(
     *,
     projector: ProjectorLike,
     lut: Optional[InverseLut] = None,
+    dtype: np.typing.DTypeLike = np.uint8,
 ) -> np.ndarray:
     """Pass the compensation codes through unchanged.
 
     補償コード値をそのまま通す。
+
+    Returns the *same object* it was given -- callers must not mutate the
+    result in place, and an identity check against the input is not a
+    meaningful assertion about this function.
+    受け取ったオブジェクトを**そのまま**返す。呼び出し側は戻り値を破壊的に
+    書き換えてはならず、入力との同一性チェックは意味のある検証にならない。
     """
     return image
 
@@ -262,15 +270,18 @@ def _linearize_gamma(
     *,
     projector: ProjectorLike,
     lut: Optional[InverseLut] = None,
+    dtype: np.typing.DTypeLike = np.uint8,
 ) -> np.ndarray:
     """Apply the analytic inverse gamma of the projector.
 
     プロジェクタの解析逆ガンマを適用する。
 
     Note: apply_inverse_gamma_correction() uses the given exponent directly,
-    so brightening requires 1 / projector.gamma.
+    so brightening requires 1 / projector.gamma. It preserves the input's
+    dtype, so *dtype* is accepted only for protocol conformance.
     注: apply_inverse_gamma_correction() は与えた指数をそのまま使うため、
-    明るくするには 1 / projector.gamma を渡す必要がある。
+    明るくするには 1 / projector.gamma を渡す必要がある。入力の dtype を
+    保つため、*dtype* はプロトコル整合のためだけに受け取る。
     """
     return apply_inverse_gamma_correction(image, gamma=1.0 / projector.gamma)
 
@@ -280,6 +291,7 @@ def _linearize_inverse_lut(
     *,
     projector: ProjectorLike,
     lut: Optional[InverseLut] = None,
+    dtype: np.typing.DTypeLike = np.uint8,
 ) -> np.ndarray:
     """Apply a measured per-channel inverse LUT.
 
@@ -287,7 +299,7 @@ def _linearize_inverse_lut(
     """
     if lut is None:
         raise ValueError("linearizer='inverse_lut' requires an InverseLut")
-    return apply_inverse_lut(image, lut, dtype=np.uint8)
+    return apply_inverse_lut(image, lut, dtype=dtype)
 
 
 LINEARIZERS: dict[str, Linearizer] = {
@@ -307,6 +319,8 @@ def generate_projection_image(
     lut: Optional[InverseLut] = None,
     target_decode: TargetDecodeMode = "srgb",
     target_gamma: float = 2.2,
+    dtype: np.typing.DTypeLike = np.uint8,
+    clip: bool = True,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Turn one target image into linear and projector-ready code values.
 
@@ -335,15 +349,45 @@ def generate_projection_image(
             ターゲットの復号方式。
         target_gamma: Exponent used when ``target_decode="gamma"``.
             ``target_decode="gamma"`` のときの指数。
+        dtype: Output data type of both returned arrays. ``np.uint8``
+            (default) reproduces the CLI's 8-bit quantization; a float
+            dtype keeps the compensation in normalized units, which is
+            what a viewer needs.
+            返す2配列の出力データ型。既定の ``np.uint8`` は CLI と同じ
+            8bit 量子化。float を指定すると補償値を正規化のまま保持でき、
+            ビューアはこちらを必要とする。
+        clip: Clamp the compensation to [0, 1] before quantization.
+            Defaults to ``True``. ``clip=False`` keeps out-of-gamut
+            values so a caller can classify which pixels the matrix
+            drives below 0 or above 1; it requires ``linearizer="none"``.
+            量子化前に補償値を [0, 1] にクランプするか。既定は ``True``。
+            ``clip=False`` は色域外の値を保持し、行列が 0 未満／1 超へ
+            振る画素を呼び出し側が判定できるようにする。この場合
+            ``linearizer="none"`` が必須。
 
     Returns:
-        ``(linear_compensation_uint8, projector_codes_uint8)``.
-        ``(線形補償画像 uint8, 投影用コード値 uint8)``。
+        ``(linear_compensation, projector_codes)``, both of *dtype*.
+        ``(線形補償画像, 投影用コード値)``。いずれも *dtype*。
+
+    Raises:
+        ValueError: If *linearizer* is unknown, or if ``clip=False`` is
+            combined with a linearizer other than ``"none"``.
+            *linearizer* が未知の場合、または ``clip=False`` を
+            ``"none"`` 以外の linearizer と併用した場合。
     """
     try:
         linearize = LINEARIZERS[linearizer]
     except KeyError:
         raise ValueError(f"Unsupported linearizer: {linearizer!r}") from None
+
+    if not clip and linearizer != "none":
+        raise ValueError(
+            f"clip=False requires linearizer='none', got {linearizer!r}. "
+            "apply_inverse_gamma_correction() and apply_inverse_lut() both "
+            "assume input in [0, 1] (they normalize/index against that range) "
+            "and would return garbage for the out-of-range values clip=False "
+            "is meant to preserve."
+        )
 
     target_linear = decode_target(
         target_uint8,
@@ -358,11 +402,14 @@ def generate_projection_image(
     compensation = calc_compensation_image(
         target_image=target_linear,
         color_mixing_matrices=warped_matrix,
-        dtype=np.uint8,
+        dtype=dtype,
+        clip=clip,
     )
     compensation = mask_to_active_region(compensation, active_region)
 
-    projector_image = linearize(compensation, projector=projector, lut=lut)
+    projector_image = linearize(
+        compensation, projector=projector, lut=lut, dtype=dtype
+    )
     if hasattr(projector_image, "cpu"):
         projector_image = projector_image.cpu().numpy()
-    return compensation, np.asarray(projector_image, dtype=np.uint8)
+    return compensation, np.asarray(projector_image, dtype=dtype)

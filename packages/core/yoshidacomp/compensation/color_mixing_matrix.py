@@ -113,20 +113,27 @@ def generate_projection_patterns(
 
 def apply_inverse_gamma_correction(
     image: ndarray | torch.Tensor,
-    gamma: Optional[float] = None,
+    gamma: float,
     device: str | torch.device = "cuda",
 ) -> ndarray | torch.Tensor:
-    """Apply inverse gamma correction to an RGB image using PyTorch.
+    """Raise an RGB image to the given exponent using PyTorch.
 
-    Adjust the pixel intensities of the input image according to the
-    specified gamma value, effectively linearizing the color values.
-    Supports GPU acceleration when available.
+    Computes ``out = clamp(in ** gamma, 0, 1)`` on normalized values.
+    *gamma* is used **directly as the exponent**, so it is the caller's
+    job to invert it: cancelling a projector whose response is
+    ``t ** projector.gamma`` requires ``gamma=1 / projector.gamma``.
+    Passing ``projector.gamma`` itself darkens the image, which is the
+    opposite of what the name suggests. Supports GPU acceleration when
+    available.
 
-    PyTorch を用いて RGB 画像に逆ガンマ補正を適用する。
+    PyTorch を用いて RGB 画像を指定した指数でべき乗する。
 
-    入力画像のピクセル強度を指定されたガンマ値に従って調整し、
-    色値を実質的にリニアライズする。GPU が利用可能な場合は
-    GPU アクセラレーションに対応する。
+    正規化した値に対し ``out = clamp(in ** gamma, 0, 1)`` を計算する。
+    *gamma* は**そのまま指数として**使われるため、逆数を取るのは
+    呼び出し側の責任。応答が ``t ** projector.gamma`` のプロジェクタを
+    打ち消すには ``gamma=1 / projector.gamma`` を渡す。``projector.gamma``
+    をそのまま渡すと逆に暗くなる。GPU が利用可能な場合は GPU
+    アクセラレーションに対応する。
 
     Parameters
     ----------
@@ -136,11 +143,15 @@ def apply_inverse_gamma_correction(
         for uint16.
         形状 ``(H, W, 3)`` の入力 RGB 画像。ピクセル値は float 型で
         [0, 1]、uint8 で [0, 255]、uint16 で [0, 65535] の範囲。
-    gamma : float, optional
-        The gamma value to use for correction. Default is read from
-        config (``projector.gamma``).
-        補正に使用するガンマ値。デフォルトは設定から読み込む
-        （``projector.gamma``）。
+    gamma : float
+        Exponent applied to the normalized image. Required: there is no
+        default, because every call site wants ``1 / projector.gamma``
+        and a config-sourced ``projector.gamma`` default would silently
+        darken instead of brighten.
+        正規化画像に適用する指数。既定値は持たない（必須）。すべての
+        呼び出し箇所が ``1 / projector.gamma`` を必要とし、設定由来の
+        ``projector.gamma`` を既定にすると明るくする代わりに静かに
+        暗くしてしまうため。
     device : str or torch.device, optional
         Device to perform computation on. Default is ``"cuda"``.
         Automatically falls back to ``"cpu"`` if CUDA is not available.
@@ -181,10 +192,7 @@ def apply_inverse_gamma_correction(
     else:
         _image = image_tensor.float()
 
-    if gamma is None:
-        gamma = get_config().projector.gamma
-
-    # Apply inverse gamma correction
+    # Apply the exponent as given (see the docstring: no config fallback)
     corrected_image = torch.pow(_image, gamma)
     corrected_image = torch.clamp(corrected_image, 0.0, 1.0)
 
