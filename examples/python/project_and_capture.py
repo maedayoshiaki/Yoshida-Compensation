@@ -16,6 +16,10 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+# Repository root. The sys.path insert is required here (unlike in the
+# inverse-LUT scripts) because this module imports ``examples.python.sample``.
+# リポジトリルート。本モジュールは ``examples.python.sample`` を import する
+# ため、逆LUT系スクリプトと違い sys.path への挿入が必要。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
@@ -24,17 +28,16 @@ from examples.python.sample import capture_image
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 # INPUT_IMAGE_PATH = Path("data/inv_gamma_comp_images/inv_gamma_comp_image_03.png")
 INPUT_IMAGE_PATH = Path("data/sample_warp_debug_DEBUG_ONLY/03_metal/01_prepare_target_camera_to_projector_output.png")
-OUTPUT_DIR = PROJECT_ROOT / "data" / "perceived"
+OUTPUT_DIR = _REPO_ROOT / "data" / "perceived"
 WINDOW_NAME = "Projection"
 
 
 def _resolve_input_image_path() -> Path:
     if INPUT_IMAGE_PATH.is_absolute():
         return INPUT_IMAGE_PATH
-    return PROJECT_ROOT / INPUT_IMAGE_PATH
+    return _REPO_ROOT / INPUT_IMAGE_PATH
 
 
 def _fit_image_to_projector(
@@ -105,7 +108,7 @@ def main(argv: list[str] | None = None) -> None:
         print("Usage: python examples/python/project_and_capture.py [--config <config.toml>]")
         raise SystemExit(1)
 
-    default_config_path = PROJECT_ROOT / "config.toml"
+    default_config_path = _REPO_ROOT / "config.toml"
     reload_config(config_path if config_path is not None else default_config_path)
     cfg = get_config()
 

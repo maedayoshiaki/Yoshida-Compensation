@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 import numpy as np
 import cv2
-from typing import List, Tuple, Optional, Literal, Sequence, cast
+from typing import List, Tuple, Optional, Sequence, cast
 import torch
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -29,14 +29,6 @@ from yoshidacomp.geometry.graycode_path import ensure_on_syspath
 
 ensure_on_syspath()
 
-from graycode.warp_image import (
-    PixelMapWarperTorch,
-    AggregationMethod,
-    InpaintMethod,
-    SplatMethod,
-)
-from graycode.interpolate_c2p import load_c2p_numpy
-from graycode.interpolate_p2c import load_p2c_numpy_array
 from graycode.config import (
     reload_config as reload_graycode_config,
 )
@@ -60,12 +52,38 @@ from yoshidacomp.compensation.projection_region import (
     mask_to_active_region,
     resolve_active_region,
 )
+# Deliberate compatibility re-exports
+# ------------------------------------
+# Most names imported below are also used inside this file, but two are not.
+# They are imported anyway because other modules read them off this one as
+# attributes (`sample.<name>`); removing them as "unused" would break those
+# callers with an AttributeError, not a lint warning. Every such name is
+# listed here -- if you add another, add it here too.
+#
+# - SUPPORTED_TARGET_IMAGE_SUFFIXES: read as
+#   `sample.SUPPORTED_TARGET_IMAGE_SUFFIXES` by
+#   examples/python/evaluate_compensation_conditions.py and
+#   examples/python/evaluate_recalibrated_compensation.py.
+# - invwarp_image: monkeypatched as `sample.invwarp_image` by
+#   tests/test_sample_mocked.py's _patch_warp_helper(); four tests would
+#   fail with AttributeError without it.
+#
+# 意図的な互換再エクスポート
+# --------------------------
+# 以下の import の大半はこのファイル内でも使うが、2つは使わない。それでも
+# import しているのは、他モジュールが `sample.<名前>` として属性参照する
+# ため。「未使用」として削除すると lint 警告ではなく AttributeError で
+# 呼び出し側が壊れる。該当する名前はすべてここに列挙する（追加する場合は
+# ここにも追記すること）。
+#
+# なお linear_to_srgb はこのファイル内でも外部からも参照が無かったため
+# 削除した。必要な場合は yoshidacomp.compensation.pipeline から直接
+# import すること。
 from yoshidacomp.compensation.pipeline import (
     SUPPORTED_TARGET_IMAGE_SUFFIXES,
     TargetImageSpace,
     capture_to_srgb_uint8,
     compensation_space_from_warp_method,
-    linear_to_srgb,
     load_target_images as _load_target_images,
     prepare_target_image_for_compensation,
     resolve_target_image_space,
@@ -73,11 +91,6 @@ from yoshidacomp.compensation.pipeline import (
     srgb_to_linear,
 )
 from yoshidacomp.geometry.warp import (
-    # invwarp_image is not referenced anywhere else in this file; it is kept
-    # as a deliberate compatibility re-export because
-    # tests/test_sample_mocked.py's _patch_warp_helper() monkeypatches
-    # `sample.invwarp_image`, and four tests would fail with AttributeError
-    # if this import were removed. Do not delete it as "unused".
     WarpMethod,
     center_rect,
     invwarp_image,
@@ -269,66 +282,6 @@ def _ensure_matching_spatial_shape(
             f"color_mixing_matrices shape {color_mixing_matrices.shape[:2]}."
         )
 
-
-def apply_rpcc_correction(
-    linear_image: np.ndarray,
-    RPCC_MATRIX: np.ndarray,
-    degree: Literal[1, 2, 3] = 2,
-) -> np.ndarray:
-    """Apply Root-Polynomial Color Correction (RPCC) to an image.
-
-    Expand the RGB values using root-polynomial expansion and apply the
-    pre-computed RPCC matrix to convert camera RGB to XYZ color space.
-
-    画像にルート多項式色補正（RPCC）を適用する。
-
-    ルート多項式展開を用いて RGB 値を拡張し、事前計算された RPCC 行列を
-    適用してカメラ RGB を XYZ 色空間に変換する。
-
-    Args:
-        linear_image: Linear camera image with shape ``(H, W, 3)``,
-            values in range [0.0, 1.0].
-            形状 ``(H, W, 3)``、値の範囲 [0.0, 1.0] のリニアカメラ画像。
-        RPCC_MATRIX: Pre-computed RPCC transformation matrix with shape
-            ``(3, N)``, where *N* depends on the degree (6 for degree=2,
-            13 for degree=3).
-            形状 ``(3, N)`` の事前計算された RPCC 変換行列。*N* は次数に
-            依存する（degree=2 で 6、degree=3 で 13）。
-        degree: Polynomial degree for expansion. Default is 2.
-            多項式展開の次数。デフォルトは 2。
-
-            - 1: Linear (R, G, B) / リニア
-            - 2: Quadratic with cross terms / 交差項付き二次
-              ``(R, G, B, sqrt(RG), sqrt(GB), sqrt(BR))``
-            - 3: Cubic with additional terms / 追加項付き三次
-
-    Returns:
-        Color-corrected image in XYZ color space with shape
-        ``(H, W, 3)``, values clipped to range [0.0, 1.0].
-        形状 ``(H, W, 3)``、値が [0.0, 1.0] にクリップされた
-        XYZ 色空間の色補正済み画像。
-
-    Notes:
-        The RPCC matrix expects expanded RGB input, so this function
-        internally performs the same polynomial expansion on the image
-        data.
-        RPCC 行列は展開された RGB 入力を想定しているため、この関数は
-        内部的に画像データに対して同じ多項式展開を行う。
-    """
-    import colour
-
-    # Expand image data: [R, G, B] -> [R, G, B, sqrt(RG), sqrt(GB), sqrt(BR)]
-    expanded_image = colour.characterisation.polynomial_expansion_Finlayson2015(
-        linear_image, degree=degree, root_polynomial_expansion=True
-    )
-
-    # Matrix multiplication: XYZ = M @ Expanded_RGB
-    corrected_xyz = colour.algebra.vecmul(RPCC_MATRIX, expanded_image)
-
-    # Clip values to valid range (noise reduction)
-    corrected_xyz = np.clip(corrected_xyz, 0.0, 1.0)
-
-    return corrected_xyz
 
 
 def capture_image() -> Optional[np.ndarray]:

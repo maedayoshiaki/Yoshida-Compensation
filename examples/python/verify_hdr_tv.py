@@ -33,9 +33,13 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# Repository root, used only to resolve the default config.toml. No sys.path
+# insert: nothing in this file imports ``examples.*``; ``yoshidacomp`` is an
+# installed workspace package.
+# リポジトリルート。既定の config.toml の解決にのみ使う。``examples.*`` を
+# import しないため sys.path への挿入は不要（``yoshidacomp`` はインストール
+# 済みのワークスペースパッケージ）。
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
 
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 from yoshidacomp.compensation.inverse_lut import scale_shutter_tv, tv_to_seconds
