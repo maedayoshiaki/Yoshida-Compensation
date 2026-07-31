@@ -455,7 +455,7 @@ def test_capture_package_exposes_backend_factory() -> None:
 
 - [ ] **Step 2: テストが失敗することを確認**
 
-Run: `.venv/Scripts/python.exe -m pytest tests/test_package_layout.py::test_capture_package_imports_without_sdk -q`
+Run: `.venv/Scripts/python.exe -m pytest tests/test_package_layout.py::test_capture_package_exposes_backend_factory -q`
 Expected: FAIL — `ModuleNotFoundError: No module named 'yoshidacomp.capture'`
 
 - [ ] **Step 3: ディレクトリを移動**
