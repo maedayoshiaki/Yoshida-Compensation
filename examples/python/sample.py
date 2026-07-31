@@ -40,13 +40,13 @@ from graycode.config import (
     reload_config as reload_graycode_config,
 )
 
-from src.python.color_mixing_matrix import (
+from yoshidacomp.compensation.color_mixing_matrix import (
     generate_projection_patterns,
     apply_inverse_gamma_correction,
     calc_color_mixing_matrices,
 )
 from src.python.camera import CameraCaptureError, create_camera_backend
-from src.python.photometric_compensation import (
+from yoshidacomp.compensation.photometric_compensation import (
     calc_compensation_image,
 )
 from yoshidacomp.config import (

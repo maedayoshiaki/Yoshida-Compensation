@@ -42,7 +42,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.python.color_mixing_matrix import apply_inverse_gamma_correction
+from yoshidacomp.compensation.color_mixing_matrix import apply_inverse_gamma_correction
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 from src.python.inverse_lut import (
     InverseLut,

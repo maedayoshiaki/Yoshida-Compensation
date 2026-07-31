@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from src.python.color_mixing_matrix import (
+from yoshidacomp.compensation.color_mixing_matrix import (
     calc_color_mixing_matrices,
     generate_projection_patterns,
 )
