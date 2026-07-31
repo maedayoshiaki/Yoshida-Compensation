@@ -7,6 +7,12 @@ resolution-markers = [
     "(platform_machine != 'aarch64' and sys_platform == 'linux') or (sys_platform != 'darwin' and sys_platform != 'linux')",
 ]
 
+[manifest]
+members = [
+    "yoshida-compensation",
+    "yoshidacomp",
+]
+
 [[package]]
 name = "colorama"
 version = "0.4.6"
@@ -914,19 +920,13 @@ name = "yoshida-compensation"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "edsdk-python", marker = "python_full_version < '3.14' and sys_platform == 'win32'" },
-    { name = "numpy" },
-    { name = "opencv-contrib-python" },
-    { name = "pillow" },
-    { name = "scipy" },
-    { name = "torch" },
+    { name = "yoshidacomp" },
 ]
 
 [package.optional-dependencies]
 sample = [
     { name = "matplotlib" },
-    { name = "psutil" },
-    { name = "rawpy" },
+    { name = "yoshidacomp", extra = ["camera"] },
 ]
 
 [package.dev-dependencies]
@@ -936,17 +936,43 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "edsdk-python", marker = "python_full_version == '3.13.*' and sys_platform == 'win32'", url = "https://github.com/youme-town/edsdk-python/releases/download/v0.2.0/edsdk_python-0.2.0-cp313-cp313-win_amd64.whl" },
     { name = "matplotlib", marker = "extra == 'sample'" },
-    { name = "numpy", specifier = ">=2.3.4" },
-    { name = "opencv-contrib-python", specifier = ">=4.11.0.86" },
-    { name = "pillow", specifier = ">=12.0.0" },
-    { name = "psutil", marker = "extra == 'sample'" },
-    { name = "rawpy", marker = "extra == 'sample'" },
-    { name = "scipy", specifier = ">=1.16.3" },
-    { name = "torch", specifier = ">=2.9.1", index = "https://download.pytorch.org/whl/cu128" },
+    { name = "yoshidacomp", editable = "packages/core" },
+    { name = "yoshidacomp", extras = ["camera"], marker = "extra == 'sample'", editable = "packages/core" },
 ]
 provides-extras = ["sample"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=9.0.1" }]
+
+[[package]]
+name = "yoshidacomp"
+version = "0.1.0"
+source = { editable = "packages/core" }
+dependencies = [
+    { name = "numpy" },
+    { name = "opencv-contrib-python" },
+    { name = "pillow" },
+    { name = "psutil" },
+    { name = "scipy" },
+    { name = "torch" },
+]
+
+[package.optional-dependencies]
+camera = [
+    { name = "edsdk-python", marker = "python_full_version < '3.14' and sys_platform == 'win32'" },
+    { name = "rawpy" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "edsdk-python", marker = "python_full_version == '3.13.*' and sys_platform == 'win32' and extra == 'camera'", url = "https://github.com/youme-town/edsdk-python/releases/download/v0.2.0/edsdk_python-0.2.0-cp313-cp313-win_amd64.whl" },
+    { name = "numpy", specifier = ">=2.3.4" },
+    { name = "opencv-contrib-python", specifier = ">=4.11.0.86" },
+    { name = "pillow", specifier = ">=12.0.0" },
+    { name = "psutil", specifier = ">=7.0.0" },
+    { name = "rawpy", marker = "extra == 'camera'" },
+    { name = "scipy", specifier = ">=1.16.3" },
+    { name = "torch", specifier = ">=2.9.1", index = "https://download.pytorch.org/whl/cu128" },
+]
+provides-extras = ["camera"]
