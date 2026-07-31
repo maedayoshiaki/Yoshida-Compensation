@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from pathlib import Path
-
 import numpy as np
 import pytest
 
@@ -11,24 +9,15 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from yoshidacomp.config import reload_config  # noqa: E402
 from yoshidacomp_web.app import create_app  # noqa: E402
 from yoshidacomp_web.store import store  # noqa: E402
 
-_REPO_ROOT = Path(__file__).resolve().parents[1]
-
-
-@pytest.fixture(autouse=True)
-def _default_projector_config():
-    """Ensure the real ``config.toml`` (1920x1080 projector) is loaded.
-
-    See ``tests/test_web_matrix.py`` for why this is necessary: the global
-    config singleton can be left poisoned by unrelated tests that run
-    earlier in the same session, and this file reads it indirectly via
-    ``classify_space``.
-    """
-    reload_config(_REPO_ROOT / "config.toml")
-    yield
+# The real config.toml (1920x1080 projector) is restored before/after every
+# test by the autouse fixture in tests/conftest.py, so this module does not
+# need its own copy. See that fixture's docstring for why both sides matter.
+# 実 config.toml（1920x1080プロジェクタ）は tests/conftest.py の autouse
+# フィクスチャが毎テストの前後で復元するため、本ファイルは独自コピーを
+# 持たない。前後両方が必要な理由は当該フィクスチャのdocstring参照。
 
 
 def _load(client, tmp_path, height=1080, width=1920):
