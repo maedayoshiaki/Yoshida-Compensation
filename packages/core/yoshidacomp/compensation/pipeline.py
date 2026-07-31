@@ -367,7 +367,7 @@ def generate_projection_image(
             量子化前に補償値を [0, 1] にクランプするか。既定は ``True``。
             ``clip=False`` は色域外の値を保持し、行列が 0 未満／1 超へ
             振る画素を呼び出し側が判定できるようにする。この場合
-            ``linearizer="none"`` が必須。
+            ``linearizer="none"`` と float の *dtype* が必須。
 
     Returns:
         ``(linear_compensation, projector_codes)``, both of *dtype*.
@@ -375,9 +375,12 @@ def generate_projection_image(
 
     Raises:
         ValueError: If *linearizer* is unknown, or if ``clip=False`` is
-            combined with a linearizer other than ``"none"``.
+            combined with a linearizer other than ``"none"`` or with an
+            integer *dtype* -- both would discard or corrupt the very
+            out-of-range values ``clip=False`` preserves.
             *linearizer* が未知の場合、または ``clip=False`` を
-            ``"none"`` 以外の linearizer と併用した場合。
+            ``"none"`` 以外の linearizer や整数 *dtype* と併用した場合
+            （いずれも ``clip=False`` が保持する範囲外の値を捨てる／壊す）。
     """
     try:
         linearize = LINEARIZERS[linearizer]
@@ -391,6 +394,14 @@ def generate_projection_image(
             "assume input in [0, 1] (they normalize/index against that range) "
             "and would return garbage for the out-of-range values clip=False "
             "is meant to preserve."
+        )
+
+    if not clip and np.issubdtype(np.dtype(dtype), np.integer):
+        raise ValueError(
+            f"clip=False requires a float dtype, got {np.dtype(dtype)!s}. "
+            "Integer output scales by 255/65535 and casts, which is "
+            "undefined for values outside [0, 1] -- exactly the values "
+            "clip=False exists to preserve."
         )
 
     target_linear = decode_target(

@@ -201,6 +201,36 @@ def test_generate_projection_image_rejects_unclipped_linearization(
         )
 
 
+def test_generate_projection_image_rejects_unclipped_integer_dtype() -> None:
+    """``clip=False`` は整数 dtype を拒否すること。
+
+    Integer output scales by 255 and casts, which is undefined for the
+    out-of-range values ``clip=False`` exists to preserve -- silently
+    producing wrapped garbage instead of the raw gamut information.
+    """
+    from dataclasses import dataclass
+
+    from yoshidacomp.compensation.pipeline import generate_projection_image
+
+    @dataclass(frozen=True)
+    class Projector:
+        width: int = 4
+        height: int = 4
+        gamma: float = 2.2
+
+    target, matrices = _out_of_gamut_setup()
+    with pytest.raises(ValueError, match="clip=False requires a float dtype"):
+        generate_projection_image(
+            target,
+            matrices,
+            projector=Projector(),
+            active_region=(0, 0, 4, 4),
+            linearizer="none",
+            target_decode="none",
+            clip=False,
+        )
+
+
 def test_gamma_linearizer_brightens_midtones() -> None:
     """逆ガンマは中間調を明るくする（指数は 1/gamma でなければならない）。
 
