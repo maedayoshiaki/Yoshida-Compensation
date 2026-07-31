@@ -40,6 +40,15 @@ def _build_meta(matrix_id: str, context: MatrixContext) -> dict[str, Any]:
 def load_session_matrix(request: LoadMatrixRequest) -> dict[str, Any]:
     """Load a matrix file from disk and register it in the store."""
     projector = get_config().projector
+    # ``Path("")`` is ``Path(".")`` -- a directory -- so an empty box would
+    # otherwise be reported as "not a file: .", which explains nothing.
+    # ``Path("")`` は ``Path(".")`` になるため、空欄のまま送ると
+    # 「. はファイルではない」という無意味な説明になる。ここで先に弾く。
+    if not request.path.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="path is empty; expected the path of a .npy matrix file",
+        )
     try:
         context = load_matrix(Path(request.path), projector)
     except FileNotFoundError as exc:

@@ -100,3 +100,62 @@ def _restore_real_config() -> None:
     reload_config(_REAL_CONFIG_PATH)
     yield
     reload_config(_REAL_CONFIG_PATH)
+
+
+@pytest.fixture
+def stand_in_projector_config(tmp_path):
+    """Return a callable that loads a throwaway projector config for one test.
+
+    Any test whose *assertions* depend on how a matrix classifies
+    (``"projector"`` vs ``"camera"``, and therefore whether the active-region
+    NaN mask runs) must not read those numbers out of the repository's live
+    ``config.toml``. That file is an experiment log edited constantly -- it has
+    eight sibling variants in the working tree right now -- and this project's
+    projector has been 1280x720 in its own history, so "1080x1920 is projector
+    space" is a fact about today's experiment, not about the web layer.
+
+    A stale ``active_*`` rectangle is worse: ``resolve_active_region`` raises
+    when the rectangle does not fit the frame, which turns a web-layer 200 into
+    a 400 and reds the suite for a reason that has nothing to do with the code
+    under test.
+
+    The autouse ``_restore_real_config`` fixture above is still the isolation
+    backstop -- it puts the real config back after the test either way. This
+    fixture only stops assertions from depending on the live file's contents.
+
+    行列の座標空間判定に依存するテストは、実験のたびに編集される実
+    ``config.toml`` の値を当てにしてはならない。代用configをテスト内で
+    読み込み、後始末は上の autouse フィクスチャに任せる。
+    """
+
+    def _load(
+        width: int,
+        height: int,
+        *,
+        active_x: int = 0,
+        active_y: int = 0,
+        active_width: int = 0,
+        active_height: int = 0,
+    ) -> Path:
+        """Write and activate a minimal ``[projector]`` config; return its path.
+
+        Non-positive ``active_width``/``active_height`` keep the full frame,
+        matching ``resolve_active_region``'s own default.
+        """
+        path = tmp_path / "stand_in_projector_config.toml"
+        path.write_text(
+            f"""
+[projector]
+width = {width}
+height = {height}
+active_x = {active_x}
+active_y = {active_y}
+active_width = {active_width}
+active_height = {active_height}
+""",
+            encoding="utf-8",
+        )
+        reload_config(path)
+        return path
+
+    return _load

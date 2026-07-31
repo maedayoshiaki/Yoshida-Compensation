@@ -53,17 +53,55 @@ def classify_space(height: int, width: int, projector: ProjectorConfig) -> Matri
 def load_matrix(path: Path, projector: ProjectorConfig) -> MatrixContext:
     """Load a ``(H, W, 4, 3)`` float matrix and classify its space.
 
+    Every way this can fail is one of exactly two exception types, because the
+    router maps exactly two (``routers/session.py``) and anything else reaches
+    the user as a bare 500 whose plain-text body ``jsonOrThrow``
+    (``static/js/api.js``) cannot even parse.
+    失敗経路は必ずこの2種類のどちらかにする。それ以外はルータの対応表から
+    漏れて素の500になり、フロントは理由を表示できない。
+
     Raises:
-        FileNotFoundError: path does not exist.
-        ValueError: the array is not shaped ``(H, W, 4, 3)``.
+        FileNotFoundError: the path does not exist. 存在しないパス。
+        ValueError: the path exists but cannot become a single
+            ``(H, W, 4, 3)`` array -- a directory, an ``.npz`` archive rather
+            than a bare ``.npy`` (this repository stores inverse LUTs that
+            way, so it is a routine paste), an unreadable or corrupt file, or
+            the right kind of file with the wrong shape. The message always
+            names the path, since the router hands it straight to the user.
+            存在するが単一の ``(H, W, 4, 3)`` 配列にならない場合。ディレクトリ、
+            ``.npz``、破損ファイル、形状違いが該当。メッセージには必ずパスを含める。
     """
     if not path.exists():
         raise FileNotFoundError(str(path))
+    if not path.is_file():
+        raise ValueError(
+            f"not a file: {path} -- expected a .npy holding one (H, W, 4, 3) float array"
+        )
 
-    array = np.load(path, mmap_mode="r")
+    try:
+        loaded = np.load(path, mmap_mode="r")
+    except Exception as exc:  # noqa: BLE001 - any read failure is user-facing input
+        raise ValueError(f"could not read {path} as a .npy array: {exc}") from exc
+
+    if not isinstance(loaded, np.ndarray):
+        # np.load returns a lazy NpzFile for an archive; it has no ``.ndim``,
+        # so without this the next line would AttributeError into a 500.
+        # .npz は NpzFile として返り ``.ndim`` を持たないため、そのままだと
+        # AttributeError から500になる。
+        keys = list(getattr(loaded, "files", []))
+        close = getattr(loaded, "close", None)
+        if close is not None:
+            close()
+        raise ValueError(
+            f"{path} is an .npz archive (contains {keys}), not a single .npy "
+            "array; expected one (H, W, 4, 3) float array"
+        )
+
+    array = loaded
     if array.ndim != 4 or array.shape[2] != 4 or array.shape[3] != 3:
         raise ValueError(
-            f"expected a matrix shaped (H, W, 4, 3), got {tuple(array.shape)}"
+            f"expected a matrix shaped (H, W, 4, 3), got {tuple(array.shape)} "
+            f"from {path}"
         )
 
     height, width = int(array.shape[0]), int(array.shape[1])

@@ -7,6 +7,24 @@
 // ビューの中身は float32 のバイナリで返る。形状と表示レンジは X-* ヘッダ。
 // 同一オリジン配信なので CORS の露出設定なしにヘッダを読める。
 
+// Channel labels arrive as base64 of a UTF-8 JSON array (X-Labels-B64).
+//
+// They cannot be a plain header value: Starlette encodes headers as latin-1, so
+// a Japanese label makes the whole response a 500. They cannot be comma-joined
+// either: a label containing a comma would split into two, producing more
+// labels than channels and shifting every tile caption after it. Decoding here
+// mirrors routers/view.py::encode_labels.
+//
+// ラベルは UTF-8 JSON の base64 で届く。ヘッダ値はlatin-1なので日本語ラベルは
+// 500になり、カンマ連結はラベル内のカンマで壊れる。routers/view.py の
+// encode_labels と対になっている。
+function decodeLabels(header) {
+  if (!header) return [];
+  const binary = atob(header);
+  const bytes = Uint8Array.from(binary, (ch) => ch.charCodeAt(0));
+  return JSON.parse(new TextDecoder("utf-8").decode(bytes));
+}
+
 async function jsonOrThrow(res) {
   if (!res.ok) {
     let detail = res.statusText;
@@ -53,6 +71,6 @@ export async function fetchView(matrixId, key, params) {
     kind: res.headers.get("X-Kind"),
     vmin: Number(res.headers.get("X-Vmin")),
     vmax: Number(res.headers.get("X-Vmax")),
-    labels: (res.headers.get("X-Labels") || "").split(","),
+    labels: decodeLabels(res.headers.get("X-Labels-B64")),
   };
 }

@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import contextlib
+import json
+
 import numpy as np
 import pytest
 
@@ -9,24 +13,32 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from yoshidacomp.config import reload_config  # noqa: E402
 from yoshidacomp_web.app import create_app  # noqa: E402
 from yoshidacomp_web.store import store  # noqa: E402
+from yoshidacomp_web.views.base import (  # noqa: E402
+    REGISTRY,
+    ParamSpec,
+    ViewResult,
+    ViewSpec,
+    register,
+)
+from yoshidacomp_web.views.coef_tiles import LABELS, SPEC  # noqa: E402
 
-# The real config.toml (1920x1080 projector) is restored before/after every
-# test by the autouse fixture in tests/conftest.py. This file still imports
-# ``reload_config`` itself: the active-region mask test below
-# (test_coef_tiles_masks_outside_active_region) loads its own tiny stand-in
-# projector config mid-test, which conftest's fixture then cleans up
-# afterwards.
-# 実 config.toml（1920x1080プロジェクタ）は tests/conftest.py の autouse
-# フィクスチャが毎テストの前後で復元する。本ファイルが ``reload_config``
-# を引き続き import しているのは、下記の有効領域マスクのテストが
-# テスト内で小さな代用プロジェクタconfigを自前で読み込むため
-# （後始末は conftest 側のフィクスチャが行う）。
+# Every test here loads its own stand-in projector config
+# (``stand_in_projector_config``, tests/conftest.py) rather than relying on the
+# developer's live config.toml: whether a 6x8 matrix classifies as "camera"
+# space -- and therefore whether the active-region NaN mask runs at all -- is
+# decided by that file, which is edited constantly. The autouse fixture in
+# conftest.py still restores the real config afterwards.
+# 6x8 の行列が "camera" と判定されるか（＝NaNマスクが走るか）は config.toml
+# 次第なので、各テストは代用configを自前で読み込む。
+
+# A stand-in frame that is neither 6x8 nor its transpose, so the small test
+# matrices below always classify as camera space.
+_CAMERA_SAFE_FRAME = {"width": 64, "height": 48}
 
 
-def _load(client, tmp_path, height=1080, width=1920):
+def _load(client, tmp_path, *, height: int, width: int):
     matrices = np.zeros((height, width, 4, 3), dtype=np.float32)
     xs = np.arange(width, dtype=np.float32)[None, :]
     # 空間的に変化させる。一様だと座標の取り違えを検出できない。
@@ -36,6 +48,45 @@ def _load(client, tmp_path, height=1080, width=1920):
     np.save(path, matrices)
     response = client.post("/api/session/matrix", json={"path": str(path)})
     return response.json()["id"]
+
+
+def _decode_labels(response) -> list[str]:
+    """Decode ``X-Labels-B64`` exactly the way ``static/js/api.js`` does."""
+    return json.loads(base64.b64decode(response.headers["X-Labels-B64"]).decode("utf-8"))
+
+
+@contextlib.contextmanager
+def _temporary_view(key: str, labels: list[str], *, channels=None, params=None, kind="scalar"):
+    """Register a throwaway view for the duration of a ``with`` block.
+
+    Registering rather than adding a real view keeps these contract tests
+    independent of which views happen to ship.
+    実ビューを増やさずに契約だけを検証するため、使い捨てビューを登録する。
+    """
+    declared = len(labels) if channels is None else channels
+
+    def _render(context, params_: dict) -> ViewResult:
+        height, width = context.array.shape[0], context.array.shape[1]
+        return ViewResult(
+            data=np.zeros((height, width, len(labels)), dtype=np.float32),
+            vmin=0.0,
+            vmax=1.0,
+            labels=labels,
+        )
+
+    spec = ViewSpec(
+        key=key,
+        label="test-only",
+        kind=kind,
+        channels=declared,
+        params=list(params or []),
+        render=_render,
+    )
+    register(spec)
+    try:
+        yield spec
+    finally:
+        REGISTRY.pop(key, None)
 
 
 def test_views_endpoint_lists_coef_tiles() -> None:
@@ -49,7 +100,8 @@ def test_views_endpoint_lists_coef_tiles() -> None:
     assert spec["channels"] == 12
 
 
-def test_coef_tiles_returns_float32_binary(tmp_path) -> None:
+def test_coef_tiles_returns_float32_binary(tmp_path, stand_in_projector_config) -> None:
+    stand_in_projector_config(**_CAMERA_SAFE_FRAME)
     store.clear()
     client = TestClient(create_app())
     matrix_id = _load(client, tmp_path, height=6, width=8)
@@ -68,25 +120,128 @@ def test_coef_tiles_returns_float32_binary(tmp_path) -> None:
     assert np.allclose(array[:, :, 10], -1.0)
 
 
-def test_unknown_view_is_404(tmp_path) -> None:
+def test_coef_tiles_label_format_is_the_4x3_grid_contract(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """``"<入力> -> <出力>"`` is what lays the 12 tiles out as a 4x3 matrix.
+
+    ``static/js/main.js`` (``axesFromLabels``) splits every label on ``"->"``
+    and derives the row and column axes from the two halves. A label with a
+    different separator, or with more than one ``"->"``, silently falls through
+    to ``fallbackAxes`` and collapses the grid to a single row of 12 -- the
+    view still renders, so nothing fails, it just stops looking like a matrix.
+    Nothing else on either side of the wire pinned this format, which is why it
+    is pinned here, at the point where the labels are produced, and again over
+    the wire so an encoding change cannot quietly reshape them.
+
+    ラベルの ``"<入力> -> <出力>"`` 形式が4x3グリッドの唯一の根拠であり、
+    崩れても描画は成功して1行12枚になるだけなので気付けない。生成箇所と
+    ヘッダ経由の両方で形式を固定する。
+    """
+    assert LABELS == [
+        "in_R -> out_R",
+        "in_R -> out_G",
+        "in_R -> out_B",
+        "in_G -> out_R",
+        "in_G -> out_G",
+        "in_G -> out_B",
+        "in_B -> out_R",
+        "in_B -> out_G",
+        "in_B -> out_B",
+        "bias -> out_R",
+        "bias -> out_G",
+        "bias -> out_B",
+    ]
+    assert len(LABELS) == SPEC.channels
+    for label in LABELS:
+        assert label.count("->") == 1, label
+        left, right = label.split("->")
+        assert left.strip() and right.strip(), label
+
+    stand_in_projector_config(**_CAMERA_SAFE_FRAME)
+    store.clear()
+    client = TestClient(create_app())
+    matrix_id = _load(client, tmp_path, height=6, width=8)
+    response = client.get(f"/api/matrix/{matrix_id}/view/coef_tiles")
+    assert _decode_labels(response) == LABELS
+
+
+def test_labels_survive_non_ascii_and_embedded_commas(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """Header labels must round-trip Japanese text and commas untouched.
+
+    Two independent failures of the old comma-joined ``X-Labels`` header:
+
+    - Starlette encodes header values as latin-1, so a Japanese label -- e.g.
+      the planned ``gamut`` view's 「色域外」 -- raised on the way out and the
+      whole response became a 500. This codebase's UI strings are Japanese
+      already (``coef_tiles`` is labelled 「12係数タイル」), so this was the
+      next view's problem, not a remote one.
+    - A label containing a comma split into two on the client, yielding more
+      labels than channels and shifting every tile caption after it.
+
+    latin-1 のヘッダに日本語ラベルを載せると500になり、カンマ入りラベルは
+    分割されて以降のタイル名がすべてずれる。base64+UTF-8 JSON で両方を防ぐ。
+    """
+    labels = ["色域外", "範囲内", "a, b", "in_R -> out_R"]
+    with _temporary_view("_test_labels", labels):
+        stand_in_projector_config(**_CAMERA_SAFE_FRAME)
+        store.clear()
+        client = TestClient(create_app())
+        matrix_id = _load(client, tmp_path, height=6, width=8)
+
+        response = client.get(f"/api/matrix/{matrix_id}/view/_test_labels")
+        assert response.status_code == 200
+        assert _decode_labels(response) == labels
+        # The comma-joined form is gone: nothing may fall back to splitting.
+        assert "X-Labels" not in response.headers
+
+
+def test_declared_channels_must_match_the_rendered_array(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """``/api/views`` advertises ``spec.channels``; the array must agree.
+
+    The frontend builds its tiles and its hover readout from the advertised
+    count, so a view that declares 99 and renders 3 would have produced a
+    200 OK and a silently wrong grid.
+    宣言チャンネル数と実際の配列が食い違えば200のまま表示が壊れるため、
+    サーバ側で明示的に失敗させる。
+    """
+    with _temporary_view("_test_channel_mismatch", ["a", "b", "c"], channels=99):
+        stand_in_projector_config(**_CAMERA_SAFE_FRAME)
+        store.clear()
+        client = TestClient(create_app(), raise_server_exceptions=False)
+        matrix_id = _load(client, tmp_path, height=6, width=8)
+
+        response = client.get(f"/api/matrix/{matrix_id}/view/_test_channel_mismatch")
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert "99" in detail and "3" in detail
+
+
+def test_unknown_view_is_404(tmp_path, stand_in_projector_config) -> None:
+    stand_in_projector_config(**_CAMERA_SAFE_FRAME)
     store.clear()
     client = TestClient(create_app())
     matrix_id = _load(client, tmp_path, height=6, width=8)
     assert client.get(f"/api/matrix/{matrix_id}/view/nosuch").status_code == 404
 
 
-def test_coef_tiles_masks_outside_active_region(tmp_path) -> None:
+def test_coef_tiles_masks_outside_active_region(tmp_path, stand_in_projector_config) -> None:
     """The NaN mask must honour ``(x, y, w, h)`` as-is, not a transposed read.
 
-    Every other test matrix in this file is 6x8, which ``classify_space``
-    puts in "camera" space, so ``active_region`` is ``None`` and the masking
-    branch in ``coef_tiles._render`` never runs -- a transposed ``x``/``y``
-    (or ``w``/``h``) in ``mask[y : y + h, x : x + w]``, or a dropped
-    ``.copy()`` before ``data[~mask] = np.nan``, would go undetected.
+    Every other test matrix in this file is 6x8 against a 64x48 stand-in
+    frame, which ``classify_space`` puts in "camera" space, so
+    ``active_region`` is ``None`` and the masking branch in
+    ``coef_tiles._render`` never runs -- a transposed ``x``/``y`` (or
+    ``w``/``h``) in ``mask[y : y + h, x : x + w]``, or a dropped ``.copy()``
+    before ``data[~mask] = np.nan``, would go undetected.
 
-    This test loads a small stand-in projector config (rather than
-    allocating a real 1920x1080x12 float array) so the matrix classifies as
-    "projector" and ``active_region`` is set. The frame is non-square
+    This test asks ``stand_in_projector_config`` for a small frame (rather
+    than allocating a real 1920x1080x12 float array) so the matrix classifies
+    as "projector" and ``active_region`` is set. The frame is non-square
     (height != width) and the active rectangle sits off-centre near a
     corner with unequal width/height, so a row/column transposition lands
     on a disjoint set of pixels: the full finite/NaN mask is compared
@@ -105,20 +260,14 @@ def test_coef_tiles_masks_outside_active_region(tmp_path) -> None:
     height, width = 6, 10
     x, y, w, h = 3, 1, 4, 2  # active rect occupies rows 1-2, cols 3-6.
 
-    config_path = tmp_path / "stand_in_config.toml"
-    config_path.write_text(
-        f"""
-[projector]
-width = {width}
-height = {height}
-active_x = {x}
-active_y = {y}
-active_width = {w}
-active_height = {h}
-""",
-        encoding="utf-8",
+    stand_in_projector_config(
+        width=width,
+        height=height,
+        active_x=x,
+        active_y=y,
+        active_width=w,
+        active_height=h,
     )
-    reload_config(config_path)
 
     store.clear()
     client = TestClient(create_app())
@@ -144,33 +293,15 @@ active_height = {h}
     assert np.all(np.isnan(data[x, y]))
 
 
-def test_bad_number_param_is_400_not_500(tmp_path) -> None:
+def test_bad_number_param_is_400_not_500(tmp_path, stand_in_projector_config) -> None:
     """A malformed ``number`` query param must 400, not crash into a 500.
 
     Registers a throwaway view with a ``number`` param rather than adding a
     real view — no shipped view uses ``type="number"`` today.
     """
-    from yoshidacomp_web.views.base import REGISTRY, ParamSpec, ViewResult, ViewSpec, register
-
-    def _render(context, params) -> ViewResult:
-        height, width = context.array.shape[0], context.array.shape[1]
-        return ViewResult(
-            data=np.zeros((height, width, 1), dtype=np.float32),
-            vmin=0.0,
-            vmax=1.0,
-            labels=["x"],
-        )
-
-    spec = ViewSpec(
-        key="_test_number_param",
-        label="test-only",
-        kind="scalar",
-        channels=1,
-        params=[ParamSpec(name="scale", label="scale", type="number", default=1.0)],
-        render=_render,
-    )
-    register(spec)
-    try:
+    params = [ParamSpec(name="scale", label="scale", type="number", default=1.0)]
+    with _temporary_view("_test_number_param", ["x"], params=params):
+        stand_in_projector_config(**_CAMERA_SAFE_FRAME)
         store.clear()
         client = TestClient(create_app())
         matrix_id = _load(client, tmp_path, height=6, width=8)
@@ -182,5 +313,3 @@ def test_bad_number_param_is_400_not_500(tmp_path) -> None:
         assert response.status_code == 400
         assert "scale" in response.json()["detail"]
         assert "abc" in response.json()["detail"]
-    finally:
-        REGISTRY.pop(spec.key, None)
