@@ -16,7 +16,9 @@
 - `torch` は `pytorch-cu128` インデックスから取得する（workspace root の `[tool.uv.sources]` で指定）
 - GrayCode は `external/GrayCode` の submodule のまま。`tests/conftest.py` の `sys.path` 挿入は維持する
 - コミットメッセージは日本語。コード・コメント・docstring は現行の英日併記スタイルを維持する
-- **各タスクの完了時に `python -m pytest -q` が 70 passed であること**
+- **各タスクの完了時に `.venv/Scripts/python.exe -m pytest -q` が全て緑であること。**
+  期待件数は各タスクの Step 5 に記載（開始時点は 70 passed）。移行中も `src/python/`
+  は import 可能なまま残すため、どのタスクの終了時点でも suite は緑になる
 - 実行は `.venv/Scripts/python.exe` を使う（`uv run` でも可）
 
 ---
@@ -411,7 +413,7 @@ grep -rn "src\.python\.photometric_compensation\|src\.python\.color_mixing_matri
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 75 passed（74 + 新規1）
+Expected: 76 passed（74 + 新規1、および Task 4 の回帰テスト1件）
 
 - [ ] **Step 6: コミット**
 
@@ -472,7 +474,7 @@ grep -rn "src\.python\.camera" src tests examples --include='*.py'
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 76 passed（75 + 新規1）
+Expected: 77 passed（76 + 新規1）
 
 - [ ] **Step 6: コミット**
 
@@ -560,7 +562,7 @@ grep -rn "src\.python.*inverse_lut" src tests examples --include='*.py'
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 77 passed（76 + 新規1）
+Expected: 78 passed（77 + 新規1）
 
 `tests/test_sample_inverse_lut_mocked.py` と `tests/test_validate_inverse_lut_mocked.py` は
 `sys.modules` にスタブを差し込む形式なので、スタブ側のキー名も `src.python.*` から
@@ -649,7 +651,7 @@ grep -rn "src\.python" . --include='*.py'
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 78 passed（77 + 新規1）
+Expected: 79 passed（78 + 新規1）
 
 - [ ] **Step 6: コミット**
 
@@ -822,7 +824,7 @@ from yoshidacomp.geometry.warp import (
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 81 passed（78 + 新規3）
+Expected: 82 passed（79 + 新規3）
 
 - [ ] **Step 6: コミット**
 
@@ -995,7 +997,7 @@ LINEARIZERS = {
 - [ ] **Step 5: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 85 passed（81 + 新規4）
+Expected: 86 passed（82 + 新規4）
 
 - [ ] **Step 6: 既存CLIとの出力一致を実データで確認**
 
@@ -1143,7 +1145,7 @@ module scope にあればメソッド内へ移す。
 - [ ] **Step 4: テストが通ることを確認**
 
 Run: `.venv/Scripts/python.exe -m pytest -q`
-Expected: 87 passed（85 + 新規2）
+Expected: 88 passed（86 + 新規2）
 
 - [ ] **Step 5: README を更新**
 
