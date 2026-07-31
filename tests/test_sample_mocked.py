@@ -1016,15 +1016,23 @@ def test_sample_warps_camera_target_for_p2c(
 def test_warp_camera_array_to_projector_uses_actual_output_shape_for_p2c(
     monkeypatch,
 ) -> None:
+    # create_warper / warp_camera_array_to_projector now live in
+    # yoshidacomp.geometry.warp (Task 8 extraction). They must be patched
+    # and invoked there directly: sample.py only re-exports the public
+    # warp_image / warp_color_mixing_matrices_to_projector / invwarp_image
+    # wrappers, and a monkeypatch on the sample module cannot affect a
+    # function body executing in another module's globals.
+    from yoshidacomp.geometry import warp as warp_module
+
     src_array = np.zeros((6, 4, 3), dtype=np.uint8)
 
     class FakeWarper:
         def backward_warp(self, src_tensor, dst_size, inpaint):
             return sample.torch.zeros((src_tensor.shape[0], 2, 3), dtype=src_tensor.dtype)
 
-    monkeypatch.setattr(sample, "_create_warper", lambda *args, **kwargs: FakeWarper())
+    monkeypatch.setattr(warp_module, "create_warper", lambda *args, **kwargs: FakeWarper())
 
-    warped = sample._warp_camera_array_to_projector(
+    warped = warp_module.warp_camera_array_to_projector(
         src_array,
         "dummy.npy",
         proj_width=3,
@@ -1040,6 +1048,10 @@ def test_warp_camera_array_to_projector_uses_actual_output_shape_for_p2c(
 def test_warp_camera_array_to_projector_uses_actual_output_shape_for_c2p(
     monkeypatch,
 ) -> None:
+    # See note in the p2c variant above: patch target moved to
+    # yoshidacomp.geometry.warp after the Task 8 extraction.
+    from yoshidacomp.geometry import warp as warp_module
+
     src_array = np.zeros((6, 4, 3), dtype=np.uint8)
 
     class FakeWarper:
@@ -1056,9 +1068,9 @@ def test_warp_camera_array_to_projector_uses_actual_output_shape_for_c2p(
                 assert inpaint_iter == 3
                 return sample.torch.zeros((src_tensor.shape[0], 2, 3), dtype=src_tensor.dtype)
 
-    monkeypatch.setattr(sample, "_create_warper", lambda *args, **kwargs: FakeWarper())
+    monkeypatch.setattr(warp_module, "create_warper", lambda *args, **kwargs: FakeWarper())
 
-    warped = sample._warp_camera_array_to_projector(
+    warped = warp_module.warp_camera_array_to_projector(
         src_array,
         "dummy.npy",
         proj_width=3,
