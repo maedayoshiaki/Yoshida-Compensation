@@ -282,6 +282,17 @@ uv run --no-sync python -m yoshidacomp_web
 
 `http://127.0.0.1:8000` を開き、行列の `.npy` パスを入力する。
 
+ポート 8000 が別のプロセスに使われている環境では、起動が
+`[WinError 10013] ソケットにアクセスしようとしました` で失敗する。
+`python -m yoshidacomp_web` はポートを 8000 に固定しているため、
+その場合は uvicorn を直接呼んでポートを変える。
+
+```bash
+uv run --no-sync python -m uvicorn yoshidacomp_web.app:app --host 127.0.0.1 --port 8123
+```
+
+使用中のプロセスは `Get-NetTCPConnection -LocalPort 8000` で確認できる。
+
 ## ライブラリとしての利用
 
 `yoshidacomp` パッケージ（`packages/core/yoshidacomp/`）を直接インポートして利用することもできます。
