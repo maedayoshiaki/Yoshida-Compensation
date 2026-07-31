@@ -17,7 +17,7 @@ import cv2
 import numpy as np
 
 from examples.python.sample import capture_image
-from src.python.config import get_config, reload_config, split_cli_config_path
+from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]

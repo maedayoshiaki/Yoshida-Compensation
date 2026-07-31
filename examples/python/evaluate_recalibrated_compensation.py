@@ -17,7 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from examples.python import evaluate_compensation_conditions as evaluation
 from examples.python import sample
-from src.python.config import reload_config
+from yoshidacomp.config import reload_config
 
 
 _CONDITIONS = ("no_comp", "comp_gamma")

@@ -28,7 +28,7 @@ import numpy as np
 from scipy.interpolate import PchipInterpolator
 
 from src.python.camera import create_camera_backend
-from src.python.config import get_config
+from yoshidacomp.config import get_config
 
 
 # Wall-clock settle time between projecting a new pattern and capturing it, so

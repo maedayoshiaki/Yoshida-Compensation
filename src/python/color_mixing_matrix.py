@@ -16,7 +16,7 @@ from typing import List, Optional
 import torch
 import psutil
 
-from src.python.config import get_config
+from yoshidacomp.config import get_config
 
 
 def generate_projection_patterns(

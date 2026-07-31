@@ -10,7 +10,7 @@ implementations.
 
 from __future__ import annotations
 
-from src.python.config import CameraConfig
+from yoshidacomp.config import CameraConfig
 
 from .base import CameraBackend, CameraCaptureError
 from .canon_edsdk import CanonEdsdkCamera

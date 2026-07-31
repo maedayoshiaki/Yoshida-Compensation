@@ -24,7 +24,7 @@ from examples.python.sample import (
 from graycode.config import (
     reload_config as reload_graycode_config,
 )
-from src.python.config import get_config, reload_config, split_cli_config_path
+from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
 
 def main(argv: list[str] | None = None) -> None:

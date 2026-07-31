@@ -28,7 +28,7 @@ from graycode.interpolate_p2c import interpolate_p2c_delaunay
 
 from examples.python.sample import capture_to_srgb_uint8
 from src.python.camera import create_camera_backend
-from src.python.config import reload_config
+from yoshidacomp.config import reload_config
 from src.python.projection_region import mask_to_active_region, resolve_active_region
 
 

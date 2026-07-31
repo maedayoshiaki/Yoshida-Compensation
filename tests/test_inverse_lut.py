@@ -8,7 +8,7 @@ if str(_REPO_ROOT) not in sys.path:
 import numpy as np
 import pytest
 
-from src.python.config import (
+from yoshidacomp.config import (
     AppConfig,
     CameraConfig,
     InverseLutConfig,

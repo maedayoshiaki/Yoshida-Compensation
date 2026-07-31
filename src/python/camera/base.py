@@ -14,7 +14,7 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
-from src.python.config import CameraConfig
+from yoshidacomp.config import CameraConfig
 
 
 class CameraCaptureError(RuntimeError):

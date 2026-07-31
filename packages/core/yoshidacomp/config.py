@@ -22,8 +22,8 @@ from math import isfinite
 from pathlib import Path
 from typing import Optional, Sequence
 
-# Project root: two levels up from src/python/config.py
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# Project root: four levels up from packages/core/yoshidacomp/config.py
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.toml"
 
 

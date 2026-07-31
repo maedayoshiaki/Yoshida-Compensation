@@ -47,7 +47,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from src.python import inverse_lut as ilut
-from src.python.config import get_config, reload_config, split_cli_config_path
+from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
 # Output directories for the LUT-linearized artifacts. Kept separate from
 # sample.py's ``inv_gamma_*`` outputs so the two corrections can be compared

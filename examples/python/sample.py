@@ -49,7 +49,7 @@ from src.python.camera import CameraCaptureError, create_camera_backend
 from src.python.photometric_compensation import (
     calc_compensation_image,
 )
-from src.python.config import (
+from yoshidacomp.config import (
     PathsConfig,
     get_config,
     reload_config,

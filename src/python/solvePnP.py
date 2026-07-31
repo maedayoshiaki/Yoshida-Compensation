@@ -8,7 +8,7 @@ import numpy as np
 
 from edsdk.camera_controller import CameraController
 from src.python.camera.canon_edsdk import capture_srgb_uint8
-from src.python.config import get_config, reload_config, split_cli_config_path
+from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
 
 @dataclass(frozen=True)

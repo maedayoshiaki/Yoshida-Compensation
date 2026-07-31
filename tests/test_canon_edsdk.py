@@ -9,7 +9,7 @@ import pytest
 from src.python.camera import canon_edsdk
 from src.python.camera.base import CameraCaptureError
 from src.python.camera.canon_edsdk import CanonEdsdkCamera, _raw_to_linear_rgb
-from src.python.config import CameraConfig
+from yoshidacomp.config import CameraConfig
 
 
 def _srgb_to_linear(value: float) -> float:

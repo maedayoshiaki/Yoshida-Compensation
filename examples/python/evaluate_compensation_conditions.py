@@ -30,7 +30,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from examples.python import sample
-from src.python.config import reload_config
+from yoshidacomp.config import reload_config
 
 
 BASE_CONDITIONS = (
