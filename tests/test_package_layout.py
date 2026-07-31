@@ -118,3 +118,29 @@ def test_capture_package_exposes_backend_factory() -> None:
     import yoshidacomp.capture as capture
 
     assert hasattr(capture, "create_camera_backend")
+
+
+def test_inverse_lut_lives_in_core(tmp_path) -> None:
+    import numpy as np
+    from yoshidacomp.compensation.inverse_lut import (
+        InverseLut,
+        apply_inverse_lut,
+        load_inverse_lut,
+        save_inverse_lut,
+    )
+
+    t_grid = np.linspace(0.0, 1.0, 256).astype(np.float32)
+    lut = InverseLut(
+        lut=np.stack([t_grid, t_grid, t_grid]).astype(np.float32),
+        t_grid=t_grid,
+        knots=[],
+        meta={"source": "channel_ramp"},
+    )
+    path = save_inverse_lut(tmp_path / "identity.npz", lut)
+    reloaded = load_inverse_lut(path)
+    assert reloaded.lut.shape == (3, 256)
+
+    # identity LUT なので入力がそのまま返る
+    image = np.full((1, 1, 3), 0.25, dtype=np.float32)
+    out = apply_inverse_lut(image, reloaded, dtype=np.float32)
+    assert np.allclose(out, 0.25, atol=1e-3)

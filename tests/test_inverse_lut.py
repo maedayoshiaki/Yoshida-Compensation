@@ -15,7 +15,7 @@ from yoshidacomp.config import (
     ProjectorConfig,
     reload_config,
 )
-from src.python import inverse_lut as ilut
+from yoshidacomp.compensation import inverse_lut as ilut
 
 
 # ── Task 1: config ───────────────────────────────────────────────────

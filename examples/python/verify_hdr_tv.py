@@ -38,7 +38,7 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
-from src.python.inverse_lut import scale_shutter_tv, tv_to_seconds
+from yoshidacomp.compensation.inverse_lut import scale_shutter_tv, tv_to_seconds
 
 
 def _bracket_scales(max_stops: int) -> list[tuple[str, float]]:

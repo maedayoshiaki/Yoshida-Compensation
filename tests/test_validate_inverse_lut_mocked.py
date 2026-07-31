@@ -22,7 +22,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.python import inverse_lut as ilut
+from yoshidacomp.compensation import inverse_lut as ilut
 
 _WHITE = 0.9  # < trust_high (245/255) so the top level is not "saturated"
 

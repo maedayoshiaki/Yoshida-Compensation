@@ -44,7 +44,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from yoshidacomp.compensation.color_mixing_matrix import apply_inverse_gamma_correction
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
-from src.python.inverse_lut import (
+from yoshidacomp.compensation.inverse_lut import (
     InverseLut,
     _PROJECTION_SETTLE_SECONDS,
     apply_inverse_lut,

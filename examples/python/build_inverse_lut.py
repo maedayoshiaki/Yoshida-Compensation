@@ -29,7 +29,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from src.python import inverse_lut as ilut
+from yoshidacomp.compensation import inverse_lut as ilut
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 from yoshidacomp.compensation.projection_region import mask_to_active_region, resolve_active_region
 

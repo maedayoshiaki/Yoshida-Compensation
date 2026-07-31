@@ -264,7 +264,7 @@ def test_capture_projection_patterns_defers_canon_development(monkeypatch) -> No
 def test_capture_projection_patterns_merges_triggered_hdr_passes(
     monkeypatch,
 ) -> None:
-    from src.python import inverse_lut
+    from yoshidacomp.compensation import inverse_lut
 
     patterns = [
         np.zeros((2, 2, 3), dtype=np.uint8),

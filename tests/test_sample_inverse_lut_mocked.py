@@ -50,7 +50,7 @@ def _load_new_sample_module():
 
 new_sample = _load_new_sample_module()
 
-from src.python import inverse_lut as ilut
+from yoshidacomp.compensation import inverse_lut as ilut
 
 
 def _save_rgb_image(path: Path, image: np.ndarray) -> None:

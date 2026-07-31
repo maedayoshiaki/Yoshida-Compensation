@@ -643,7 +643,7 @@ def capture_projection_patterns(
                         )
 
                 if hdr_enabled:
-                    from src.python import inverse_lut as hdr_utils
+                    from yoshidacomp.compensation import inverse_lut as hdr_utils
 
                     ilut_cfg = cfg.inverse_lut
                     low = float(ilut_cfg.trust_low) / 255.0
