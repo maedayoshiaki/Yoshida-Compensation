@@ -61,7 +61,13 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
         if raw is None:
             continue
         if p.type == "number":
-            params[p.name] = float(raw)
+            try:
+                params[p.name] = float(raw)
+            except ValueError:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{p.name} must be a number, got {raw!r}",
+                ) from None
         elif p.type == "select":
             if p.choices and raw not in p.choices:
                 raise HTTPException(

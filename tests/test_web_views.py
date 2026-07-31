@@ -78,3 +78,45 @@ def test_unknown_view_is_404(tmp_path) -> None:
     client = TestClient(create_app())
     matrix_id = _load(client, tmp_path, height=6, width=8)
     assert client.get(f"/api/matrix/{matrix_id}/view/nosuch").status_code == 404
+
+
+def test_bad_number_param_is_400_not_500(tmp_path) -> None:
+    """A malformed ``number`` query param must 400, not crash into a 500.
+
+    Registers a throwaway view with a ``number`` param rather than adding a
+    real view — no shipped view uses ``type="number"`` today.
+    """
+    from yoshidacomp_web.views.base import REGISTRY, ParamSpec, ViewResult, ViewSpec, register
+
+    def _render(context, params) -> ViewResult:
+        height, width = context.array.shape[0], context.array.shape[1]
+        return ViewResult(
+            data=np.zeros((height, width, 1), dtype=np.float32),
+            vmin=0.0,
+            vmax=1.0,
+            labels=["x"],
+        )
+
+    spec = ViewSpec(
+        key="_test_number_param",
+        label="test-only",
+        kind="scalar",
+        channels=1,
+        params=[ParamSpec(name="scale", label="scale", type="number", default=1.0)],
+        render=_render,
+    )
+    register(spec)
+    try:
+        store.clear()
+        client = TestClient(create_app())
+        matrix_id = _load(client, tmp_path, height=6, width=8)
+
+        response = client.get(
+            f"/api/matrix/{matrix_id}/view/_test_number_param",
+            params={"scale": "abc"},
+        )
+        assert response.status_code == 400
+        assert "scale" in response.json()["detail"]
+        assert "abc" in response.json()["detail"]
+    finally:
+        REGISTRY.pop(spec.key, None)
