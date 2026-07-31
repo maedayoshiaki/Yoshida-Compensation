@@ -186,7 +186,11 @@ def decode_target(
         return srgb_to_linear(normalized).astype(np.float32)
     if mode == "gamma":
         if not np.isfinite(gamma) or gamma <= 0:
-            raise ValueError("--target-gamma must be a finite positive number.")
+            # 引数名で通知する。ここはライブラリなので、呼び出し側が CLI とは
+            # 限らず、"--target-gamma" というフラグ名は文脈を持たない。
+            raise ValueError(
+                f"gamma must be a finite positive number, got {gamma!r}."
+            )
         return np.power(normalized, gamma).astype(np.float32)
     raise ValueError(f"Unsupported target decode mode: {mode!r}")
 
