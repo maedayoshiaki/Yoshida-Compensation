@@ -108,8 +108,13 @@ def test_calc_compensation_image_float_dtype_is_not_binarized() -> None:
     assert int(uint8_out[0, 0, 0]) == 128
 
 
-def test_capture_package_imports_without_sdk() -> None:
-    """edsdk / rawpy が無くても import できること（遅延importの確認）。"""
+def test_capture_package_exposes_backend_factory() -> None:
+    """`yoshidacomp.capture` が import でき、バックエンド生成口を公開すること。
+
+    SDK非搭載環境でも import できることの保証は Task 10 の
+    `tests/test_package_boundaries.py::test_core_imports_without_camera_sdk`
+    が担う（このvenvには rawpy と edsdk が実在するため、ここでは検証できない）。
+    """
     import yoshidacomp.capture as capture
 
     assert hasattr(capture, "create_camera_backend")
