@@ -81,3 +81,28 @@ def test_compensation_math_lives_in_core() -> None:
     target = np.full((1, 1, 3), 0.5, dtype=np.float32)
     out = calc_compensation_image(target, identity, dtype=np.float32)
     assert np.allclose(out, 0.5, atol=1e-5)
+
+
+def test_calc_compensation_image_float_dtype_is_not_binarized() -> None:
+    """Regression test: calc_compensation_image used to apply floor(x + 0.5)
+    (integer-style rounding) unconditionally, even for float dtype output,
+    silently collapsing any value into {0.0, 1.0}. Float output must keep
+    its actual value; uint8 output must still scale to 0-255 and round
+    half-up.
+    """
+    import numpy as np
+    from yoshidacomp.compensation.photometric_compensation import calc_compensation_image
+
+    identity = np.zeros((1, 1, 4, 3), dtype=np.float32)
+    identity[0, 0, 0, 0] = 1.0
+    identity[0, 0, 1, 1] = 1.0
+    identity[0, 0, 2, 2] = 1.0
+
+    float_target = np.full((1, 1, 3), 0.25, dtype=np.float32)
+    float_out = calc_compensation_image(float_target, identity, dtype=np.float32)
+    assert np.allclose(float_out, 0.25, atol=1e-5)
+
+    uint8_target = np.full((1, 1, 3), 0.5, dtype=np.float32)
+    uint8_out = calc_compensation_image(uint8_target, identity, dtype=np.uint8)
+    assert uint8_out.dtype == np.uint8
+    assert int(uint8_out[0, 0, 0]) == 128

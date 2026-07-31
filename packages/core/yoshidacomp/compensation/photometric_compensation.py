@@ -95,13 +95,14 @@ def calc_compensation_image(
 
     # Scale to output dtype range
     if dtype == np.uint8:
-        max_value = 255.0
+        compensation_image = compensation_image * 255.0
+        compensation_image = np.floor(compensation_image + 0.5).astype(dtype)
     elif dtype == np.uint16:
-        max_value = 65535.0
+        compensation_image = compensation_image * 65535.0
+        compensation_image = np.floor(compensation_image + 0.5).astype(dtype)
     else:
-        max_value = 1.0
-
-    compensation_image = compensation_image * max_value
-    compensation_image = np.floor(compensation_image + 0.5).astype(dtype)
+        # Float dtypes stay in the already-clamped [0, 1] range; rounding to
+        # the nearest integer here would silently binarize the output.
+        compensation_image = compensation_image.astype(dtype)
 
     return compensation_image
