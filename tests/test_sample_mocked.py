@@ -6,6 +6,8 @@ import types
 import cv2
 import numpy as np
 
+from yoshidacomp.compensation import pipeline as pipeline_module
+
 
 def _install_optional_dependency_stubs() -> None:
     if "colour" not in sys.modules:
@@ -37,6 +39,18 @@ def _load_sample_module():
 
 
 sample = _load_sample_module()
+
+
+def _patch_warp_helper(monkeypatch, name: str, value) -> None:
+    """Patch a warp helper on both sample and the pipeline module.
+
+    ``prepare_target_image_for_compensation()`` now lives in
+    ``yoshidacomp.compensation.pipeline``, so the warp calls it makes resolve
+    in that module's namespace, while ``sample.main()`` still resolves its own
+    warp calls in ``sample``'s. Patching both keeps every call site covered.
+    """
+    monkeypatch.setattr(sample, name, value)
+    monkeypatch.setattr(pipeline_module, name, value)
 
 
 def _save_rgb_image(path: Path, image: np.ndarray) -> None:
@@ -425,9 +439,9 @@ def test_sample_uses_camera_space_compensation_for_c2p(
         return np.full((image_height, image_width, 3), 123, dtype=np.uint8)
 
     monkeypatch.setattr(sample, "calc_compensation_image", fake_calc_compensation_image)
-    monkeypatch.setattr(sample, "warp_image", fake_warp_image)
-    monkeypatch.setattr(
-        sample,
+    _patch_warp_helper(monkeypatch, "warp_image", fake_warp_image)
+    _patch_warp_helper(
+        monkeypatch,
         "invwarp_image",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("camera-space target should not be inverse warped for c2p")
@@ -539,9 +553,9 @@ def test_sample_inverse_warps_projector_target_for_c2p(
         warp_calls.append(src_image.copy())
         return np.full((image_height, image_width, 3), 123, dtype=np.uint8)
 
-    monkeypatch.setattr(sample, "invwarp_image", fake_invwarp_image)
+    _patch_warp_helper(monkeypatch, "invwarp_image", fake_invwarp_image)
     monkeypatch.setattr(sample, "calc_compensation_image", fake_calc_compensation_image)
-    monkeypatch.setattr(sample, "warp_image", fake_warp_image)
+    _patch_warp_helper(monkeypatch, "warp_image", fake_warp_image)
     monkeypatch.setattr(
         sample,
         "warp_color_mixing_matrices_to_projector",
@@ -611,8 +625,8 @@ def test_sample_saves_warp_debug_images_during_normal_run(
         "calc_color_mixing_matrices",
         lambda *args, **kwargs: color_mixing_matrices,
     )
-    monkeypatch.setattr(
-        sample,
+    _patch_warp_helper(
+        monkeypatch,
         "invwarp_image",
         lambda *args, **kwargs: camera_space_target,
     )
@@ -621,8 +635,8 @@ def test_sample_saves_warp_debug_images_during_normal_run(
         "calc_compensation_image",
         lambda *args, **kwargs: before_warped_compensation,
     )
-    monkeypatch.setattr(
-        sample,
+    _patch_warp_helper(
+        monkeypatch,
         "warp_image",
         lambda *args, **kwargs: final_warped_compensation,
     )
@@ -746,14 +760,14 @@ def test_sample_clears_stale_outputs_and_groups_warp_only_images(
             return alpha_camera_space
         return beta_camera_space
 
-    monkeypatch.setattr(sample, "invwarp_image", fake_invwarp_image)
+    _patch_warp_helper(monkeypatch, "invwarp_image", fake_invwarp_image)
     monkeypatch.setattr(
         sample,
         "calc_compensation_image",
         lambda *args, **kwargs: final_compensation,
     )
-    monkeypatch.setattr(
-        sample,
+    _patch_warp_helper(
+        monkeypatch,
         "warp_image",
         lambda *args, **kwargs: final_compensation,
     )
@@ -833,15 +847,15 @@ def test_sample_uses_projector_space_compensation_for_p2c(
         lambda *args, **kwargs: camera_space_cmm,
     )
 
-    monkeypatch.setattr(
-        sample,
+    _patch_warp_helper(
+        monkeypatch,
         "warp_image",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("projector-space target should not be warped for p2c")
         ),
     )
-    monkeypatch.setattr(
-        sample,
+    _patch_warp_helper(
+        monkeypatch,
         "invwarp_image",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("p2c should not inverse warp projector-space target")
@@ -956,9 +970,9 @@ def test_sample_warps_camera_target_for_p2c(
         warp_calls.append(src_image.copy())
         return projector_space_target
 
-    monkeypatch.setattr(sample, "warp_image", fake_warp_image)
-    monkeypatch.setattr(
-        sample,
+    _patch_warp_helper(monkeypatch, "warp_image", fake_warp_image)
+    _patch_warp_helper(
+        monkeypatch,
         "invwarp_image",
         lambda *args, **kwargs: (_ for _ in ()).throw(
             AssertionError("camera-space target should not be inverse warped for p2c")
