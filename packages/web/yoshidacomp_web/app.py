@@ -11,7 +11,7 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from .routers import session
+from .routers import session, view
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -25,6 +25,7 @@ def create_app() -> FastAPI:
         return {"status": "ok"}
 
     app.include_router(session.router, prefix="/api", tags=["session"])
+    app.include_router(view.router, prefix="/api", tags=["view"])
 
     # Mount the frontend last so /api/* wins. html=True serves index.html at /.
     # フロントは最後にマウントする。先にすると /api/* が奪われる。
