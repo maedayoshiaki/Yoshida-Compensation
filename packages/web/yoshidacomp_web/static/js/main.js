@@ -12,27 +12,50 @@
 // 取得した Float32Array は保持し続け、画素読み取りはローカルで済ませる。
 
 import { loadMatrix, listViews, fetchView } from "./api.js";
-import { GLView } from "./glview.js";
+import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
 
 const $ = (id) => document.getElementById(id);
 
+// The only view B1 can draw. `rgb` and `categorical` are declared in the
+// Python ViewKind but have no implementation here; see requireSupportedKind.
+// B1が描けるのはこれだけ。rgb / categorical は未実装。
+const SUPPORTED_KIND = "scalar";
+
+// Startup fallback only -- the real axis labels always arrive from the server
+// (axesFromLabels over the X-Labels-B64 header). These mirror
+// packages/web/yoshidacomp_web/views/coef_tiles.py's _INPUT_LABELS and
+// _OUTPUT_LABELS so the empty grid drawn before the first load has the right
+// shape; that Python file is the source of truth.
+// 起動時の仮置きのみ。実際の軸ラベルは常にサーバから来る。値は
+// views/coef_tiles.py の _INPUT_LABELS / _OUTPUT_LABELS の写しで、
+// 正はあちら側。
 const DEFAULT_ROWS = ["in_R", "in_G", "in_B", "bias"];
 const DEFAULT_COLS = ["out_R", "out_G", "out_B"];
 
 const state = {
   matrixId: null,
   meta: null,
-  spec: null,       // the ViewSpec from /api/views
+  specs: [],        // every ViewSpec from /api/views
+  spec: null,       // the active one
   payload: null,    // { data, width, height, channels, vmin, vmax, labels }
   ranges: null,     // [{ vmin, vmax }] per channel
   rows: DEFAULT_ROWS,
   cols: DEFAULT_COLS,
   pinned: null,     // { col, row } while the readout is frozen
+  // Monotonic request id. Fetches are not cancelled, they are *ignored*: a
+  // 95 MB transfer takes seconds, and a second 読み込み during the first one
+  // used to leave the header describing matrix B while state.payload -- which
+  // backs all 12 tiles and the hover readout -- still held matrix A. Two
+  // clicks, no warning, coefficients read off the wrong matrix. Every async
+  // entry point bumps this, captures it, and drops its result after any await
+  // where it no longer matches.
+  // 連続フェッチの順序保証。最新のリクエストIDと一致しない結果は捨てる。
+  reqId: 0,
 };
 
 // Uniform-only display parameters. Changing any of these must not fetch.
 const display = {
-  exposure: 0, gamma: 1, colormap: 0, dither: 1, nanColor: [0.85, 0.1, 0.75],
+  exposure: 0, gamma: 1, colormap: 0, dither: 1, nanColor: NAN_COLOR,
 };
 
 const views = [];       // one GLView per channel
@@ -47,6 +70,20 @@ function status(msg, isError = false) {
   el.textContent = msg;
   el.classList.toggle("error", isError);
   if (isError) console.error(msg);
+}
+
+function errorText(e) {
+  return String(e && e.message ? e.message : e);
+}
+
+// Claim the newest request slot. Anything already in flight becomes stale.
+function beginRequest() {
+  state.reqId += 1;
+  return state.reqId;
+}
+
+function isStale(req) {
+  return req !== state.reqId;
 }
 
 function fmt(v) {
@@ -317,9 +354,21 @@ function applyDisplay() {
   }
 }
 
+// Does the *active* view declare this server-side parameter?
+//
+// `normalize` belongs to coef_tiles, not to views in general. Reading it
+// unconditionally meant every future view inherited another view's control
+// name, which is exactly the kind of leak that breaks the "register in Python,
+// no JavaScript change" promise.
+// `normalize` は coef_tiles 固有のパラメータであり、全ビュー共通ではない。
+// 有効なビューが宣言している場合だけ見る。
+function specDeclares(name) {
+  return !!state.spec && state.spec.params.some((p) => p.name === name);
+}
+
 function computeRanges() {
   const p = state.payload;
-  const mode = serverParams().normalize || "shared";
+  const mode = specDeclares("normalize") ? serverParams().normalize : "shared";
   if (mode === "per_tile") {
     // The wire format carries a single (vmin, vmax) pair, so 12 independent
     // ranges have to be derived here from the array we already hold.
@@ -356,14 +405,36 @@ function renderMeta() {
   }
 }
 
-async function reload() {
+// B1 renders scalar views only. Falling through for an unimplemented kind
+// would paint `rgb` or `categorical` data with the diverging scalar colormap:
+// plausible pixels for a view this frontend does not understand, which is the
+// same class of silent misreading the NaN mask exists to prevent.
+// 未対応の kind をそのまま描くと、理解していないデータを「それらしい」色で
+// 表示してしまう。黙って通さず、はっきり失敗させる。
+function requireSupportedKind(kind, where) {
+  if (kind !== SUPPORTED_KIND) {
+    throw new Error(
+      `${where} の kind="${kind}" はこのビューアでは未対応です` +
+      `（対応しているのは kind="${SUPPORTED_KIND}" のみ）。`
+    );
+  }
+}
+
+// `req` is inherited when load() drives the reload, so the whole click stays
+// one logical request; a bare reload() (a server-parameter change) claims a
+// new one.
+async function reload(req = beginRequest()) {
   if (!state.matrixId || !state.spec) return;
+  requireSupportedKind(state.spec.kind, `ビュー "${state.spec.label || state.spec.key}"`);
   const params = serverParams();
   status(`ビュー取得中… (${state.spec.key} ${JSON.stringify(params)})`);
 
   const t0 = performance.now();
   const payload = await fetchView(state.matrixId, state.spec.key, params);
   const t1 = performance.now();
+  if (isStale(req)) return;   // a newer request owns the screen now
+  // Backstop: the registry and the response could disagree.
+  requireSupportedKind(payload.kind, "サーバの応答");
   state.payload = payload;
 
   const axes = axesFromLabels(payload.labels, payload.channels)
@@ -375,14 +446,30 @@ async function reload() {
     axes.cols.join(" ") !== state.cols.join(" ");
   state.rows = axes.rows;
   state.cols = axes.cols;
-  if (views.length !== payload.channels || axesChanged) {
+  const gridRebuilt = views.length !== payload.channels || axesChanged;
+  if (gridRebuilt) {
     buildGrid(state.rows, state.cols);
     await nextFrame();
+    if (isStale(req)) return;
   }
 
   const t2 = performance.now();
   computeRanges();
   const t3 = performance.now();
+
+  // Decide before the upload, while the old image is still around: a reframe
+  // is warranted only when there is no view worth keeping -- a rebuilt grid, a
+  // first image, or different dimensions. Re-fetching the same matrix with a
+  // different server-side parameter is none of those, and refitting there
+  // would silently discard the pan and zoom the user had set up.
+  // 組み直し・初回・寸法変更のときだけ再フレーミングする。normalize 変更の
+  // ような同寸法の再取得でパン/ズームを捨てない。
+  const previous = views[0].image;
+  const needsFit =
+    gridRebuilt ||
+    !previous ||
+    previous.width !== payload.width ||
+    previous.height !== payload.height;
 
   syncBusy = true;   // suppress 12x11 cross-syncs while every tile is loaded
   try {
@@ -402,7 +489,11 @@ async function reload() {
   applyDisplay();
   for (const v of views) v.finish();   // block until the driver has consumed it
   const t5 = performance.now();
-  views[0].fit();                      // one fit, propagated to the other tiles
+  // One fit, propagated to the other tiles, so all 12 share the exact same
+  // transform even if their backing stores round to different integer sizes.
+  // GLView.setImage draws the same conclusion per tile; this is what keeps
+  // them identical.
+  if (needsFit) views[0].fit();
   state.pinned = null;
   $("probe-pin").textContent = "";
 
@@ -437,12 +528,27 @@ async function reload() {
 async function load() {
   const path = $("path-input").value.trim();
   if (!path) { status("パスを入力してください", true); return; }
-  status(`行列を読み込み中: ${path}`);
-  const res = await loadMatrix(path);
-  state.matrixId = res.id;
-  state.meta = res.meta;
-  renderMeta();
-  await reload();
+
+  const req = beginRequest();
+  const button = $("btn-load");
+  button.disabled = true;
+  try {
+    status(`行列を読み込み中: ${path}`);
+    const res = await loadMatrix(path);
+    // Nothing about the previous matrix may be published once a newer load has
+    // started: the meta header and state.payload have to describe the same
+    // matrix at all times, so bail before touching either.
+    // 新しい読み込みが始まっていたら、メタも payload も一切書き換えない。
+    if (isStale(req)) return;
+    state.matrixId = res.id;
+    state.meta = res.meta;
+    renderMeta();
+    await reload(req);
+  } finally {
+    // A superseded request must not re-enable the button under the newer one;
+    // whichever request is current owns it and will release it itself.
+    if (!isStale(req)) button.disabled = false;
+  }
 }
 
 // ------------------------------------------------------------------ setup
@@ -472,10 +578,40 @@ function wireDisplayControls() {
     if (views.length && state.payload) views[0].fit();
   });
   $("btn-load").addEventListener("click", () => {
-    load().catch((e) => status(String(e && e.message ? e.message : e), true));
+    load().catch((e) => status(errorText(e), true));
   });
   $("path-input").addEventListener("keydown", (e) => {
     if (e.key === "Enter") $("btn-load").click();
+  });
+}
+
+// Populate the view picker from /api/views.
+//
+// Without it, `state.spec = specs[0]` plus an insertion-ordered REGISTRY (with
+// coef_tiles registered first) makes a newly registered view unreachable from
+// the GUI, and the spec's promise that a new view needs "a Python registration
+// and no JavaScript change" is false on its first use.
+// これが無いと、新しく登録したビューはGUIから一生選べない。
+function buildViewSelect(specs) {
+  const el = $("view-select");
+  el.textContent = "";
+  for (const spec of specs) {
+    const opt = document.createElement("option");
+    opt.value = spec.key;
+    opt.textContent = spec.label || spec.key;
+    el.appendChild(opt);
+  }
+  el.value = specs[0].key;
+  el.addEventListener("change", () => {
+    const spec = specs.find((s) => s.key === el.value);
+    if (!spec) return;
+    state.spec = spec;
+    buildServerParams(spec);
+    if (!state.matrixId) {
+      status(`ビュー "${spec.label || spec.key}" を選択 — パスを入れて読み込み`);
+      return;
+    }
+    reload().catch((e) => status(errorText(e), true));
   });
 }
 
@@ -485,16 +621,23 @@ async function main() {
   // スモークテストや自動計測から views へ触るためのハンドル。
   window.__viewer = { state, views, display, applyDisplay, reload };
 
+  // Derive the legend swatch from the shader's own mask colour rather than
+  // restating it in CSS. See NAN_COLOR in glview.js.
+  // 凡例の色はシェーダのマスク色から導出する（CSSに数値を書かない）。
+  document.documentElement.style.setProperty("--nan", nanColorCss());
+
   wireDisplayControls();
   try {
     const specs = await listViews();
     if (!specs.length) { status("ビューが登録されていません", true); return; }
+    state.specs = specs;
     state.spec = specs[0];
+    buildViewSelect(specs);
     buildServerParams(state.spec);
     buildGrid(state.rows, state.cols);
     status(`準備完了 — ビュー "${state.spec.label}" / パスを入れて読み込み`);
   } catch (e) {
-    status(`起動に失敗: ${e && e.message ? e.message : e}`, true);
+    status(`起動に失敗: ${errorText(e)}`, true);
   }
 }
 

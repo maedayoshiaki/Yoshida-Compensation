@@ -15,8 +15,40 @@
 // Differences from the reference: no ROI machinery, single-channel extraction
 // from an interleaved (H, W, C) array, and u_vmin/u_vmax/u_colormap in place of
 // u_bandLo/u_bandHi/u_mode/u_bright.
+//
+// この設計が「なぜこの形か」は、うっかり元に戻しやすいので日本語でも残す。
+//  - HiDPIのぼやけ: キャンバスのバッキングストアは *デバイス* ピクセル
+//    （clientSize × devicePixelRatio）で確保し、画像はGPUのクアッドとして
+//    描く。resize() の devicePixelRatio を外すと、Windowsの150%スケーリングで
+//    画像が甘くなる。この1行こそ本プロジェクトがPyQt6でない理由である。
+//  - ズームの重さ: パン/ズームは1枚のテクスチャ付きクアッドに対する uniform
+//    （scale/translate）の変更にすぎず、CPU側で再ラスタライズしない。
+//  - バンディング: テクスチャはfloat32（R32F）。カラーマップ・sRGB符号化・
+//    ディザはすべてシェーダ内でフル精度から行う。
 
 import { VERT_SRC, FRAG_SRC } from "./shaders.js";
+
+// The single source of truth for the NaN mask colour (linear 0..1 RGB, as the
+// shader's u_nanColor wants it). It had three copies -- this default, main.js's
+// `display`, and style.css's `--nan` -- and they had already drifted: the
+// legend swatch was one 8-bit LSB away from the pixels it was explaining.
+// main.js pushes nanColorCss() into --nan at startup so the swatch is derived
+// from these exact numbers instead of restating them.
+// NaNマスク色の唯一の情報源（シェーダのu_nanColorに合わせた線形0..1のRGB）。
+// 以前は3か所に写しがあり、実際に1LSBずれていた。CSSの --nan は起動時に
+// main.js が nanColorCss() から注入する。
+export const NAN_COLOR = Object.freeze([0.85, 0.1, 0.75]);
+
+// Same triple as a CSS colour, quantised the way the framebuffer quantises it.
+// A driver may still differ by one LSB on a component that lands exactly on
+// .5 (0.1 * 255 = 25.5), which is the driver's tie-breaking, not a second
+// source of truth.
+// NAN_COLOR を8bitへ量子化してCSS色にする。ちょうど.5になる成分はドライバの
+// 丸め方次第で1LSBずれ得るが、それは情報源が二つあることを意味しない。
+export function nanColorCss(color = NAN_COLOR) {
+  const to8 = (v) => Math.round(Math.min(Math.max(v, 0), 1) * 255);
+  return `rgb(${to8(color[0])}, ${to8(color[1])}, ${to8(color[2])})`;
+}
 
 function compile(gl, type, src) {
   const sh = gl.createShader(type);
@@ -68,7 +100,7 @@ export class GLView {
     this.view = { scale: 1, tx: 0, ty: 0 };
     this.params = {
       exposure: 0, gamma: 1, vmin: -1, vmax: 1, colormap: 0,
-      dither: 1, nanColor: [0.85, 0.1, 0.75],
+      dither: 1, nanColor: NAN_COLOR,
     };
 
     // Interaction callbacks (set by the app).
@@ -120,6 +152,7 @@ export class GLView {
     const width = img.width, height = img.height;
     const channels = img.channels ?? 1;
     const channel = img.channel ?? 0;
+    const previous = this.image;
 
     let plane;
     if (channels === 1) {
@@ -138,7 +171,19 @@ export class GLView {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, plane);
-    this.fit();
+
+    // Only reframe when there is nothing sensible to keep. Re-fetching the
+    // same matrix with a different server-side parameter replaces the pixels
+    // at identical dimensions, and throwing the user's pan and zoom away for
+    // that is a data loss they did not ask for. Different dimensions (or the
+    // first image) have no meaningful view to preserve, so fit then.
+    // 同じ寸法で画素だけ差し替わる場合はパン/ズームを保つ。寸法が変わった
+    // ときと初回だけ fit() する。
+    if (!previous || previous.width !== width || previous.height !== height) {
+      this.fit();
+    } else {
+      this.draw();
+    }
   }
 
   setParams(p) { Object.assign(this.params, p); this.draw(); }

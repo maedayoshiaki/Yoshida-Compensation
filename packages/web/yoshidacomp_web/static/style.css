@@ -8,7 +8,13 @@
   --border: #dde2ea;
   --accent: #0a63d6;
   --error: #c53a54;
-  --nan: #d91ac0;
+  /* --nan is injected at runtime by js/main.js from NAN_COLOR (js/glview.js),
+     which is also what the shader paints NaN pixels with. It used to be a
+     literal here as well and the two had already drifted by one 8-bit LSB, so
+     the legend swatch was not the colour it claimed to explain. Do not put a
+     value back: one source only.
+     --nan は js/main.js が NAN_COLOR（js/glview.js）から実行時に注入する。
+     以前はここにも直値があり、実際に1LSBずれていた。値を書き戻さないこと。 */
   --rowhead: 54px;
   --mono: "Cascadia Mono", "SFMono-Regular", Consolas, ui-monospace, monospace;
   --sans: system-ui, -apple-system, "Segoe UI", "Yu Gothic UI", Meiryo, sans-serif;
