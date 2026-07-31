@@ -2,8 +2,8 @@
 
 | 項目 | 内容 |
 | --- | --- |
-| 対象モジュール | [src/python/inverse_lut.py](../src/python/inverse_lut.py) |
-| 関連ファイル | [src/python/config.py](../src/python/config.py)（`InverseLutConfig`）、[examples/python/build_inverse_lut.py](../examples/python/build_inverse_lut.py)（CLI）、[tests/test_inverse_lut.py](../tests/test_inverse_lut.py)（テスト） |
+| 対象モジュール | [packages/core/yoshidacomp/compensation/inverse_lut.py](../packages/core/yoshidacomp/compensation/inverse_lut.py) |
+| 関連ファイル | [packages/core/yoshidacomp/config.py](../packages/core/yoshidacomp/config.py)（`InverseLutConfig`）、[examples/python/build_inverse_lut.py](../examples/python/build_inverse_lut.py)（CLI）、[tests/test_inverse_lut.py](../tests/test_inverse_lut.py)（テスト） |
 | 設計書 | [docs/superpowers/specs/2026-07-03-inverse-lut-design.md](superpowers/specs/2026-07-03-inverse-lut-design.md) |
 
 ---

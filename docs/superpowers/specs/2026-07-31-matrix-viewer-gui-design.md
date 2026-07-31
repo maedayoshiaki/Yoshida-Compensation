@@ -272,8 +272,18 @@ P2Cマップは `(N, 4) float32` で各行が `[proj_x, proj_y, cam_x, cam_y]`�
 
 ## 10. 投影画像の生成
 
-`POST /api/generate` は `yoshidacomp/compensation/pipeline.py` を呼ぶ。CLI の
-`rebuild_compensation_with_map.py` と同じ関数を通るため、GUIとCLIで結果が一致する。
+`POST /api/generate` は `yoshidacomp/compensation/pipeline.py` の
+`generate_projection_image()` を呼ぶ。
+
+結果の一致は CLI ごとに異なるので注意する。
+
+- `rebuild_compensation_with_map.py` — 同じ `generate_projection_image()` を
+  通るため、GUI と結果が一致する。
+- `sample.py` — **一致しない**。`main()` は `generate_projection_image()` を
+  使わず、`calc_compensation_image` などを直接呼ぶ独自の補償ループを内部に
+  持ったままである。`sample.py` を `generate_projection_image()` 経由へ
+  付け替えるのは後続作業（本GUIのスコープ外）。それまでは `sample.py` の
+  出力との一致を前提にしてはならない。
 
 処理順は現行パイプラインを踏襲する。
 
