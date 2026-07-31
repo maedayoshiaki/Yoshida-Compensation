@@ -565,7 +565,7 @@ RAMへ丸ごと載せないため mmap_mode='r' を使う。"
   - `views.base.ViewResult` — `data: np.ndarray (H, W, C) float32`, `channels: int`, `vmin: float`, `vmax: float`, `labels: list[str]`
   - `views.base.REGISTRY: dict[str, ViewSpec]` と `register(spec)`
   - `GET /api/views` → ビュー一覧とパラメータ定義
-  - `GET /api/matrix/{id}/view/{key}` → float32 バイナリ + `X-Height` / `X-Width` / `X-Channels` / `X-Vmin` / `X-Vmax` / `X-Kind` / `X-Labels`
+  - `GET /api/matrix/{id}/view/{key}` → float32 バイナリ + `X-Height` / `X-Width` / `X-Channels` / `X-Vmin` / `X-Vmax` / `X-Kind` / `X-Labels-B64`（UTF-8 JSON配列のbase64）
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -895,7 +895,7 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
         "X-Kind": spec.kind,
         "X-Vmin": repr(float(result.vmin)),
         "X-Vmax": repr(float(result.vmax)),
-        "X-Labels": ",".join(result.labels),
+        "X-Labels-B64": base64.b64encode(json.dumps(result.labels).encode("utf-8")).decode("ascii"),
     }
     return Response(
         content=body, media_type="application/octet-stream", headers=headers
@@ -1040,7 +1040,7 @@ export async function fetchView(matrixId, key, params) {
     kind: res.headers.get("X-Kind"),
     vmin: Number(res.headers.get("X-Vmin")),
     vmax: Number(res.headers.get("X-Vmax")),
-    labels: (res.headers.get("X-Labels") || "").split(","),
+    labels: JSON.parse(atob(res.headers.get("X-Labels-B64") || "W10=")),
   };
 }
 ```
