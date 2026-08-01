@@ -525,13 +525,32 @@ async function reload(req = beginRequest()) {
   );
 }
 
+// How many load() calls are still running. The 読み込み button is disabled
+// while that count is above zero and released the moment it reaches zero.
+//
+// This deliberately does *not* key off state.reqId. Anything that calls
+// reload() -- the 正規化 dropdown, the view selector -- bumps that counter, so
+// a load running at the time would find itself "stale" in its own finally
+// block and skip the re-enable, leaving the button dead until the page is
+// reloaded (and Enter in the path box dead with it, since it delegates to
+// .click()). Counting in-flight loads answers the question the button
+// actually asks -- "is a load running?" -- and no other caller can perturb it.
+// ボタンの状態は state.reqId とは別に数える。normalize やビュー切替の
+// reload() が reqId を進めるため、それを借りると読み込み中のload()が自分を
+// stale と判定してボタンを解放できず、再読み込みするまで押せなくなる。
+let loadsInFlight = 0;
+
+function setLoadBusy(busy) {
+  loadsInFlight += busy ? 1 : -1;
+  $("btn-load").disabled = loadsInFlight > 0;
+}
+
 async function load() {
   const path = $("path-input").value.trim();
   if (!path) { status("パスを入力してください", true); return; }
 
   const req = beginRequest();
-  const button = $("btn-load");
-  button.disabled = true;
+  setLoadBusy(true);
   try {
     status(`行列を読み込み中: ${path}`);
     const res = await loadMatrix(path);
@@ -545,9 +564,7 @@ async function load() {
     renderMeta();
     await reload(req);
   } finally {
-    // A superseded request must not re-enable the button under the newer one;
-    // whichever request is current owns it and will release it itself.
-    if (!isStale(req)) button.disabled = false;
+    setLoadBusy(false);
   }
 }
 
