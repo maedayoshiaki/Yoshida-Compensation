@@ -258,6 +258,12 @@ _MUTATIONS = [
             "its ranges are shared, not per-tile",
             "a body declared interleaved is read as interleaved",
             "interleaved body: per-tile ranges follow each channel",
+            # The heading is correct throughout -- it is still naming the only
+            # view that ever rendered. It fails because the third view, the one
+            # this check reads the heading on, is now unreachable.
+            # 見出しは終始正しい（唯一描かれたビューを名乗り続ける）。落ちるのは
+            # このチェックが見る3つ目のビューへ到達できなくなるためである。
+            "the readout's heading names the view that rendered",
             "an unknown X-Layout is refused with a message naming it",
             "a missing X-Layout is refused rather than assumed to be interleaved",
             "a server refusal is shown as its detail message",
@@ -680,8 +686,13 @@ _MUTATIONS = [
                 "    </div>\n"
                 "\n    <div class=\"rd-panel\">\n"
                 "      <div class=\"rd-title mono\">計測</div>\n"
+                "      <!-- In the order the work happens. レンジ came up from the status line,\n"
+                "           which was printing 転送 and GPU転送 again 20px below this panel.\n"
+                "           作業の順。レンジはステータス行から移した（同じ行がこの板の20px下で\n"
+                "           転送とGPU転送を繰り返していた）。 -->\n"
                 "      <div class=\"rd-rows mono\">\n"
                 "        <div>転送 <span id=\"perf-fetch\" class=\"val\">—</span></div>\n"
+                "        <div>レンジ <span id=\"perf-ranges\" class=\"val\">—</span></div>\n"
                 "        <div>GPU転送 <span id=\"perf-upload\" class=\"val\">—</span></div>\n"
                 "        <div>JSヒープ <span id=\"perf-heap\" class=\"val\">—</span></div>\n"
                 "      </div>\n"
@@ -694,14 +705,161 @@ _MUTATIONS = [
                 "      <div class=\"group readouts mono\">\n"
                 "        <div>表示レンジ <span id=\"range-info\" class=\"val\">—</span></div>\n"
                 "        <div>転送 <span id=\"perf-fetch\" class=\"val\">—</span></div>\n"
+                "        <div>レンジ <span id=\"perf-ranges\" class=\"val\">—</span></div>\n"
                 "        <div>GPU転送 <span id=\"perf-upload\" class=\"val\">—</span></div>\n"
                 "        <div>JSヒープ <span id=\"perf-heap\" class=\"val\">—</span></div>\n"
                 "      </div>\n\n"
                 "      <div class=\"group legend\">",
             ),
         ],
-        ("the display range and the timings sit in the readout dashboard",),
+        ("the readout's panels all sit in the dashboard, not the sidebar",),
         id="the_range_and_timings_go_back_into_the_sidebar",
+    ),
+    # ---- the readout table, fixed but no longer compact
+    #
+    # `fr` is not the only way to give twelve seven-character cells the whole
+    # window; a fixed 600px column does it too, and satisfies a check that only
+    # forbids fractions. The bound the check carries is what makes "fixed width"
+    # mean what the task meant by it.
+    # 全幅に伸ばす方法は `fr` だけではない。固定600pxでも同じことが起き、
+    # 分数だけを禁じるチェックは通ってしまう。
+    pytest.param(
+        "probe",
+        [("js/main.js", "const PROBE_CELL_PX = 66;", "const PROBE_CELL_PX = 600;")],
+        ("the readout table's columns are fixed width",),
+        id="readout_table_columns_are_fixed_but_enormous",
+    ),
+    # ---- the strip stacked again, in each of the two places it can be written
+    #
+    # `display: block` on `.readout` is the pre-task layout exactly: the panels
+    # sit one above another, the strip is as tall as their sum, and the tiles
+    # give up the difference. Nothing throws, every number is right, and the
+    # placement and width checks are both indifferent to it -- they constrain
+    # ancestry and the absence of `fr`, neither of which is a layout. The
+    # stylesheet and an inline attribute are separate entries because they are
+    # separate edits and the sheet-only check missed the second.
+    # `.readout` の `display: block` はタスク以前のレイアウトそのもので、板は
+    # 縦に積まれ、その分だけタイルが低くなる。例外は出ず、数値は正しく、
+    # 置き場所と列幅のチェックはどちらも無関心である（祖先と `fr` の不在を
+    # 見ているだけで、どちらもレイアウトではない）。シートとインラインは別の
+    # 編集なので項目も分ける。
+    pytest.param(
+        "probe",
+        [("style.css", ".readout {\n  display: flex;", ".readout {\n  display: block;")],
+        ("the readout lays its panels out in a row",),
+        id="readout_panels_stack_via_the_stylesheet",
+    ),
+    pytest.param(
+        "probe",
+        [("index.html", "<section class=\"readout\">",
+          "<section class=\"readout\" style=\"display: block\">")],
+        ("the readout lays its panels out in a row",),
+        id="readout_panels_stack_via_an_inline_style",
+    ),
+    # ---- the duplicate panel, put back
+    #
+    # `ビュー値` beside `行列` is the same twelve numbers twice on any view whose
+    # picture *is* the matrix: 974px of a 1600px strip -- the widest element in
+    # a bar whose purpose is to stop wasting width -- and at 900px the strip
+    # doubles to 224px, taking 113px off the tiles to restate what is 20px to
+    # its left. Forcing it visible is the state that shipped, and it fails
+    # nothing else: the panel's contents are still written and still correct.
+    # 描かれているものが行列そのものであるビューでは、`ビュー値` は `行列` と
+    # 同じ12個である（1600pxの帯で974px＝最も広い要素、900pxでは帯が224pxに
+    # なりタイルから113px）。常に出す実装は出荷されていた状態であり、中身は
+    # 書かれ続けているので他のチェックは落ちない。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  $(\"view-panel\").hidden = state.spec.values_are_matrix === true;",
+            "  $(\"view-panel\").hidden = false;",
+        )],
+        ("the view-value panel is dropped where it repeats the matrix",),
+        id="the_duplicate_view_value_panel_is_always_shown",
+    ),
+    # ---- the status line printing what is already on screen
+    #
+    # Restores both halves at once, because that is how it would come back: the
+    # line regains 転送 / レンジ / GPU転送 -- two of the three verbatim copies of
+    # the 計測 panel 20px above it -- and the panel loses the one figure that
+    # lived nowhere else. The check pins the line to the dimension summary *and*
+    # レンジ to the panel, so either half alone fails it.
+    # 戻るときは両方まとめて戻るので、変異も両方を戻す。行は 計測 パネルの
+    # 20px下でその2つを逐語的に繰り返し、パネルはここにしか無い数値を失う。
+    pytest.param(
+        "probe",
+        [
+            (
+                "js/main.js",
+                "  $(\"perf-ranges\").textContent = `${perf.rangesMs} ms`;\n",
+                "",
+            ),
+            (
+                "js/main.js",
+                "  status(`${payload.width}×${payload.height}×${payload.channels} を表示中`);",
+                "  status(\n"
+                "    `${payload.width}×${payload.height}×${payload.channels} を表示中 — ` +\n"
+                "    `転送 ${perf.fetchMs} ms / レンジ ${perf.rangesMs} ms / ` +\n"
+                "    `GPU転送 ${perf.uploadMs}+${perf.uploadFinishMs} ms`\n"
+                "  );",
+            ),
+        ],
+        ("the status line after a render is the dimensions alone",),
+        id="the_status_line_repeats_the_timings_panel",
+    ),
+    # ---- the heading written when the selector changes rather than when a view
+    #      renders
+    #
+    # The implementation the comment in ``reload()`` exists to forbid, and the
+    # one nothing caught: moving the write into the ``change`` handler passed
+    # every check in every scenario. It only shows on a view that is *refused* --
+    # unsupported kind, unknown layout, server 400 -- where the heading and the
+    # panel then describe a view that never rendered, over the numbers of the
+    # one that did.
+    # ``reload()`` のコメントが禁じている当の実装であり、何も検出しなかった
+    # もの（`change` 側へ移しても全シナリオが通っていた）。差が出るのは
+    # 拒否されたビューのときだけで、そこでは見出しと板が「描かれなかった
+    # ビュー」を説明し、その下には別のビューの数値が並ぶ。
+    pytest.param(
+        "views",
+        [
+            (
+                "js/main.js",
+                "  $(\"view-title\").textContent = state.spec.label || state.spec.key;\n",
+                "",
+            ),
+            (
+                "js/main.js",
+                "    state.spec = spec;\n    buildServerParams(spec);",
+                "    state.spec = spec;\n"
+                "    $(\"view-title\").textContent = spec.label || spec.key;\n"
+                "    buildServerParams(spec);",
+            ),
+        ],
+        ("a refused view leaves the readout naming the view still on screen",),
+        id="view_heading_written_when_the_selector_changes",
+    ),
+    # ---- and the heading inferred from the payload instead of read off the spec
+    #
+    # The other way to pass a heading check without having one: two of the three
+    # views in play are 12-channel scalar views, so a label chosen by channel
+    # count is right for `coef_tiles` and for `surface` and wrong only for the
+    # third. Registering a view in Python and getting its name on screen is the
+    # promise this whole registry exists for.
+    # 見出しらしきものを持たずにチェックを通すもう一つの方法。12チャンネルの
+    # scalar ビューが2つあるため、チャンネル数で選んだラベルは `coef_tiles`
+    # でも `surface` でも正しく、3つ目でだけ誤る。
+    pytest.param(
+        "views",
+        [(
+            "js/main.js",
+            "  $(\"view-title\").textContent = state.spec.label || state.spec.key;",
+            "  $(\"view-title\").textContent ="
+            " state.payload.channels === 3 ? \"投影面の色\" : \"12係数タイル\";",
+        )],
+        ("the readout's heading names the view that rendered, not its shape",),
+        id="view_heading_inferred_from_the_payload_shape",
     ),
     # ---- the heading that says whose numbers the second panel holds
     pytest.param(

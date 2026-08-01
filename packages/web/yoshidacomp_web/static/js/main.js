@@ -528,9 +528,20 @@ function clearMatrixCells() {
 // 「ファイルには領域外にも値が入っている」という見るべき事実まで隠れるため。
 // 毎回まるごと書き直すのは、数値を出した画素と表示が食い違わないようにする
 // ためと、同じ画素への2度目の応答で接尾辞が重ならないようにするため。
+//
+// The wording says what is true of the numbers, which is not that they failed
+// to be read. They are real values the file holds; what is wrong with them is
+// that the mask covers those pixels, so nothing downstream uses them. 「無効」
+// read as "invalid / the read failed" and contradicted the sentence above about
+// why they are worth showing. 「マスク対象」 is also the vocabulary the sidebar
+// legend already uses for the same pixels.
+// 文言は「読めなかった」ではなく「その値がどういうものか」を述べる。値は
+// ファイルに実在し、問題はその画素がマスクの対象で誰も使わないことにある。
+// 「無効」は読み取り失敗と読め、値を出す理由と矛盾していた。「マスク対象」は
+// サイドバーの凡例が同じ画素に使っている語でもある。
 function setProbePos(col, row, outside) {
   const el = $("probe-pos");
-  el.textContent = `col ${col}, row ${row}${outside ? " — 有効投影領域の外（下の値は無効）" : ""}`;
+  el.textContent = `col ${col}, row ${row}${outside ? " — 有効投影領域の外（マスク対象）" : ""}`;
   el.classList.toggle("outside", !!outside);
 }
 
@@ -1026,6 +1037,35 @@ async function reload(req = beginRequest()) {
   // セレクタの変更時ではなくペイロード確定時に書くので、拒否されたビューの
   // 名前が画面に残ることはない。
   $("view-title").textContent = state.spec.label || state.spec.key;
+  // ...and whether that panel belongs on screen at all.
+  //
+  // The readout table already shows the matrix on every view. Where the picture
+  // *is* the matrix, this panel is the same twelve numbers again -- measured at
+  // 974px of a 1600px strip, the widest element in it, and the reason the strip
+  // doubled to 224px at 900px wide, taking 113px back off the tiles to restate
+  // what was already 20px to the left.
+  //
+  // Read from the registry rather than sniffed from the payload, and never from
+  // `kind`: `coef_tiles` and `plain_tiles` are both `scalar`, and so would be a
+  // residual-error view, which is not the matrix. Only an explicit `true` hides
+  // anything, so a view that does not declare the field -- an older server, a
+  // newly registered one -- keeps its panel rather than being silently blanked.
+  //
+  // The one thing the panel used to add on a coefficient view was that a masked
+  // pixel read `NaN` here while the table printed the stored value. The
+  // out-of-region marker on `#probe-pos` now says that in words, in red, above
+  // the numbers it disclaims.
+  //
+  // その板を出すかどうか。読み取り表はどのビューでも行列を出しているので、
+  // 描かれているものが行列そのものなら、この板は同じ12個の繰り返しである
+  // （1600pxの帯で974px＝最も広い要素。900pxでは帯が224pxになり、その113pxは
+  // タイルから奪われていた）。判断はレジストリの宣言に従う。`kind` では
+  // 決めない——`coef_tiles` も `plain_tiles` も `scalar` であり、残差ビューも
+  // またそうだが、それは行列ではない。明示的な `true` のときだけ隠すので、
+  // 宣言の無いビュー（古いサーバ、新しく登録されたビュー）は黙って空白に
+  // ならない。係数ビューでこの板が唯一足していた情報——マスク画素でここだけ
+  // NaN になること——は、`#probe-pos` の印が言葉で述べるようになった。
+  $("view-panel").hidden = state.spec.values_are_matrix === true;
 
   const layout = layoutFor(payload, state.layout, traits);
   // Compared by value, and only then rebuilt: buildGrid disposes and recreates
@@ -1131,13 +1171,26 @@ async function reload(req = beginRequest()) {
   console.log("[perf]", perf);
 
   $("perf-fetch").textContent = `${perf.fetchMs} ms (${perf.megabytes} MB, ${perf.mbPerSec} MB/s)`;
+  $("perf-ranges").textContent = `${perf.rangesMs} ms`;
   $("perf-upload").textContent = `${perf.uploadMs} ms + finish ${perf.uploadFinishMs} ms`;
   $("perf-heap").textContent = perf.jsHeapMB ? `${perf.jsHeapMB} MB` : "計測不可";
-  status(
-    `${payload.width}×${payload.height}×${payload.channels} を表示中 — ` +
-    `転送 ${perf.fetchMs} ms / レンジ ${perf.rangesMs} ms / ` +
-    `GPU転送 ${perf.uploadMs}+${perf.uploadFinishMs} ms`
-  );
+  // What was rendered, and nothing that is already on screen.
+  //
+  // This line used to end with `転送 570.8 ms / レンジ 0.3 ms / GPU転送 51.2+0.7
+  // ms`, twenty pixels below a 計測 panel showing two of those three timings
+  // verbatim, and it still opens with dimensions the toolbar also states. The
+  // only datum here that lived nowhere else was レンジ, which is now the panel's
+  // second row -- so the line goes back to being what it is everywhere else in
+  // this app: the transient-state line, for errors, 「ビュー取得中…」 and the
+  // unapplied-parameter notice, saying what is on screen when there is nothing
+  // else to say.
+  //
+  // 画面上の他所にあるものは書かない。この行は以前 計測 パネルの20px下で同じ
+  // 転送・GPU転送を繰り返し、寸法もツールバーと重複していた。ここにしかない
+  // 値はレンジだけだったので、それをパネルへ移して行を戻す。この行は他の場面
+  // では過渡的な状態（エラー、取得中、未適用の通知）を出す場所であり、
+  // 言うことが無いときは何を表示しているかだけを述べればよい。
+  status(`${payload.width}×${payload.height}×${payload.channels} を表示中`);
 }
 
 // How many load() calls are still running. The 読み込み button is disabled

@@ -169,6 +169,15 @@ hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
    おり（4x3の表・レンジ1つ・計測3行）、伸ばせば短い行が窓幅に散らばる。 */
 .rd-panel { min-width: 0; }
 .rd-panel.grow { flex: 1 1 240px; }
+/* js/main.js hides the view-value panel on a view whose picture *is* the
+   matrix, where it would only repeat the table beside it. Stated here rather
+   than left to the UA sheet's `[hidden]`, because a flex item is exactly the
+   place where an author `display` would otherwise win and leave a hidden panel
+   taking part in the layout.
+   行列そのものを描くビューでは、隣の表を繰り返すだけのビュー値パネルを
+   js/main.js が隠す。UA の `[hidden]` 任せにしないのは、flex 項目では作者側の
+   `display` が勝ち、隠したはずの板が行に残りうるためである。 */
+.rd-panel[hidden] { display: none; }
 .rd-title { font-size: 11px; color: var(--muted); margin-bottom: 4px; white-space: nowrap; }
 .rd-title .val { color: var(--accent); }
 .rd-rows div { display: flex; gap: 8px; font-size: 11.5px; padding: 1px 0; white-space: nowrap; }

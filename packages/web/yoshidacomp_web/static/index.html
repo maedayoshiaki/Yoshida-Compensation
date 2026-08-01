@@ -102,7 +102,17 @@
       <div id="probe-grid" class="probe-grid mono"></div>
     </div>
 
-    <div class="rd-panel grow">
+    <!-- The second panel of numbers, shown only when the picture is not the
+         matrix. Under a view of the coefficients themselves it holds the same
+         twelve numbers the table to its left already shows -- measured at 974px
+         of a 1600px strip, the widest thing in a bar whose whole purpose is to
+         stop wasting width -- so `values_are_matrix` on the view spec takes it
+         away entirely, heading included. See reload() in js/main.js.
+         2枚目の数値の板。描かれているものが行列でないときだけ出す。係数その
+         ものを見ているビューでは左の表と同じ12個であり、1600pxの帯のうち
+         974pxを占めていた（幅を無駄にしないための帯で最も広い要素だった）。
+         ビュー仕様の `values_are_matrix` によって見出しごと消える。 -->
+    <div id="view-panel" class="rd-panel grow">
       <div class="rd-title mono">ビュー値 <span id="view-title" class="muted">—</span></div>
       <div id="view-values" class="view-values mono"></div>
     </div>
@@ -116,8 +126,13 @@
 
     <div class="rd-panel">
       <div class="rd-title mono">計測</div>
+      <!-- In the order the work happens. レンジ came up from the status line,
+           which was printing 転送 and GPU転送 again 20px below this panel.
+           作業の順。レンジはステータス行から移した（同じ行がこの板の20px下で
+           転送とGPU転送を繰り返していた）。 -->
       <div class="rd-rows mono">
         <div>転送 <span id="perf-fetch" class="val">—</span></div>
+        <div>レンジ <span id="perf-ranges" class="val">—</span></div>
         <div>GPU転送 <span id="perf-upload" class="val">—</span></div>
         <div>JSヒープ <span id="perf-heap" class="val">—</span></div>
       </div>

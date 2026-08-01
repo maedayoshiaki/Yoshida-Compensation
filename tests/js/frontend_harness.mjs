@@ -219,6 +219,17 @@ const VOID_ELEMENTS = new Set([
   "area", "base", "br", "col", "embed", "hr", "img",
   "input", "link", "meta", "param", "source", "track", "wbr",
 ]);
+// Elements whose content is text, not markup. `if (a < b)` inside a <script>
+// otherwise opens a phantom <b>, and while a closing </script> happens to pop it
+// again (a close unwinds to the innermost match), that is luck rather than a
+// rule: `a < b && c > d` would close the phantom itself and leave the following
+// elements nested one level too deep. Skipping to the matching close is what
+// makes the tree independent of what the page's script says.
+// 中身がテキストであってマークアップではない要素。`if (a < b)` は幻の <b> を
+// 開いてしまう。今日は `</script>` が偶然それを閉じているだけで規則ではなく、
+// `a < b && c > d` なら幻を自分で閉じ、以降の入れ子が1段ずれる。閉じタグまで
+// 読み飛ばすことで、木の形をページのスクリプトの中身から切り離す。
+const RAW_TEXT_ELEMENTS = new Set(["script", "style", "textarea", "title"]);
 // Comments first, so a commented-out tag cannot open an element. Attribute
 // values are matched as quoted runs so a ">" inside one does not end the tag.
 // コメントを先に食う。属性値は引用符ごと拾い、値の中の ">" でタグが
@@ -229,10 +240,16 @@ const ATTR_RE = /([a-zA-Z_:][-\w:.]*)\s*=\s*"([^"]*)"/g;
 function parseHtml(source) {
   const root = makeEl("#document");
   const open = [root];
+  let rawText = null;   // the raw-text element currently being skipped over
   for (const m of source.matchAll(TAG_RE)) {
     if (m[0].startsWith("<!--")) continue;
     const [, closing, rawTag, rawAttrs, selfClosed] = m;
     const tag = rawTag.toLowerCase();
+    if (rawText) {
+      // Everything until this element's own close tag is its text.
+      if (!(closing && tag === rawText)) continue;
+      rawText = null;   // and the close itself is handled below, as any other
+    }
     if (closing) {
       // Close the innermost element of that name. An unbalanced close is
       // ignored rather than unwinding the stack to the root.
@@ -247,8 +264,26 @@ function parseHtml(source) {
     for (const a of rawAttrs.matchAll(ATTR_RE)) attrs[a[1].toLowerCase()] = a[2];
     if (attrs.class) node.className = attrs.class;
     if (attrs.id) node.id = attrs.id;          // the setter is what registers it
+    // An inline `style` is recorded because an inline declaration is the one
+    // thing that beats the stylesheet: `<section class="readout"
+    // style="display:block">` restores the stacked layout this task replaced
+    // while every class-based check stays green. No element in index.html
+    // carries one today, so recording it changes nothing that runs -- it is
+    // there so that the check on `.readout`'s layout cannot be sidestepped.
+    // インラインの `style` だけは記録する。シートに勝つのはこれだけであり、
+    // `style="display:block"` を書けば縦積みに戻せてしまう。現在の index.html
+    // にこの属性を持つ要素は無いので、記録しても既存の挙動は変わらない。
+    if (attrs.style) {
+      for (const decl of attrs.style.split(";")) {
+        const at = decl.indexOf(":");
+        if (at > 0) node.style[decl.slice(0, at).trim()] = decl.slice(at + 1).trim();
+      }
+    }
     open[open.length - 1].appendChild(node);
-    if (!selfClosed && !VOID_ELEMENTS.has(tag)) open.push(node);
+    if (!selfClosed && !VOID_ELEMENTS.has(tag)) {
+      open.push(node);
+      if (RAW_TEXT_ELEMENTS.has(tag)) rawText = tag;
+    }
   }
   return root;
 }
@@ -258,7 +293,62 @@ function parseHtml(source) {
 // finding a blank stub.
 // 宣言されているidだけが登録される。存在しないidの参照は黙って空要素を
 // 拾わず例外になる。
-const documentTree = parseHtml(readFileSync(path.join(STATIC_DIR, "index.html"), "utf-8"));
+const INDEX_HTML = readFileSync(path.join(STATIC_DIR, "index.html"), "utf-8");
+const documentTree = parseHtml(INDEX_HTML);
+
+// The parser's real hazard is not a crash, it is a *different tree* built in
+// silence: a placement check would then be answering about a page nobody wrote.
+// Comparing the ids it registered against a plain scan of the same file turns
+// any such divergence into an immediate, loud harness error -- the ids are the
+// one part of the tree an independent reading can check, and every check here
+// reaches its element through one.
+//
+// Comments are stripped from both sides, so a commented-out element is absent
+// from each for the same reason rather than by coincidence.
+//
+// パーサの本当の危険は例外ではなく、黙って別の木ができることである。その木の
+// 上で置き場所を検証しても、誰も書いていないページについて答えることになる。
+// 登録された id を素朴な走査と突き合わせれば、食い違いはその場で harness の
+// エラーになる。id は木のうち独立に読み直せる唯一の部分であり、どのチェックも
+// id を経由して要素に到達している。コメントは両方から落とす。
+const naiveIds = new Set(
+  [...INDEX_HTML.replace(/<!--[\s\S]*?-->/g, "").matchAll(/\sid="([^"]+)"/g)]
+    .map((m) => m[1]),
+);
+const idDiff = [
+  ...[...naiveIds].filter((id) => !registry.has(id)).map((id) => `only in the file: ${id}`),
+  ...[...registry.keys()].filter((id) => !naiveIds.has(id)).map((id) => `only in the tree: ${id}`),
+];
+if (idDiff.length) {
+  throw new Error(
+    `the element tree parsed out of index.html disagrees with a plain scan of the `
+    + `same file (${idDiff.join(", ")}). The tree is what every placement check `
+    + `reads, so it must not be a different page from the one on disk.`,
+  );
+}
+
+// The stylesheet, as text, with comments removed.
+//
+// There is no CSS engine here and there is not going to be one, so a layout
+// cannot be measured. What can be pinned is the declaration itself: `.readout`
+// is a row of panels, and `display: block` there is the stacked layout this
+// whole task exists to replace -- a change that produces no error, no wrong
+// number, and no failing check anywhere else in this file.
+//
+// スタイルシートを本文として読む。ここに CSS エンジンは無く、今後も置かない
+// ので、レイアウトを測ることはできない。固定できるのは宣言そのものである。
+// `.readout` は板を横に並べる行であり、そこが `display: block` になれば
+// このタスクが置き換えた縦積みに戻る——例外も、誤った数値も、他のどの
+// チェックの失敗も伴わずに。
+const CSS_TEXT = readFileSync(path.join(STATIC_DIR, "style.css"), "utf-8")
+  .replace(/\/\*[\s\S]*?\*\//g, "");
+const cssDeclarations = (selector) => {
+  const found = [];
+  for (const rule of CSS_TEXT.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    if (rule[1].split(",").map((s) => s.trim()).includes(selector)) found.push(rule[2]);
+  }
+  return found.join(" ");
+};
 
 globalThis.document = {
   documentElement: documentTree.children.find((e) => e.tagName === "HTML") ?? makeEl("html"),
@@ -288,16 +378,31 @@ const H = 4, W = 5;
 const TILE_LABELS = ["in_R", "in_G", "in_B", "bias"].flatMap(
   (i) => ["out_R", "out_G", "out_B"].map((o) => `${i} -> ${o}`));
 
+// `values_are_matrix` is the registry's answer to "is the picture the matrix
+// itself?", and the frontend drops its second readout panel where it is true.
+// The three kinds of answer all have a fixture: `true` (the coefficient views),
+// an explicit `false` (`surface`), and *absent* (everything else) -- which has
+// to keep the panel, because a view that does not answer is not a view whose
+// values are known to be a duplicate. A default that hid it would silently
+// blank the only numbers a newly registered view produces.
+// `values_are_matrix` は「描かれているものが行列そのものか」という宣言で、
+// 真ならフロントは読み取り欄の2枚目の板を落とす。3通りの答え全てに
+// フィクスチャを置く: 真（係数系のビュー）・明示的な偽（`surface`）・無宣言
+// （その他）。無宣言は板を残す側でなければならない。
 const VIEWS = [
   {
     key: "coef_tiles", label: "12係数タイル", kind: "scalar", channels: 12,
+    values_are_matrix: true,
     params: [{
       name: "normalize", label: "正規化", type: "select",
       default: "shared", choices: ["shared", "per_tile"],
     }],
   },
   // A second registration, to check it is reachable at all (F4).
-  { key: "plain_tiles", label: "パラメータなしタイル", kind: "scalar", channels: 12, params: [] },
+  {
+    key: "plain_tiles", label: "パラメータなしタイル", kind: "scalar", channels: 12,
+    values_are_matrix: true, params: [],
+  },
   // Interleaved *and* carrying `normalize`, which is the only combination that
   // reaches percentileAbsPerChannel's interleaved branch. Nothing was both:
   // `coef_tiles` has the parameter but is planar, `plain_tiles` is interleaved
@@ -314,6 +419,7 @@ const VIEWS = [
   // 何も落ちない（実際に確認済み）。
   {
     key: "legacy_tiles", label: "旧形式タイル", kind: "scalar", channels: 12,
+    values_are_matrix: true,
     params: [{
       name: "normalize", label: "正規化", type: "select",
       default: "shared", choices: ["shared", "per_tile"],
@@ -324,6 +430,7 @@ const VIEWS = [
   // Three channels that are one colour, not three pictures -- the rgb scenario.
   {
     key: "surface", label: "投影面の色", kind: "rgb", channels: 3,
+    values_are_matrix: false,
     params: [
       { name: "p_r", label: "投影 R", type: "number", default: 1.0, choices: [] },
       { name: "p_g", label: "投影 G", type: "number", default: 1.0, choices: [] },
@@ -1045,6 +1152,19 @@ if (SCENARIO === "views") {
     `layout=${state.payload.layout} `
       + JSON.stringify(state.ranges && state.ranges.map((r) => r.vmax)));
 
+  // --- the readout's heading is this view's name, not one inferred from its shape
+  //
+  // Asserted on a *third* view for a reason. `coef_tiles` and `legacy_tiles`
+  // are both 12-channel scalar views, so a heading derived from the payload --
+  // `channels === 3 ? "投影面の色" : "12係数タイル"`, say -- names the right
+  // view on the first load and on `surface`, and only here is it visibly the
+  // wrong one. The name has to come from the spec that rendered.
+  // 3つ目のビューで見る理由がある。`coef_tiles` と `legacy_tiles` はどちらも
+  // 12チャンネルの scalar なので、ペイロードの形から見出しを決める実装は
+  // 初回でも `surface` でも正しい名前を出し、ここでだけ誤りが見える。
+  check("the readout's heading names the view that rendered, not its shape",
+    el("view-title").textContent === "旧形式タイル", el("view-title").textContent);
+
   // --- an X-Layout the client does not know must fail loudly
   //
   // `mangled_layout` is served with `X-Layout: "Planar"`: present, capitalised,
@@ -1099,6 +1219,17 @@ if (SCENARIO === "views") {
   // を伝えるために存在するので、文が読めなければ意味がない。文が出ることと、
   // JSONの外側が出ないことの両方を確認する。
   const beforeRefused = state.payload;
+  // What the readout says about the view on screen, captured before a switch
+  // that will not render. Compared rather than named: which view is showing
+  // here depends on how many of the switches above were refused, and a literal
+  // would make this check fail for every mutation that changes that -- which is
+  // a property of those mutations, not of the heading.
+  // 拒否される切替の直前に、読み取り欄が名乗っている内容を控える。名前を直接
+  // 書かず前後比較にするのは、ここで表示されているビューが「上の切替のうち
+  // 幾つが拒否されたか」で変わるためで、直値にすると、その数を変える変異の
+  // すべてでこのチェックが落ちる（それは見出しの性質ではない）。
+  const titleBeforeRefusal = el("view-title").textContent;
+  const panelBeforeRefusal = el("view-panel").hidden;
   el("view-select").value = "refused_view";
   el("view-select").__fire("change");
   await sleep(300);
@@ -1108,6 +1239,36 @@ if (SCENARIO === "views") {
     !/\{"detail"|\\"/.test(statusText()), statusText());
   check("a server refusal leaves state.payload identity unchanged",
     state.payload === beforeRefused, `same object: ${state.payload === beforeRefused}`);
+
+  // --- and the readout still describes the view that is actually on screen
+  //
+  // The heading over `#view-values`, and whether that panel is there at all,
+  // are properties of the *rendered* view, written where `state.payload` is
+  // set. Nothing asserted that until this check: writing them in the selector's
+  // `change` handler instead -- the implementation both the code comment and
+  // the harness comment exist to forbid -- passed every check in every
+  // scenario, and so did hardcoding the two labels by channel count.
+  //
+  // The server refused this switch, so nothing about it reached the screen and
+  // nothing about it may reach the readout: both must still describe whatever
+  // view is still drawn. A selector-time write would be captioning that view's
+  // numbers with the name of one that never rendered -- and, since
+  // `refused_view` declares no `values_are_matrix`, would also have put the
+  // duplicate panel back over them.
+  //
+  // 見出しと、その板を出すかどうかは、*描かれた*ビューの性質であり、
+  // `state.payload` を確定する場所で書く。これを検証するチェックが無かった:
+  // セレクタの `change` で書く実装（コード側とハーネス側のコメントがともに
+  // 禁じている当のもの）でも、ラベルをチャンネル数で決め打ちする実装でも、
+  // 全シナリオが通っていた。この切替はサーバが断ったので画面には何も届いて
+  // おらず、読み取り欄にも届いてはならない。セレクタ時に書いていれば、今も
+  // 描かれているビューの数値に、描かれなかったビューの名前が付く。
+  check("a refused view leaves the readout naming the view still on screen",
+    el("view-title").textContent === titleBeforeRefusal
+      && el("view-panel").hidden === panelBeforeRefusal
+      && titleBeforeRefusal !== "—" && titleBeforeRefusal !== "サーバが断るビュー",
+    `title=${titleBeforeRefusal} -> ${el("view-title").textContent} | `
+      + `panel hidden=${panelBeforeRefusal} -> ${el("view-panel").hidden}`);
 }
 
 if (SCENARIO === "button") {
@@ -1394,18 +1555,66 @@ if (SCENARIO === "probe") {
   // スクロールしないと届かない・余白のためにタイルを押し上げる、のどちらも
   // 唯一の役目を果たしていない。行列の読み込み前に検証する（どちらもデータに
   // 依存しないし、下の点クエリの失敗と混ざらない）。
-  const DASHBOARD_IDS = ["range-info", "perf-fetch", "perf-upload", "perf-heap"];
-  check("the display range and the timings sit in the readout dashboard, not the sidebar",
+  // Every id the strip is made of, not only the four that moved. Listing just
+  // the migrated ones left `#probe-grid` and `#view-values` free to be put back
+  // in the sidebar with every check green -- and those two are the readout.
+  // 移動した4つだけでなく、帯を構成する id を全て見る。移動した分だけを並べる
+  // と `#probe-grid` と `#view-values` はサイドバーへ戻せてしまい、しかもその
+  // 2つこそが読み取り欄である。
+  const DASHBOARD_IDS = [
+    "probe-pos", "probe-grid", "view-values",
+    "range-info", "perf-fetch", "perf-ranges", "perf-upload", "perf-heap",
+  ];
+  check("the readout's panels all sit in the dashboard, not the sidebar",
     DASHBOARD_IDS.every((id) => sitsIn(id, "readout") && !sitsIn(id, "sidebar")),
     DASHBOARD_IDS.map(panelOf).join(" | "));
 
   // The 4x3 is built at startup (buildGrid -> buildProbeGrid), so its column
-  // template is already on the element. Fixed lengths only: `minmax(0, 1fr)`
-  // is what spread twelve seven-character cells across the whole window.
-  // 4x3 は起動時に組まれるので列の指定は既に載っている。固定長のみを許す。
+  // template is already on the element. Fixed lengths only -- `minmax(0, 1fr)`
+  // is what spread twelve seven-character cells across the whole window -- and
+  // fixed is not the same as compact: `38px repeat(3, 600px)` has no `fr` in it
+  // and is 1838px wide, which is the same defect wearing the fix's clothes. The
+  // bound is what the panel is for, not a measurement of the current value: the
+  // table holds twelve numbers of seven characters and has no business past
+  // 300px.
+  // 4x3 は起動時に組まれるので列の指定は既に載っている。固定長のみを許すが、
+  // 固定であることとコンパクトであることは別で、`38px repeat(3, 600px)` は
+  // `fr` を含まないまま1838pxになる（直したふりをした同じ欠陥）。上限は
+  // 現在値の写しではなく、この板が何のためにあるかから決める。
   const probeCols = String(el("probe-grid").style.gridTemplateColumns);
+  const trackWidthPx = (template) => {
+    const flat = template.replace(
+      /repeat\(\s*(\d+)\s*,\s*([^)]*)\)/g,
+      (_, n, body) => new Array(Number(n)).fill(body).join(" "));
+    let total = 0;
+    for (const m of flat.matchAll(/([\d.]+)px/g)) total += Number(m[1]);
+    return total;
+  };
+  const probeWidth = trackWidthPx(probeCols);
   check("the readout table's columns are fixed width, not stretched to the window",
-    /px/.test(probeCols) && !/fr\b/.test(probeCols), probeCols);
+    /px/.test(probeCols) && !/fr\b/.test(probeCols) && probeWidth > 0 && probeWidth <= 300,
+    `${probeCols} -> ${probeWidth}px`);
+
+  // --- and the strip itself is a row, which is the whole point of the task
+  //
+  // There is no CSS engine here, so this is asserted about the declaration
+  // rather than about a measured box: the stylesheet says `display: flex` for
+  // `.readout`, and nothing on the element overrides it inline. Weak on
+  // purpose, and stated as such -- what it rules out is the one edit that
+  // silently restores the pre-task stacked layout, which is `display: block`
+  // in either of the two places it can be written. The row *fitting* on one
+  // line at a given width is not checkable from here and is verified by the
+  // screenshots instead.
+  // CSS エンジンが無いので、測った箱ではなく宣言について検証する。意図的に
+  // 弱いチェックであり、排除できるのは「黙って縦積みに戻す1つの編集」だけで
+  // ある（`display: block` を書ける2箇所の両方を見る）。実際に1行に収まるか
+  // どうかはここからは測れず、スクリーンショットで確認する。
+  const readoutRule = cssDeclarations(".readout");
+  const readoutBox = ancestors(el("probe-grid")).find((a) => a.classList.contains("readout"));
+  check("the readout lays its panels out in a row rather than stacking them",
+    /display:\s*flex\b/.test(readoutRule) && !(readoutBox && readoutBox.style.display),
+    `sheet: ${readoutRule.trim().replace(/\s+/g, " ")} | `
+      + `inline: ${readoutBox ? readoutBox.style.display ?? "(none)" : "no .readout ancestor"}`);
 
   // --- nothing loaded yet: there is no matrix to ask about
   //
@@ -1423,12 +1632,55 @@ if (SCENARIO === "probe") {
 
   clickLoad("A");
   await settled();
+
+  // --- the status line says what is on screen and nothing that is already on it
+  //
+  // It used to end with 「転送 570.8 ms / レンジ 0.3 ms / GPU転送 51.2+0.7 ms」,
+  // twenty pixels under a 計測 panel printing two of those three timings
+  // verbatim, and to open with dimensions the toolbar also states. Both halves
+  // are asserted: the line is the summary alone, and レンジ -- the one figure
+  // that lived nowhere else -- is in the panel rather than deleted with the
+  // duplicates.
+  // ステータス行は画面上の他所にあるものを繰り返さない。両方向を見る（行が
+  // 要約だけになったことと、ここにしか無かったレンジがパネルに移った——
+  // 重複と一緒に消えたのではない——こと）。
+  const renderedStatus = statusText();
+  const rangeTiming = el("perf-ranges").textContent;
+  check("the status line after a render is the dimensions alone, with レンジ in the 計測 panel",
+    renderedStatus === `${W}×${H}×12 を表示中` && /^[\d.]+ ms$/.test(rangeTiming),
+    `status="${renderedStatus}" レンジ="${rangeTiming}"`);
+
+  // What the coefficient view does with the second panel, captured before the
+  // switch below; the assertion needs both views and is made once, after it.
+  // 係数ビューでの2枚目の板の状態。切替の前に控え、両方そろってから見る。
+  const panelOnCoefTiles = el("view-panel").hidden;
+
   el("view-select").value = "surface";
   el("view-select").__fire("change");
   await settled();
   check("the readout is exercised on a view that is not the coefficient tiles",
     state.spec.key === "surface" && views.length === 1,
     `spec=${state.spec.key} tiles=${views.length}`);
+
+  // --- the second panel exists only where the picture is not the matrix
+  //
+  // The readout table shows the matrix on every view. On `coef_tiles` the panel
+  // beside it therefore held the same twelve numbers in a second format --
+  // 974px of a 1600px strip, the widest element in a bar built to stop wasting
+  // width, and 113px off the tiles at 900px. On `surface` the two panels answer
+  // different questions and both are needed.
+  //
+  // Both directions in one check, deliberately. "Always hidden" is as wrong as
+  // "always shown" and would blank the only numbers `surface` produces, and a
+  // check that looked at one view alone would pass one of the two.
+  // 読み取り表はどのビューでも行列を出す。`coef_tiles` では隣の板が同じ12個の
+  // 別書式になっていた（1600pxの帯で974px、900pxではタイルから113px）。
+  // `surface` では2枚は別の問いに答えており、両方要る。「常に隠す」は
+  // 「常に出す」と同じく誤りで、`surface` の唯一の数値が消える。片方のビュー
+  // だけを見るチェックはそのどちらかを通してしまう。
+  check("the view-value panel is dropped where it repeats the matrix and kept where it does not",
+    panelOnCoefTiles === true && el("view-panel").hidden === false,
+    `coef_tiles hidden=${panelOnCoefTiles} surface hidden=${el("view-panel").hidden}`);
 
   // --- the hover asks the server for that pixel of the matrix
   //
