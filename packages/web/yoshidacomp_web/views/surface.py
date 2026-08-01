@@ -16,11 +16,38 @@ from .base import ParamSpec, ViewResult, ViewSpec, register
 
 LABELS = ["R", "G", "B"]
 
-# Below this |det(A)| the affine has no usable inverse. The value is a floor on
-# float32 round-off, not a physical threshold.
-# これ未満の |det(A)| では逆行列が使えない。物理的な閾値ではなく float32 の
-# 丸め誤差に対する下限。
-_DET_EPS = 1e-12
+# Below this ratio of |det(A)| to ||A||_F**3, the affine has no usable
+# inverse. This used to be a fixed |det(A)| > 1e-12 test, which is not
+# scale-invariant: det scales as the cube of A's entries, so the same
+# physical degeneracy can sit on either side of a fixed cutoff depending on
+# the units the matrix happens to be stored in. That was a real bug, not a
+# hypothetical one -- a pixel with one input channel attenuated to 1e-8 of
+# normal produced |det(A)| ~= 1.6e-9, a thousand times above 1e-12, and was
+# treated as invertible, painting a plausible-looking but meaningless answer.
+#
+# Comparing |det(A)| against a small multiple of ||A||_F**3 fixes this: both
+# sides scale as s**3 under A -> sA, so the test means the same thing
+# regardless of the matrix's units. 1e-6 sits comfortably above float32's
+# ~1.19e-7 relative precision floor (with margin, since A is cast to float64
+# before this comparison but originates as float32), while every
+# well-conditioned matrix seen in this codebase's real data -- including a
+# plain 2*I, where the ratio is ~0.19 -- sits many orders of magnitude above
+# it.
+#
+# 以前は固定の |det(A)| > 1e-12 という基準だったが、これはスケール不変では
+# ない。行列式は成分の3乗でスケールするため、同じ物理的な特異性でも行列の
+# 単位次第でしきい値のどちら側にも転びうる。これは仮定の話ではなく実際の
+# 不具合で、ある入力チャンネルが正常の1e-8まで減衰した画素は
+# |det(A)| ~= 1.6e-9 となり、1e-12 の千倍でも「正則」として通り、もっとも
+# らしいが無意味な値を描いていた。
+#
+# |det(A)| を ||A||_F**3 の定数倍と比較すればこれは解消する。A -> sA で
+# 両辺とも s**3 倍されるため、行列の単位によらず同じ意味を持つ。1e-6 は
+# float32 の相対精度限界（約1.19e-7、A はここに来る前に float64 化される
+# が元は float32 由来）に十分な余裕を持たせた値で、このコードベースの実データ
+# にある正則な画素（例えば単純な 2*I ではこの比は約0.19）はこれより何桁も
+# 大きい。
+_DET_REL_EPS = 1e-6
 
 
 def _render(context: MatrixContext, params: dict) -> ViewResult:
@@ -41,7 +68,9 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     )
 
     flat = a_mat.reshape(-1, 3, 3)
-    invertible = np.abs(np.linalg.det(flat)) > _DET_EPS
+    det = np.linalg.det(flat)
+    frobenius_norm = np.linalg.norm(flat, ord="fro", axis=(1, 2))
+    invertible = np.abs(det) > _DET_REL_EPS * frobenius_norm**3
     inverse = np.zeros_like(flat)
     if invertible.any():
         inverse[invertible] = np.linalg.inv(flat[invertible])
