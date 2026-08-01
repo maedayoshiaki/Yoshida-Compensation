@@ -295,6 +295,125 @@ def test_surface_lets_vmin_follow_the_data_when_the_response_goes_negative(
     assert float(response.headers["X-Vmax"]) > float(response.headers["X-Vmin"])
 
 
+# A deliberately non-symmetric affine, and a projection command whose three
+# components are all different.
+#
+# Every other fixture in this file (and in ``test_web_golden.py``) uses
+# ``A = 2I`` with a command of ``(1,1,1)`` or ``(0,0,0)``. That combination
+# cannot see two real mistakes, and this was measured rather than guessed:
+# with the registry patched to compute ``A**-T`` instead of ``A**-1``
+# (``"hwk,hwkc->hwc"`` -> ``"hwc,hwkc->hwk"``) the whole file still passed, and
+# so did swapping ``p_r`` with ``p_g`` in the command vector. A diagonal matrix
+# is its own transpose and three equal components survive any permutation, so
+# neither mutation had anything to change. The near-singular fixture does not
+# help either: both ``det`` and ``||A||_F`` are transpose-invariant.
+#
+# That matters because the matrices this view actually renders are strongly
+# non-symmetric -- ``data/comp_test_20260724/matrices_gamma.npy`` has
+# ``max|offdiag| / max|diag| = 0.251`` at its centre -- so a transposed inverse
+# would return a *different, plausible* surface colour on every real input, in
+# the one view whose entire output is a colour. ``A`` below sits at 0.273 by the
+# same measure, and is well-conditioned (``|det|/||A||_F**3 = 0.144``, five
+# orders of magnitude above ``_DET_REL_EPS``).
+#
+# 他のフィクスチャは A = 2I かつコマンドが (1,1,1)/(0,0,0) であり、これでは
+# 逆行列の転置（A^-T）も p_r と p_g の取り違えも検出できない（実際に両方の
+# 変異を入れてもこのファイルは全て通った）。対角行列は自身の転置に等しく、
+# 3成分が等しいベクトルはどう入れ替えても同じだからである。det も ||A||_F も
+# 転置不変なので特異性のフィクスチャも役に立たない。実データの行列は明確に
+# 非対称（実測で非対角/対角 = 0.251）であり、転置した逆行列は「違うが
+# もっともらしい」色を返す。以下の A はこの比が 0.273 で、条件数も十分よい。
+_ASYMMETRIC_A = np.array(
+    [
+        [1.00, 0.30, -0.20],
+        [0.15, 0.90, 0.25],
+        [-0.10, 0.20, 1.10],
+    ],
+    dtype=np.float32,
+)
+_ASYMMETRIC_B = np.array([0.05, -0.12, 0.20], dtype=np.float32)
+_ASYMMETRIC_COMMAND = (0.2, 0.6, 0.9)
+
+
+def _asymmetric_matrices(height: int, width: int) -> np.ndarray:
+    matrices = np.zeros((height, width, 4, 3), dtype=np.float32)
+    matrices[:, :, :3, :] = _ASYMMETRIC_A
+    matrices[:, :, 3, :] = _ASYMMETRIC_B
+    return matrices
+
+
+def test_surface_round_trips_a_non_symmetric_affine_under_an_asymmetric_command(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """``[C, 1] @ M`` must reproduce ``P`` for a non-diagonal ``M``.
+
+    The expectation is derived by an *independent round trip* rather than from
+    hand-computed literals. ``photometric_compensation.calc_compensation_image``
+    documents the convention as ``[R, G, B, 1] @ M``; this view claims to invert
+    exactly that. So feeding the view's own answer back through the forward
+    model and requiring the projection command to come out pins both
+    derivations at once -- the einsum's index order and the order of the
+    components in the command vector -- with no literal for a future edit to
+    quietly agree with.
+
+    期待値は手計算の定数ではなく、順方向モデルによる往復で導く。
+    ``[R,G,B,1] @ M`` という規約は
+    ``photometric_compensation.calc_compensation_image`` が定めており、この
+    ビューはその逆を主張している。ビューの答えを順方向へ戻して投影コマンドが
+    再現されることを要求すれば、einsum の添字順とコマンドベクトルの成分順の
+    両方を、書き間違えようのある定数を一切置かずに固定できる。
+    """
+    store.clear()
+    height, width = 4, 5
+    stand_in_projector_config(width=width, height=height)
+    client = TestClient(create_app())
+
+    matrices = _asymmetric_matrices(height, width)
+    matrix_id = _load(client, tmp_path, matrices)
+
+    p_r, p_g, p_b = _ASYMMETRIC_COMMAND
+    response = client.get(
+        f"/api/matrix/{matrix_id}/view/surface?p_r={p_r}&p_g={p_g}&p_b={p_b}"
+    )
+    assert response.status_code == 200
+    planar = np.frombuffer(response.content, dtype="<f4").reshape(3, height, width)
+
+    forward = matrices[0, 0].astype(np.float64)  # (4, 3), the same M everywhere
+    command = np.array(_ASYMMETRIC_COMMAND, dtype=np.float64)
+
+    # (3, H, W) -> (N, 3), then [C, 1] @ M for every pixel at once.
+    surface = planar.reshape(3, -1).T.astype(np.float64)
+    homogeneous = np.concatenate([surface, np.ones((surface.shape[0], 1))], axis=1)
+    np.testing.assert_allclose(
+        homogeneous @ forward,
+        np.broadcast_to(command, (surface.shape[0], 3)),
+        atol=1e-5,
+    )
+
+    # The fixture's discriminating power, asserted rather than assumed.
+    #
+    # Both of these are what the two mutations above actually produce, and both
+    # are *finite and plausible* -- the failure this test exists for is a wrong
+    # colour, not an exception. If a later edit "simplifies" A back to something
+    # diagonal, or makes the command's components equal, these two lines fail
+    # first and say why, instead of the file silently going back to proving
+    # nothing.
+    # フィクスチャの判別力そのものを検証する。以下はどちらも実際の変異が返す
+    # 値で、いずれも有限でもっともらしい（このテストが守っているのは例外では
+    # なく「色が違う」こと）。将来 A を対角に戻したりコマンドの成分を揃えたり
+    # したら、まずここが落ちて理由を告げる。
+    a_mat = forward[:3, :]
+    b_vec = forward[3, :]
+    transposed = (command - b_vec) @ np.linalg.inv(a_mat).T
+    assert np.max(np.abs(transposed @ a_mat + b_vec - command)) > 1e-3, (
+        "A is too close to symmetric for this test to tell A**-1 from A**-T"
+    )
+    swapped = np.array([p_g, p_r, p_b], dtype=np.float64)
+    assert np.max(np.abs(swapped - command)) > 1e-3, (
+        "the command's components are too close together to tell p_r from p_g"
+    )
+
+
 def test_surface_is_listed_with_its_params() -> None:
     store.clear()
     client = TestClient(create_app())
