@@ -68,6 +68,11 @@ export async function fetchView(matrixId, key, params) {
     height: Number(res.headers.get("X-Height")),
     width: Number(res.headers.get("X-Width")),
     channels: Number(res.headers.get("X-Channels")),
+    // "planar" = (C, H, W); anything else (or a missing header) is the old
+    // interleaved (H, W, C). Every consumer that indexes into `data` has to
+    // branch on this, so it travels with the payload rather than being assumed.
+    // "planar" は (C, H, W)。ヘッダが無ければ従来の (H, W, C) とみなす。
+    layout: res.headers.get("X-Layout") || "interleaved",
     kind: res.headers.get("X-Kind"),
     vmin: Number(res.headers.get("X-Vmin")),
     vmax: Number(res.headers.get("X-Vmax")),

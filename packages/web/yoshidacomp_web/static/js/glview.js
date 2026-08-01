@@ -13,7 +13,8 @@
 //    encoding and dithering happen in the shader from full precision.
 //
 // Differences from the reference: no ROI machinery, single-channel extraction
-// from an interleaved (H, W, C) array, and u_vmin/u_vmax/u_colormap in place of
+// from a planar (C, H, W) -- or, still supported, interleaved (H, W, C) --
+// array, and u_vmin/u_vmax/u_colormap in place of
 // u_bandLo/u_bandHi/u_mode/u_bright.
 //
 // この設計が「なぜこの形か」は、うっかり元に戻しやすいので日本語でも残す。
@@ -140,13 +141,14 @@ export class GLView {
     this._dprMq.addEventListener("change", this._onDpr);
   }
 
-  // img: { data, width, height, channels, channel }
+  // img: { data, width, height, channels, channel, layout }
   //
-  // `data` is the whole interleaved (H, W, channels) array as fetched. We slice
-  // one plane out of it and upload that as R32F. The caller keeps `data` alive
-  // on the CPU so pixel probing never needs a server round-trip.
-  // data は (H, W, channels) のインターリーブ配列そのもの。1面だけ切り出して
-  // R32F で載せる。data は呼び出し側が保持し、画素読み取りはサーバに行かない。
+  // `data` is the whole multi-channel array as fetched, in either layout. We
+  // slice one plane out of it and upload that as R32F. The caller keeps `data`
+  // alive on the CPU so pixel probing never needs a server round-trip.
+  // data は取得した多チャンネル配列そのもの（layout はどちらでもよい）。
+  // 1面だけ切り出して R32F で載せる。data は呼び出し側が保持し、画素読み取りは
+  // サーバに行かない。
   setImage(img) {
     const gl = this.gl;
     const width = img.width, height = img.height;
@@ -157,7 +159,19 @@ export class GLView {
     let plane;
     if (channels === 1) {
       plane = img.data;
+    } else if (img.layout === "planar") {
+      // Planar (C, H, W): the channel is already contiguous. subarray shares
+      // the buffer, so this costs nothing.
+      // planar (C, H, W) ならチャンネルは既に連続しており、subarray は
+      // バッファを共有するのでコストがかからない。
+      const n = width * height;
+      plane = img.data.subarray(channel * n, (channel + 1) * n);
     } else {
+      // Interleaved (H, W, C): one strided walk per channel. Kept because the
+      // header is advisory -- a response without X-Layout, and the test
+      // harness's fixtures, still arrive this way.
+      // インタリーブ (H, W, C) はチャンネルごとのストライド走査になる。
+      // X-Layout の無い応答のために経路は残す。
       const n = width * height;
       plane = new Float32Array(n);
       for (let i = 0, k = channel; i < n; i++, k += channels) plane[i] = img.data[k];

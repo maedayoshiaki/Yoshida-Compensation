@@ -124,11 +124,24 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
             ),
         )
 
-    body = np.ascontiguousarray(result.data, dtype="<f4").tobytes()
+    # Serialise as planar (C, H, W). The client uploads one channel per texture,
+    # so a planar body lets it take a zero-copy subarray instead of walking the
+    # array with a stride. Measured: the strided de-interleave was 93% of the
+    # client's "GPU upload" time for a 95 MB payload.
+    # planar (C, H, W) で直列化する。クライアントはチャンネルごとにテクスチャを
+    # 作るので、planar ならストライド走査ではなく subarray のゼロコピーで済む。
+    # 実測では 95MB のペイロードでストライド走査がアップロード時間の93%を占めた。
+    #
+    # ``np.moveaxis`` returns a view; ``ascontiguousarray`` performs the single
+    # copy. The reorder happens once here rather than as twelve strided walks on
+    # the client.
+    # ``np.moveaxis`` は view を返し、実際の複製は ``ascontiguousarray`` が行う。
+    body = np.ascontiguousarray(np.moveaxis(result.data, 2, 0), dtype="<f4").tobytes()
     headers = {
         "X-Height": str(height),
         "X-Width": str(width),
         "X-Channels": str(channels),
+        "X-Layout": "planar",
         "X-Kind": spec.kind,
         "X-Vmin": repr(float(result.vmin)),
         "X-Vmax": repr(float(result.vmax)),

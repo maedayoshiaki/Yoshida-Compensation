@@ -8,8 +8,11 @@
 // サーバ側ビューパラメータの変更だけが再フェッチを起こす。
 //
 // The fetched Float32Array stays on the CPU for the whole session so pixel
-// probing reads data[(row * width + col) * channels + c] locally.
+// probing reads it locally. The body is planar (C, H, W) -- channel c of pixel
+// (row, col) is data[c * width * height + row * width + col] -- with the older
+// interleaved (H, W, C) still handled wherever `payload.layout` says so.
 // 取得した Float32Array は保持し続け、画素読み取りはローカルで済ませる。
+// 本体は planar (C, H, W)。従来のインタリーブも layout を見て扱う。
 
 import { loadMatrix, listViews, fetchView } from "./api.js";
 import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
@@ -44,7 +47,7 @@ const state = {
   meta: null,
   specs: [],        // every ViewSpec from /api/views
   spec: null,       // the active one
-  payload: null,    // { data, width, height, channels, vmin, vmax, labels }
+  payload: null,    // { data, width, height, channels, layout, vmin, vmax, labels }
   ranges: null,     // [{ vmin, vmax }] per channel
   rows: DEFAULT_ROWS,
   cols: DEFAULT_COLS,
@@ -113,30 +116,73 @@ function nextFrame() {
 // two sequential passes costs a fraction of that and is accurate to ~0.05% of
 // the range, which is far below what the eye reads off a colour map.
 // ソートは高すぎるのでヒストグラムで分位点を取る。
-function percentileAbsPerChannel(data, channels, pct) {
+//
+// `layout` decides where channel `c`'s samples live: under planar (C, H, W)
+// they are the contiguous run [c * stride, (c + 1) * stride); under interleaved
+// (H, W, C) they sit every `channels` elements. Reading the wrong one does not
+// throw -- it just attributes every value to the wrong channel and produces
+// twelve plausible-looking but wrong display ranges.
+// planar なら各チャンネルは連続、インタリーブなら channels 間隔。取り違えても
+// 例外にはならず、12枚のレンジが静かに入れ替わるだけなので分岐を明示する。
+function percentileAbsPerChannel(data, channels, pct, layout) {
   const BINS = 2048;
+  const planar = layout === "planar";
+  // Pixels per channel (planar only). Math.floor rather than `| 0`: the
+  // camera-space payload this is headed for is ~390M elements and `| 0` is a
+  // 32-bit trap waiting for the next size increase.
+  // planar のチャンネルあたり画素数。`| 0` は32bitで折り返すため使わない。
+  const stride = Math.floor(data.length / channels);
   const maxAbs = new Float64Array(channels);
   const counts = new Float64Array(channels);
-  for (let p = 0, n = data.length; p < n; p += channels) {
-    for (let c = 0; c < channels; c++) {
-      const v = data[p + c];
-      if (!Number.isFinite(v)) continue;
-      const a = v < 0 ? -v : v;
-      if (a > maxAbs[c]) maxAbs[c] = a;
-      counts[c]++;
-    }
-  }
   const hist = new Int32Array(channels * BINS);
-  for (let p = 0, n = data.length; p < n; p += channels) {
+
+  // The two passes are written out per layout rather than behind a callback:
+  // this walks ~25M floats twice on a 1080p payload and a per-sample closure
+  // is not worth the risk on that path.
+  // 1080pで約2500万要素を2周するため、走査は layout ごとに素直に展開する。
+  if (planar) {
     for (let c = 0; c < channels; c++) {
-      const v = data[p + c];
-      if (!Number.isFinite(v)) continue;
+      const base = c * stride;
+      for (let i = 0; i < stride; i++) {
+        const v = data[base + i];
+        if (!Number.isFinite(v)) continue;
+        const a = v < 0 ? -v : v;
+        if (a > maxAbs[c]) maxAbs[c] = a;
+        counts[c]++;
+      }
+    }
+    for (let c = 0; c < channels; c++) {
       const m = maxAbs[c];
       if (m === 0) continue;
-      const bin = (((v < 0 ? -v : v) * (BINS - 1)) / m) | 0;
-      hist[c * BINS + bin]++;
+      const base = c * stride, hbase = c * BINS;
+      for (let i = 0; i < stride; i++) {
+        const v = data[base + i];
+        if (!Number.isFinite(v)) continue;
+        hist[hbase + ((((v < 0 ? -v : v) * (BINS - 1)) / m) | 0)]++;
+      }
+    }
+  } else {
+    for (let p = 0, n = data.length; p < n; p += channels) {
+      for (let c = 0; c < channels; c++) {
+        const v = data[p + c];
+        if (!Number.isFinite(v)) continue;
+        const a = v < 0 ? -v : v;
+        if (a > maxAbs[c]) maxAbs[c] = a;
+        counts[c]++;
+      }
+    }
+    for (let p = 0, n = data.length; p < n; p += channels) {
+      for (let c = 0; c < channels; c++) {
+        const v = data[p + c];
+        if (!Number.isFinite(v)) continue;
+        const m = maxAbs[c];
+        if (m === 0) continue;
+        const bin = (((v < 0 ? -v : v) * (BINS - 1)) / m) | 0;
+        hist[c * BINS + bin]++;
+      }
     }
   }
+
   const out = new Array(channels);
   for (let c = 0; c < channels; c++) {
     const m = maxAbs[c];
@@ -296,9 +342,18 @@ function showProbe(hit) {
     return;
   }
   $("probe-pos").textContent = `col ${hit.col}, row ${hit.row}`;
-  const base = (hit.row * p.width + hit.col) * p.channels;
+  // Planar (C, H, W) puts the channel index outermost; interleaved (H, W, C)
+  // puts it innermost. Getting this backwards misreports every hovered value
+  // while the tiles themselves still look right -- nothing would flag it.
+  // planar は channel が最外、インタリーブは最内。取り違えても絵は正しいまま
+  // 読み取り値だけが狂うので、どこも失敗しない。
+  const planar = p.layout === "planar";
+  const stride = p.width * p.height;
+  const offset = hit.row * p.width + hit.col;
   for (let c = 0; c < probeCells.length && c < p.channels; c++) {
-    const v = p.data[base + c];
+    const v = planar
+      ? p.data[c * stride + offset]
+      : p.data[offset * p.channels + c];
     const cell = probeCells[c];
     cell.textContent = fmt(v);
     cell.className = Number.isFinite(v) ? "probe-cell" : "probe-cell nan";
@@ -390,7 +445,7 @@ function computeRanges() {
     // The wire format carries a single (vmin, vmax) pair, so 12 independent
     // ranges have to be derived here from the array we already hold.
     // ヘッダは1組のレンジしか運べないので、タイルごとのレンジは手元で出す。
-    const abs = percentileAbsPerChannel(p.data, p.channels, 99);
+    const abs = percentileAbsPerChannel(p.data, p.channels, 99, p.layout);
     state.ranges = abs.map((a) => ({ vmin: -a, vmax: a }));
   } else {
     state.ranges = Array.from({ length: p.channels }, () => ({ vmin: p.vmin, vmax: p.vmax }));
@@ -497,6 +552,7 @@ async function reload(req = beginRequest()) {
         height: payload.height,
         channels: payload.channels,
         channel: c,
+        layout: payload.layout,
       });
     }
   } finally {

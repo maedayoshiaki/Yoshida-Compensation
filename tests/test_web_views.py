@@ -114,10 +114,44 @@ def test_coef_tiles_returns_float32_binary(tmp_path, stand_in_projector_config) 
     assert response.headers["X-Channels"] == "12"
     assert response.headers["X-Kind"] == "scalar"
 
-    array = np.frombuffer(response.content, dtype="<f4").reshape(6, 8, 12)
-    # チャンネル順は (i, j) の行優先: 0=in_R->out_R, 1=in_R->out_G, ... 11=bias->out_B
-    assert np.allclose(array[:, :, 0], np.arange(8, dtype=np.float32)[None, :])
-    assert np.allclose(array[:, :, 10], -1.0)
+    array = np.frombuffer(response.content, dtype="<f4").reshape(12, 6, 8)
+    # 本体は planar (C, H, W)。チャンネル順は (i, j) の行優先:
+    # 0=in_R->out_R, 1=in_R->out_G, ... 11=bias->out_B
+    assert np.allclose(array[0], np.arange(8, dtype=np.float32)[None, :])
+    assert np.allclose(array[10], -1.0)
+
+
+def test_view_body_is_planar_and_declares_its_layout(tmp_path, stand_in_projector_config) -> None:
+    """本体は (C, H, W)。ヘッダ X-Layout がそれを申告する。
+
+    インタリーブ (H, W, C) だとクライアントがチャンネルを取り出すのに
+    ストライドコピーが要る。実測ではGPUアップロード時間の93%がこの
+    デインターリーブだった。planar なら subarray でゼロコピーになる。
+    """
+    import numpy as np
+
+    stand_in_projector_config(width=8, height=6)
+    client = TestClient(create_app())
+
+    matrices = np.zeros((6, 8, 4, 3), dtype=np.float32)
+    xs = np.arange(8, dtype=np.float32)[None, :]
+    ys = np.arange(6, dtype=np.float32)[:, None]
+    matrices[:, :, 0, 0] = xs     # channel 0
+    matrices[:, :, 3, 1] = ys     # channel 10
+    path = tmp_path / "m.npy"
+    np.save(path, matrices)
+    matrix_id = client.post("/api/session/matrix", json={"path": str(path)}).json()["id"]
+
+    response = client.get(f"/api/matrix/{matrix_id}/view/coef_tiles")
+    assert response.status_code == 200
+    assert response.headers["X-Layout"] == "planar"
+    assert response.headers["X-Channels"] == "12"
+
+    planar = np.frombuffer(response.content, dtype="<f4").reshape(12, 6, 8)
+    np.testing.assert_allclose(planar[0], np.broadcast_to(xs, (6, 8)))
+    np.testing.assert_allclose(planar[10], np.broadcast_to(ys, (6, 8)))
+    # 転置していないことの確認: 幅8・高さ6の非正方なので取り違えれば形が合わない
+    assert planar.shape == (12, 6, 8)
 
 
 def test_coef_tiles_label_format_is_the_4x3_grid_contract(
@@ -276,8 +310,8 @@ def test_coef_tiles_masks_outside_active_region(tmp_path, stand_in_projector_con
     response = client.get(f"/api/matrix/{matrix_id}/view/coef_tiles")
     assert response.status_code == 200
 
-    data = np.frombuffer(response.content, dtype="<f4").reshape(height, width, 12)
-    finite_mask = np.all(np.isfinite(data), axis=2)
+    data = np.frombuffer(response.content, dtype="<f4").reshape(12, height, width)
+    finite_mask = np.all(np.isfinite(data), axis=0)
 
     expected_mask = np.zeros((height, width), dtype=bool)
     expected_mask[y : y + h, x : x + w] = True
@@ -289,8 +323,8 @@ def test_coef_tiles_masks_outside_active_region(tmp_path, stand_in_projector_con
     # A point inside the true rectangle (row=y, col=x) must be finite; the
     # point a transposed reading (row=x, col=y) would have kept instead must
     # be NaN, since x != y and w != h here.
-    assert np.all(np.isfinite(data[y, x]))
-    assert np.all(np.isnan(data[x, y]))
+    assert np.all(np.isfinite(data[:, y, x]))
+    assert np.all(np.isnan(data[:, x, y]))
 
 
 def test_bad_number_param_is_400_not_500(tmp_path, stand_in_projector_config) -> None:

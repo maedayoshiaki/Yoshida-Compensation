@@ -210,24 +210,32 @@ globalThis.fetch = async (url, options) => {
     const counted = `${matrixPath}:${key}`;
     viewFetchCount.set(counted, (viewFetchCount.get(counted) ?? 0) + 1);
     const spec = VIEWS.find((v) => v.key === key);
-    // Channel c carries (c + 1) * tag, not one constant for the whole array.
+    // Channel c carries (c + 1) * tag, not one constant for the whole array,
+    // laid out planar (C, H, W) exactly as routers/view.py serialises it.
     //
-    // The tag still identifies the matrix -- channel 0 is 1 * tag, so
-    // state.payload.data[0] reads it straight off. But the channels now differ
-    // from each other, which is what lets a per-channel range be told apart
-    // from the shared one. Filled with a single constant, every channel's 99th
-    // percentile came out at the header's own vmax and "shared vs per-tile" was
-    // unobservable: the histogram path ran and the assertion could not fail.
-    // チャンネルcの値を (c+1)*tag にする。チャンネル0は 1*tag なので行列の
-    // 識別子はそのまま読める。全体を同一定数で埋めるとチャンネル別分位点が
+    // The tag still identifies the matrix -- channel 0 is 1 * tag and, planar,
+    // channel 0 is also the *first* run of the body, so state.payload.data[0]
+    // reads it straight off exactly as it did when the body was interleaved.
+    // But the channels differ from each other, which is what lets a per-channel
+    // range be told apart from the shared one. Filled with a single constant,
+    // every channel's 99th percentile came out at the header's own vmax and
+    // "shared vs per-tile" was unobservable: the histogram path ran and the
+    // assertion could not fail.
+    // チャンネルcの値を (c+1)*tag にし、routers/view.py と同じ planar (C, H, W)
+    // で並べる。planar でもチャンネル0が先頭なので data[0] はこれまで通り
+    // 行列の識別子を返す。全体を同一定数で埋めるとチャンネル別分位点が
     // ヘッダのvmaxと一致してしまい、shared と per_tile を区別できなかった。
     const tag = tagForPath[matrixPath] ?? 0;
     const data = new Float32Array(H * W * spec.channels);
-    for (let i = 0; i < data.length; i++) data[i] = ((i % spec.channels) + 1) * tag;
+    for (let c = 0; c < spec.channels; c++) {
+      const value = (c + 1) * tag;
+      data.fill(value, c * H * W, (c + 1) * H * W);
+    }
     return new Response(data.buffer, {
       headers: {
         "X-Height": String(H), "X-Width": String(W),
-        "X-Channels": String(spec.channels), "X-Kind": spec.kind,
+        "X-Channels": String(spec.channels), "X-Layout": "planar",
+        "X-Kind": spec.kind,
         "X-Vmin": "-1.0", "X-Vmax": "1.0",
         "X-Labels-B64": Buffer.from(JSON.stringify(viewLabels(spec)), "utf-8").toString("base64"),
       },

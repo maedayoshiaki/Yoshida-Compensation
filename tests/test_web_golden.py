@@ -239,8 +239,12 @@ def test_coef_tiles_golden_diverging_colormap_exposure_gamma_and_srgb(
     assert vmax == pytest.approx(2.0)
     assert vmin == pytest.approx(-2.0)
 
-    data = np.frombuffer(response.content, dtype="<f4").reshape(height, width, 12)
-    channel0 = data[0, :, 0]  # in_R -> out_R, one value per probe column
+    # The body is planar (C, H, W); the shader mirror below is unaffected,
+    # because the shader only ever sees one channel at a time.
+    # 本体は planar (C, H, W)。シェーダは1チャンネルしか見ないのでミラー側は
+    # 変わらない。
+    data = np.frombuffer(response.content, dtype="<f4").reshape(12, height, width)
+    channel0 = data[0, 0, :]  # in_R -> out_R, one value per probe column
     assert channel0.tolist() == pytest.approx([-2.0, 0.0, 1.0, -1.0])
 
     exposure, gamma = -1.0, 2.2

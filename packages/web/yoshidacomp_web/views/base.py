@@ -40,7 +40,12 @@ class ViewResult:
     """What a view renders.
 
     Attributes:
-        data: ``(H, W, C)`` float32. The wire format is exactly this, little-endian.
+        data: ``(H, W, C)`` float32 -- the natural shape on the Python side.
+            ``routers/view.py`` moves it to planar ``(C, H, W)`` little-endian
+            for the wire and says so in ``X-Layout``; a view never does that
+            itself.
+            Python 側は ``(H, W, C)`` のまま。ワイヤ上の planar ``(C, H, W)``
+            への並べ替えは ``routers/view.py`` が一括で行う。
         vmin, vmax: Suggested display range (the frontend may override).
         labels: One label per channel, shown as tile captions.
     """
