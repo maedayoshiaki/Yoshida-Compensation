@@ -107,6 +107,18 @@ select, #server-params input {
   background: var(--panel-2); color: var(--ink); font-size: 12px; margin-bottom: 5px;
 }
 input[type="range"] { accent-color: var(--accent); }
+
+/* Typed gamma box. Sits above its slider, so it needs its own bottom margin.
+   数値入力のγ。スライダの上に置くので下マージンを自前で持つ。 */
+input.num {
+  width: 100%;
+  margin-bottom: 6px;
+  padding: 4px 6px;
+  background: var(--panel-2);
+  color: var(--ink);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
 hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
 .readouts div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; font-size: 11.5px; }
 .readouts .val { color: var(--accent); text-align: right; }

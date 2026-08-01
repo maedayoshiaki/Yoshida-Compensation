@@ -32,6 +32,13 @@ const SUPPORTED_KIND = "scalar";
 const DEFAULT_ROWS = ["in_R", "in_G", "in_B", "bias"];
 const DEFAULT_COLS = ["out_R", "out_G", "out_B"];
 
+// Gamma bounds for the typed input. The shader guards with max(u_gamma, 1e-6),
+// so the floor here is about keeping the control usable rather than safe.
+// 数値入力で受け付けるγの範囲。シェーダ側は max(u_gamma, 1e-6) で守られているので、
+// この下限は安全性ではなく操作性のためのもの。
+const GAMMA_MIN = 0.01;
+const GAMMA_MAX = 10;
+
 const state = {
   matrixId: null,
   meta: null,
@@ -588,9 +595,26 @@ function wireDisplayControls() {
     $("ev-val").textContent = display.exposure.toFixed(1);
     push();
   });
+  // The slider is for coarse dragging at 0.01; the number box accepts whatever
+  // precision is typed, because the useful gamma for the p99 range sits near
+  // 0.45 and a tenth of a step is visible on a diverging map.
+  // スライダは 0.01 刻みの粗調整。数値入力は打ち込まれた桁をそのまま採用する。
+  // p99レンジで有用なγは 0.45 付近で、発散カラーマップでは 0.01 の
+  // さらに下の桁が見た目に出るため。
   $("gamma-slider").addEventListener("input", (e) => {
     display.gamma = Number(e.target.value);
-    $("gamma-val").textContent = display.gamma.toFixed(2);
+    $("gamma-input").value = display.gamma.toFixed(2);
+    push();
+  });
+  $("gamma-input").addEventListener("input", (e) => {
+    const typed = Number.parseFloat(e.target.value);
+    if (!Number.isFinite(typed)) return;   // mid-edit ("", "-", "0.") — wait
+    display.gamma = Math.min(Math.max(typed, GAMMA_MIN), GAMMA_MAX);
+    // Only follow the slider's own range; a typed value outside it parks the
+    // handle at the end rather than silently clamping what the user asked for.
+    // スライダの可動域外を打ち込んだ場合はハンドルを端に置くだけで、
+    // 入力値そのものは丸めない。
+    $("gamma-slider").value = String(display.gamma);
     push();
   });
   $("cmap-select").addEventListener("change", (e) => {

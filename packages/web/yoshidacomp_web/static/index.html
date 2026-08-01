@@ -40,8 +40,10 @@
         <input id="ev-slider" type="range" min="-6" max="6" step="0.1" value="0" />
       </div>
       <div class="group">
-        <label class="lbl">γ <span id="gamma-val" class="mono">1.00</span></label>
-        <input id="gamma-slider" type="range" min="0.2" max="3" step="0.05" value="1" />
+        <label class="lbl" for="gamma-input">γ</label>
+        <input id="gamma-input" class="mono num" type="number"
+               min="0.01" max="10" step="0.01" value="1" />
+        <input id="gamma-slider" type="range" min="0.2" max="3" step="0.01" value="1" />
       </div>
       <div class="group">
         <label class="lbl">カラーマップ</label>
