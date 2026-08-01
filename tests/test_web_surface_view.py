@@ -143,6 +143,83 @@ def test_surface_marks_near_singular_pixel_nan_even_with_ordinary_magnitudes(
     assert np.isfinite(planar[:, 0, 0]).all()
 
 
+def test_surface_masks_outside_active_region_and_composes_with_singularity(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """The NaN mask must honour ``(x, y, w, h)`` as-is, and compose with the
+    per-pixel singularity check, not overwrite it.
+
+    Mirrors ``test_coef_tiles_masks_outside_active_region`` in
+    ``test_web_views.py``: every other test in this file uses a 5x4 frame
+    where ``x != y`` and ``w != h`` only by accident, so this test picks an
+    asymmetric, off-centre active rectangle on purpose -- a transposed
+    ``x``/``y`` or ``w``/``h`` in the mask slice lands on a disjoint set of
+    pixels and is caught explicitly below. It also plants one singular pixel
+    *inside* the active region, alongside finite pixels both inside and
+    outside, so all three cases (finite+inside, singular+inside,
+    finite+outside) are asserted to land where they should -- proving the
+    active-region mask and the singularity mask compose with AND rather
+    than one silently overwriting the other.
+
+    ``coef_tiles.py`` の ``test_coef_tiles_masks_outside_active_region`` に
+    倣う。このファイルの他のテストは5x4という偶然 ``x != y`` かつ
+    ``w != h`` になっているだけの frame を使っているため、ここでは意図的に
+    非対称・非中央の有効領域を選ぶ。行列転置バグは別の画素集合に着地する
+    ため以下で明示的に検出できる。さらに有効領域の内側に特異画素を1つ
+    置き、内側・外側それぞれの正則画素とあわせて3パターン
+    （正則+内側、特異+内側、正則+外側）が期待通りの場所に現れるかを
+    確認する。これにより、有効領域マスクと特異性マスクが AND で合成され、
+    片方がもう片方を黙って上書きしていないことを証明する。
+    """
+    store.clear()
+    height, width = 6, 8
+    x, y, w, h = 1, 2, 5, 3  # active rect occupies rows 2-4, cols 1-5.
+    stand_in_projector_config(
+        width=width,
+        height=height,
+        active_x=x,
+        active_y=y,
+        active_width=w,
+        active_height=h,
+    )
+    client = TestClient(create_app())
+
+    matrices = np.zeros((height, width, 4, 3), dtype=np.float32)
+    for c in range(3):
+        matrices[:, :, c, c] = 2.0  # well-conditioned everywhere...
+    singular_row, singular_col = 3, 3
+    matrices[singular_row, singular_col, :3, :] = 0.0  # ...except this one, inside the region
+
+    matrix_id = _load(client, tmp_path, matrices)
+
+    response = client.get(f"/api/matrix/{matrix_id}/view/surface")
+    assert response.status_code == 200
+    planar = np.frombuffer(response.content, dtype="<f4").reshape(3, height, width)
+    finite_mask = np.all(np.isfinite(planar), axis=0)
+
+    expected_mask = np.zeros((height, width), dtype=bool)
+    expected_mask[y : y + h, x : x + w] = True
+    expected_mask[singular_row, singular_col] = False
+    assert np.array_equal(finite_mask, expected_mask), (
+        "active-region mask does not match (x, y, w, h) as configured, or does "
+        "not compose with the singularity mask -- check for a transposed x/y "
+        "or w/h in the mask slice"
+    )
+
+    # finite + inside: the active rectangle's corner, away from the singular pixel.
+    assert np.all(np.isfinite(planar[:, y, x]))
+    # singular + inside: the planted singular pixel must stay NaN, not be
+    # "rescued" by being inside the active region.
+    assert np.all(np.isnan(planar[:, singular_row, singular_col]))
+    # finite + outside: a well-conditioned pixel outside the region must still
+    # be NaN -- the active-region mask must not be skipped just because A
+    # itself is invertible.
+    assert np.all(np.isnan(planar[:, 0, 0]))
+    # The point a transposed (x, y) reading would have kept instead (row=x,
+    # col=y) must be NaN, since x != y and w != h here.
+    assert np.all(np.isnan(planar[:, x, y]))
+
+
 def test_surface_is_listed_with_its_params() -> None:
     store.clear()
     client = TestClient(create_app())
