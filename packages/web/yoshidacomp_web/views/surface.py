@@ -19,7 +19,7 @@ from __future__ import annotations
 import numpy as np
 
 from ..matrix import MatrixContext
-from .base import ParamSpec, ViewResult, ViewSpec, register
+from .base import ParamSpec, ViewNotApplicable, ViewResult, ViewSpec, register
 
 LABELS = ["R", "G", "B"]
 
@@ -92,11 +92,14 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     """Solve C·A = P - b per pixel by Cramer's rule, NaN where A is singular.
 
     Raises:
-        ValueError: the matrix is in camera space. ``routers/view.py`` maps this
-            to a 400 with the message intact; see ``_CAMERA_SPACE_REFUSAL``.
+        ViewNotApplicable: the matrix is in camera space. ``routers/view.py``
+            maps this to a 400 with the message intact; see
+            ``_CAMERA_SPACE_REFUSAL``. Deliberately not a ``ValueError``, which
+            numpy also raises for shape mistakes inside this function -- those
+            are bugs and must stay 500s.
     """
     if context.space == "camera":
-        raise ValueError(_CAMERA_SPACE_REFUSAL)
+        raise ViewNotApplicable(_CAMERA_SPACE_REFUSAL)
 
     array = np.asarray(context.array, dtype=np.float32)
     height, width = int(array.shape[0]), int(array.shape[1])
@@ -114,13 +117,26 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     #   np.linalg.inv form   2091-2154 ms   650.6 MB peak
     #   this form             732- 755 ms   389.6 MB peak
     #
-    # -- 2.8x faster and 40% less memory, for a 24 MB response. The float32
-    # bodies are **bit-identical**: 0 of 6,220,800 floats differ, and the NaN
-    # masks are equal. (Only the ``vmin``/``vmax`` header hints move, by
-    # <=1.4e-8 relative, because ``np.nanpercentile`` interpolates in float64
-    # where ``np.percentile`` over a float32 copy did so in float32 -- three
-    # orders of magnitude below this view's own float32 spacing of 4.8e-7 at
-    # the values involved.)
+    # -- 2.8x faster and 40% less memory, for a 24 MB response.
+    #
+    # Agreement, stated precisely, because the loose version invites the wrong
+    # conclusion. The two algorithms genuinely differ in float64 -- they sum the
+    # same products in a different order -- at about 1e-15 relative. The float32
+    # cast then discards 29 of those bits, so a difference survives only when a
+    # value happens to straddle a rounding boundary, which is rare enough that
+    # the modal outcome is zero differing floats. Measured over 6,220,800
+    # floats per command:
+    #
+    #   P = (1,1,1)        0 differ        P = (0,0,0)          0 differ
+    #   P = (0.9,0.1,0.5)  0 differ        P = (0.2,0.6,0.9)    1 differs, by 1 ULP
+    #
+    # So: **identical at the benchmarked command, and never worse than one ULP
+    # on one pixel** -- not "bit-identical" as a property of the change. The NaN
+    # masks are equal at every command. The ``vmin``/``vmax`` header hints move
+    # by up to 1.88e-8 relative (largest seen at P = (0,0,0)), because
+    # ``np.nanpercentile`` interpolates in float64 where ``np.percentile`` over
+    # a float32 copy did so in float32; that is well under this view's own
+    # float32 spacing at the values involved.
     #
     # The ``np.linalg.inv`` form allocated four full-size arrays -- the float64
     # ``a_mat``, ``zeros_like``, the ``flat[invertible]`` boolean-index copy and
@@ -129,9 +145,17 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     # 逆行列は画素ごとに1本のベクトルとしか縮約しないので、``A**T x = (P-b)**T``
     # をクラメルの公式で直接解けば9要素の逆行列を作らずに済む。1080p の実行列で
     # A/B を取り、``np.linalg.inv`` 版が 2091-2154 ms・ピーク650.6MB、こちらが
-    # 732-755 ms・389.6MB（2.8倍速・メモリ4割減）。float32 の本体は622万要素
-    # すべてビット一致し、NaN マスクも一致する。動くのはヘッダの vmin/vmax
-    # だけで、相対 1.4e-8 以下（float32 の刻み 4.8e-7 の1/30以下）である。
+    # 732-755 ms・389.6MB（2.8倍速・メモリ4割減）。
+    #
+    # 一致の程度は正確に書く。両者は float64 では実際に食い違う（積の加算順が
+    # 違うため、相対 1e-15 程度）。float32 化でそのうち29ビットが落ちるので、
+    # 差が残るのは値が丸め境界をまたぐ場合だけであり、最頻値は「差ゼロ」である。
+    # 622万要素あたりの実測は上表のとおりで、**基準コマンドでは完全一致、
+    # 最悪でも1画素が1ULP** である（「この変更はビット一致する」ではない）。
+    # NaN マスクはどのコマンドでも一致する。ヘッダの vmin/vmax は相対 1.88e-8
+    # まで動く（P=(0,0,0) で最大）。``np.nanpercentile`` が float64 で補間する
+    # のに対し、旧実装は float32 の複製上で補間していたためで、該当値域における
+    # float32 の刻みより十分小さい。
     a_mat = array[:, :, :3, :]
 
     def plane(row: int, column: int) -> np.ndarray:

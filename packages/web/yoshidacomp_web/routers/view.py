@@ -10,7 +10,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..deps import require_matrix
-from ..views import REGISTRY
+from ..views import REGISTRY, ViewNotApplicable
 
 router = APIRouter()
 
@@ -102,19 +102,29 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
 
     # A view may refuse the matrix it was handed. ``surface`` does, for a
     # camera-space one: the work is one 3x3 solve per pixel and camera space is
-    # 16x the pixels of the projector frame, so it would be minutes and gigabytes
-    # for an answer whose active-region mask cannot even run (see
-    # ``views/surface.py``). Mapped to a 400 the same way ``load_matrix``'s
-    # ``ValueError`` is in ``routers/session.py`` -- the frontend's
-    # ``jsonOrThrow`` can read a ``detail``, and cannot read a bare 500's
-    # plain-text body at all, so an unmapped exception reaches the user as
-    # "500: Internal Server Error" and nothing else.
+    # ~16x the pixels of the projector frame, so it would be tens of seconds and
+    # gigabytes for an answer whose active-region mask cannot even run (see
+    # ``views/surface.py``). Refusing with a message beats both a bare 500 and a
+    # thrashing machine -- ``static/js/api.js::fetchView`` reads the ``detail``
+    # out of this body and shows it as the status line, so the user is told
+    # which matrix to load instead.
+    #
+    # ``ViewNotApplicable`` only, deliberately not ``ValueError``. Views are
+    # numpy code and numpy raises ``ValueError`` for a broadcast or reshape
+    # mismatch, which is a server bug; mapping that to 400 would blame the
+    # request and hand over a raw numpy message as the reason. A bug stays a
+    # 500. See ``views/base.py::ViewNotApplicable``.
+    #
     # ビューが行列そのものを断ることがある（``surface`` はカメラ座標を断る）。
-    # ``routers/session.py`` と同じく ``ValueError`` を400へ写す。素の500だと
-    # フロントの ``jsonOrThrow`` は本文を読めず、理由が一切表示されない。
+    # 理由付きで断るほうが、素の500よりも、実行して機械を殴るよりもよい。
+    # ``static/js/api.js::fetchView`` はこの本文から ``detail`` を取り出して
+    # ステータス行に出すので、利用者は「どの行列を読めばよいか」を知れる。
+    # ``ValueError`` ではなく ``ViewNotApplicable`` だけを写すのは、numpy が
+    # 形状の不整合（＝サーバのバグ）にも ``ValueError`` を使うためである。
+    # バグは500のままにする。
     try:
         result = spec.render(context, params)
-    except ValueError as exc:
+    except ViewNotApplicable as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     height, width = result.data.shape[0], result.data.shape[1]
     channels = result.data.shape[2] if result.data.ndim == 3 else 1
