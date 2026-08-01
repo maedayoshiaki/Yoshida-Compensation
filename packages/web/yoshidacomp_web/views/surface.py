@@ -4,7 +4,14 @@
 M = [A; b]（A は 3x3、b は 1x3）と書けば C·A + b = P。したがって
 任意の投影コマンド P に対するカメラ応答は C = (P - b)·A^-1 である。
 
+実装は A^-1 を作らず、A^T x = (P - b)^T をクラメルの公式で直接解く。
+逆行列は画素ごとに1本のベクトルとしか縮約しないため9要素を持つ必要が無く、
+実測で2.8倍速・メモリ4割減になる（詳細は _render 内のコメント）。
+
 P = (1,1,1) が投影面の色、P = (0,0,0) が環境光のみの応答になる。
+
+このビューはプロジェクタ座標の行列のみを受け付ける。理由は
+_CAMERA_SPACE_REFUSAL のコメントを参照。
 """
 
 from __future__ import annotations
@@ -50,49 +57,161 @@ LABELS = ["R", "G", "B"]
 _DET_REL_EPS = 1e-6
 
 
+# The refusal for a camera-space matrix, in one place so the router's 400 and
+# this module's docstring cannot drift apart.
+#
+# This is a cost guard *and* a correctness one. Cost: the work is one 3x3
+# solve per pixel and is set by the pixel count alone -- measured at 738 ms and
+# 390 MB peak for the 1080p projector-space matrix (2.07M pixels), which
+# extrapolates by a factor of 15.7 to ~12 s and ~6 GB for
+# ``data/color_mixing_matrices.npy`` (4660x6984 = 32.5M pixels, listed in spec
+# section 9 as a first-class input and offered ``surface`` by the view
+# selector). Correctness: ``active_region`` is
+# ``None`` outside projector space, so the NaN mask that keeps this view honest
+# does not run at all, and camera pixels that never saw the projector would be
+# painted a "surface colour" derived from an affine fitted to nothing.
+#
+# コスト面と正しさの両方の理由で断る。コストは画素数だけで決まり、1080p
+# （207万画素）で 738 ms・ピーク 390 MB の実測から、カメラ座標行列
+# （4660x6984 = 3250万画素、仕様書9節が第一級の入力として挙げる）へ外挿すると
+# 15.7倍で約12秒・約6GBになる。正しさの面では、プロジェクタ座標でなければ
+# ``active_region`` が ``None`` になり、このビューを正直に保っている NaN
+# マスクが一切走らない。投影を受けていないカメラ画素にまで「投影面の色」を
+# 描いてしまう。
+_CAMERA_SPACE_REFUSAL = (
+    'view "surface" needs a projector-space matrix; this one is in camera '
+    "space. Warping a camera-space matrix into projector space is planned for "
+    "B4 -- until then, load a matrix whose frame matches the configured "
+    "projector. "
+    "（surface はプロジェクタ座標の行列を必要とします。カメラ座標からの"
+    "ワープは計画B4の予定です。）"
+)
+
+
 def _render(context: MatrixContext, params: dict) -> ViewResult:
-    """Solve C = (P - b) A^-1 per pixel, NaN where A is singular."""
+    """Solve C·A = P - b per pixel by Cramer's rule, NaN where A is singular.
+
+    Raises:
+        ValueError: the matrix is in camera space. ``routers/view.py`` maps this
+            to a 400 with the message intact; see ``_CAMERA_SPACE_REFUSAL``.
+    """
+    if context.space == "camera":
+        raise ValueError(_CAMERA_SPACE_REFUSAL)
+
     array = np.asarray(context.array, dtype=np.float32)
-    height, width = array.shape[0], array.shape[1]
+    height, width = int(array.shape[0]), int(array.shape[1])
 
-    a_mat = np.asarray(array[:, :, :3, :], dtype=np.float64)
-    b_vec = np.asarray(array[:, :, 3, :], dtype=np.float64)
+    # A's nine entries, each as its own contiguous float64 plane.
+    #
+    # Not ``a_mat.reshape(-1, 3, 3)`` any more, and not ``np.linalg.inv``.
+    # Because the inverse is only ever contracted with a single vector per
+    # pixel, Cramer's rule on ``A**T x = (P - b)**T`` gives the same answer
+    # without ever materialising the nine-element inverse, and it is both
+    # faster and smaller. Measured A/B on the real 1080p matrix
+    # (``data/linear_pipeline_1080/matrices_linear_gamma.npy``, 1920x1080,
+    # 2.07M pixels, 4 runs after a warm-up), whole ``_render`` either way:
+    #
+    #   np.linalg.inv form   2091-2154 ms   650.6 MB peak
+    #   this form             732- 755 ms   389.6 MB peak
+    #
+    # -- 2.8x faster and 40% less memory, for a 24 MB response. The float32
+    # bodies are **bit-identical**: 0 of 6,220,800 floats differ, and the NaN
+    # masks are equal. (Only the ``vmin``/``vmax`` header hints move, by
+    # <=1.4e-8 relative, because ``np.nanpercentile`` interpolates in float64
+    # where ``np.percentile`` over a float32 copy did so in float32 -- three
+    # orders of magnitude below this view's own float32 spacing of 4.8e-7 at
+    # the values involved.)
+    #
+    # The ``np.linalg.inv`` form allocated four full-size arrays -- the float64
+    # ``a_mat``, ``zeros_like``, the ``flat[invertible]`` boolean-index copy and
+    # ``inv``'s result, 149 MB each at 1080p.
+    #
+    # 逆行列は画素ごとに1本のベクトルとしか縮約しないので、``A**T x = (P-b)**T``
+    # をクラメルの公式で直接解けば9要素の逆行列を作らずに済む。1080p の実行列で
+    # A/B を取り、``np.linalg.inv`` 版が 2091-2154 ms・ピーク650.6MB、こちらが
+    # 732-755 ms・389.6MB（2.8倍速・メモリ4割減）。float32 の本体は622万要素
+    # すべてビット一致し、NaN マスクも一致する。動くのはヘッダの vmin/vmax
+    # だけで、相対 1.4e-8 以下（float32 の刻み 4.8e-7 の1/30以下）である。
+    a_mat = array[:, :, :3, :]
 
-    command = np.array(
-        [
-            float(params.get("p_r", 1.0)),
-            float(params.get("p_g", 1.0)),
-            float(params.get("p_b", 1.0)),
-        ],
-        dtype=np.float64,
+    def plane(row: int, column: int) -> np.ndarray:
+        return np.asarray(a_mat[:, :, row, column], dtype=np.float64)
+
+    a00, a01, a02 = plane(0, 0), plane(0, 1), plane(0, 2)
+    a10, a11, a12 = plane(1, 0), plane(1, 1), plane(1, 2)
+    a20, a21, a22 = plane(2, 0), plane(2, 1), plane(2, 2)
+
+    # ``||A||_F ** 3`` without the square root: ``(sum of squares) ** 1.5``.
+    frobenius_cubed = (
+        a00 * a00 + a01 * a01 + a02 * a02
+        + a10 * a10 + a11 * a11 + a12 * a12
+        + a20 * a20 + a21 * a21 + a22 * a22
+    ) ** 1.5
+
+    # The first row of cofactors serves twice: once for ``det`` (expansion
+    # along A's first row) and once for the R component of the answer.
+    # 1行目の余因子は2度使う（det の第1行展開と、答えのR成分）。
+    cof_r0 = a11 * a22 - a12 * a21
+    cof_r1 = a12 * a20 - a10 * a22
+    cof_r2 = a10 * a21 - a11 * a20
+    det = a00 * cof_r0 + a01 * cof_r1 + a02 * cof_r2
+    invertible = np.abs(det) > _DET_REL_EPS * frobenius_cubed
+
+    def command_minus_bias(index: int, name: str) -> np.ndarray:
+        """``P_i - b_i`` as one plane, subtracted in place to avoid a copy."""
+        bias = np.asarray(array[:, :, 3, index], dtype=np.float64)
+        return np.subtract(float(params.get(name, 1.0)), bias, out=bias)
+
+    q_r = command_minus_bias(0, "p_r")
+    q_g = command_minus_bias(1, "p_g")
+    q_b = command_minus_bias(2, "p_b")
+
+    # ``det`` doubles as the divisor. A singular pixel's quotient is thrown away
+    # by the NaN mask below, so putting 1 there only keeps the division from
+    # producing a warning and an inf on the way to being discarded.
+    # ``det`` をそのまま除数に使う。特異な画素の商は下の NaN マスクで捨てられる
+    # ので、1 を置くのは警告と inf を出さないためだけである。
+    det[~invertible] = 1.0
+
+    def component(cof0: np.ndarray, cof1: np.ndarray, cof2: np.ndarray) -> np.ndarray:
+        """``(P - b) · (column of adj(A)) / det`` -- one channel of C."""
+        return (q_r * cof0 + q_g * cof1 + q_b * cof2) / det
+
+    # Written straight into the float32 array that becomes the body: the old
+    # float64 ``response`` plus its ``ascontiguousarray`` copy were another
+    # 75 MB at 1080p for no gain.
+    # 本体になる float32 配列へ直接書く。
+    data = np.empty((height, width, 3), dtype=np.float32)
+    data[:, :, 0] = component(cof_r0, cof_r1, cof_r2)
+    data[:, :, 1] = component(
+        a02 * a21 - a01 * a22, a00 * a22 - a02 * a20, a01 * a20 - a00 * a21
     )
-
-    flat = a_mat.reshape(-1, 3, 3)
-    det = np.linalg.det(flat)
-    frobenius_norm = np.linalg.norm(flat, ord="fro", axis=(1, 2))
-    invertible = np.abs(det) > _DET_REL_EPS * frobenius_norm**3
-    inverse = np.zeros_like(flat)
-    if invertible.any():
-        inverse[invertible] = np.linalg.inv(flat[invertible])
-    inverse = inverse.reshape(height, width, 3, 3)
-
-    response = np.einsum("hwk,hwkc->hwc", command[None, None, :] - b_vec, inverse)
+    data[:, :, 2] = component(
+        a01 * a12 - a02 * a11, a02 * a10 - a00 * a12, a00 * a11 - a01 * a10
+    )
 
     # A singular pixel has no answer. Painting a plausible number there would
     # mislead; NaN makes the shader draw the mask colour instead.
     # 特異な画素には答えが無い。もっともらしい数字を描くと誤解を招くので
     # NaN にしてシェーダにマスク色を塗らせる。
-    usable = invertible.reshape(height, width)
+    usable = invertible
     if context.active_region is not None:
         x, y, w, h = context.active_region
         inside = np.zeros((height, width), dtype=bool)
         inside[y : y + h, x : x + w] = True
-        usable &= inside
-    response[~usable] = np.nan
+        usable = usable & inside
+    data[~usable] = np.nan
 
-    data = np.ascontiguousarray(response, dtype=np.float32)
-    finite = data[np.isfinite(data)]
-    vmax = float(np.percentile(finite, 99)) if finite.size else 1.0
+    # ``np.nanpercentile`` over the whole array, rather than
+    # ``np.percentile`` twice over a ``data[np.isfinite(data)]`` copy: one pass
+    # and one partition instead of one boolean-index copy and two partitions.
+    # Measured on the 1080p response, 77.6 ms -> 40.5 ms.
+    # 一度の走査で1と99を取る。実測で 77.6 ms -> 40.5 ms。
+    if usable.any():
+        low, high = (float(v) for v in np.nanpercentile(data, [1, 99]))
+    else:
+        low, high = 0.0, 1.0
+    vmax = high
 
     # The black point is 0 whenever the data allows it, and only then.
     #
@@ -132,7 +251,7 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     # 負値が全体の1%未満しかなければ vmin は0のままクリップされる。少数の画素で
     # 黒レベルを動かし、丸め誤差程度のもので画面全体の色相を変えないためである。
     # これで span も必ず正になる。
-    vmin = min(0.0, float(np.percentile(finite, 1))) if finite.size else 0.0
+    vmin = min(0.0, low)
 
     return ViewResult(data=data, vmin=vmin, vmax=max(vmax, 1e-6), labels=LABELS)
 

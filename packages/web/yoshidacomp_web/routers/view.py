@@ -100,7 +100,22 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
         else:
             params[p.name] = raw
 
-    result = spec.render(context, params)
+    # A view may refuse the matrix it was handed. ``surface`` does, for a
+    # camera-space one: the work is one 3x3 solve per pixel and camera space is
+    # 16x the pixels of the projector frame, so it would be minutes and gigabytes
+    # for an answer whose active-region mask cannot even run (see
+    # ``views/surface.py``). Mapped to a 400 the same way ``load_matrix``'s
+    # ``ValueError`` is in ``routers/session.py`` -- the frontend's
+    # ``jsonOrThrow`` can read a ``detail``, and cannot read a bare 500's
+    # plain-text body at all, so an unmapped exception reaches the user as
+    # "500: Internal Server Error" and nothing else.
+    # ビューが行列そのものを断ることがある（``surface`` はカメラ座標を断る）。
+    # ``routers/session.py`` と同じく ``ValueError`` を400へ写す。素の500だと
+    # フロントの ``jsonOrThrow`` は本文を読めず、理由が一切表示されない。
+    try:
+        result = spec.render(context, params)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     height, width = result.data.shape[0], result.data.shape[1]
     channels = result.data.shape[2] if result.data.ndim == 3 else 1
 

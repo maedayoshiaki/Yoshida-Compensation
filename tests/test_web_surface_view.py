@@ -414,6 +414,55 @@ def test_surface_round_trips_a_non_symmetric_affine_under_an_asymmetric_command(
     )
 
 
+def test_surface_refuses_a_camera_space_matrix(tmp_path, stand_in_projector_config) -> None:
+    """A camera-space matrix must be refused, not rendered at whatever cost.
+
+    ``surface`` inverts one 3x3 per pixel, and that price is set by the pixel
+    count alone. Measured on the real 1080p projector-space matrix (95 MB):
+    2.77 s and 651 MB peak to produce a 24 MB response. Spec section 9 lists
+    ``data/color_mixing_matrices.npy`` -- 4660x6984, 1.56 GB, camera space --
+    as a first-class input, and the view selector offers ``surface`` for it.
+    Extrapolated by pixel count that is ~10 GB peak and ~40 s, with no guard in
+    front of it: the machine thrashes and the user gets a bare 500 at the end.
+
+    It is refused rather than merely slowed because the answer would be wrong
+    anyway. ``active_region`` is ``None`` outside projector space, so the mask
+    that keeps this view honest does not run, and every camera pixel that never
+    saw the projector would be painted a "surface colour" derived from an
+    affine fitted to nothing.
+
+    ``surface`` は画素ごとに3x3の逆問題を解くため、代金は画素数だけで決まる。
+    1080p のプロジェクタ座標行列（95MB）で実測 2.77 秒・ピーク 651 MB。
+    仕様書 9 節が第一級の入力として挙げるカメラ座標行列は 4660x6984 =
+    1.56 GB であり、画素数で外挿するとピーク約 10 GB・約 40 秒になる。
+    しかも ``active_region`` はプロジェクタ座標でなければ ``None`` なので、
+    このビューを正直に保っているマスクが走らず、投影を一度も受けていない
+    カメラ画素にまで「投影面の色」を描いてしまう。遅いだけでなく誤りである。
+    """
+    store.clear()
+    # The matrix is 4x5; the projector frame is not, so it classifies as camera.
+    stand_in_projector_config(width=64, height=48)
+    client = TestClient(create_app())
+
+    matrices = _asymmetric_matrices(4, 5)
+    matrix_id = _load(client, tmp_path, matrices)
+    assert client.get(f"/api/matrix/{matrix_id}/meta").json()["space"] == "camera"
+
+    response = client.get(f"/api/matrix/{matrix_id}/view/surface")
+    assert response.status_code == 400
+    detail = response.json()["detail"]
+    assert "camera" in detail
+    assert "surface" in detail
+    # The message has to say the refusal is a "not yet", not a "never" --
+    # otherwise the only route from here is to assume the view is broken.
+    assert "B4" in detail or "計画" in detail
+
+    # The scalar view over the same matrix is unaffected: this guard belongs to
+    # ``surface``, not to camera-space matrices in general.
+    # 同じ行列でも係数タイルは今まで通り描ける。これは surface 固有の制限である。
+    assert client.get(f"/api/matrix/{matrix_id}/view/coef_tiles").status_code == 200
+
+
 def test_surface_is_listed_with_its_params() -> None:
     store.clear()
     client = TestClient(create_app())
