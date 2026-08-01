@@ -41,15 +41,35 @@ function emit() {
 // Any property is either a GL constant (SCREAMING_CASE -> a number) or a
 // callable returning another such proxy, so every gl.* call in glview.js
 // succeeds and every returned handle is usable.
-function glStub() {
-  const fn = function () { return glStub(); };
+//
+// One call is not swallowed: `texImage2D`, whose last argument is the plane
+// GLView.setImage extracted. That argument is the only externally visible
+// output of the layout handling -- which channel ended up on which tile -- and
+// without recording it the two branches of setImage (planar subarray vs
+// interleaved strided walk) are indistinguishable from outside, so either
+// could break with nothing noticing. Recorded as a summary rather than the
+// array itself so a `subarray` view cannot pin the whole payload alive.
+// `texImage2D` だけは飲み込まず、最後の引数（setImage が切り出した平面）を
+// 記録する。どのチャンネルがどのタイルに載ったかは外から見える唯一の出力で
+// あり、これを取らないと planar とインタリーブの2分岐は外部から区別できず、
+// どちらが壊れても誰も気付かない。`subarray` がペイロード全体を保持しない
+// よう、配列そのものではなく要約を記録する。
+function glStub(uploads) {
+  const fn = function () { return glStub(uploads); };
   return new Proxy(fn, {
     get(_t, prop) {
       if (prop === Symbol.toPrimitive || prop === "valueOf") return () => 1;
+      if (prop === "__uploads") return uploads;
+      if (prop === "texImage2D") {
+        return (...args) => {
+          const px = args[args.length - 1];
+          uploads.push({ length: px.length, first: px[0], last: px[px.length - 1] });
+        };
+      }
       if (typeof prop === "string" && /^[A-Z0-9_]+$/.test(prop)) return 1;
-      return glStub();
+      return glStub(uploads);
     },
-    apply() { return glStub(); },
+    apply() { return glStub(uploads); },
   });
 }
 
@@ -74,7 +94,10 @@ function makeEl(tag = "div") {
     __fire(name, event = {}) {
       for (const fn of listeners[name] || []) fn({ target: el, ...event });
     },
-    getContext() { return glStub(); },
+    // One context per element, kept, so each tile's uploads accumulate on its
+    // own GLView rather than on a fresh proxy per call.
+    // 要素ごとに1つのコンテキストを保持し、タイル別に記録が貯まるようにする。
+    getContext() { return (el.__gl ||= glStub([])); },
     getBoundingClientRect() { return { left: 0, top: 0 }; },
     setPointerCapture() {},
   };
@@ -156,6 +179,21 @@ const VIEWS = [
 const viewLabels = (spec) =>
   spec.channels === 12 ? TILE_LABELS : ["色域外", "1超クリップ", "両方", "範囲内, 補正可"];
 
+// `plain_tiles` is served the *old* way: interleaved (H, W, C) and with no
+// X-Layout header at all.
+//
+// The shipped client keeps an interleaved path on purpose -- api.js defaults to
+// "interleaved" so an endpoint that has not been converted still renders. Once
+// every fixture became planar that path had no test execution anywhere and was
+// free to rot. Serving one view the old way exercises it, and exercises
+// api.js's default at the same time: nothing else here omits the header.
+// `plain_tiles` だけは旧来通りインタリーブ (H, W, C) で、X-Layout も付けずに
+// 返す。出荷クライアントは未変換のエンドポイントのために意図的にインタリーブ
+// 経路を残しているが、全フィクスチャを planar にした時点でその経路はどこから
+// も実行されなくなった。1つだけ旧形式で返して経路と api.js の既定値の両方を
+// 実際に通す。
+const INTERLEAVED_VIEWS = new Set(["plain_tiles"]);
+
 // Per-matrix delays, so responses can be made to resolve in a different order
 // from the one they were issued in. `session` delays POST /session/matrix
 // (which is what load() awaits) and `view` delays the binary view fetch (which
@@ -210,36 +248,43 @@ globalThis.fetch = async (url, options) => {
     const counted = `${matrixPath}:${key}`;
     viewFetchCount.set(counted, (viewFetchCount.get(counted) ?? 0) + 1);
     const spec = VIEWS.find((v) => v.key === key);
-    // Channel c carries (c + 1) * tag, not one constant for the whole array,
-    // laid out planar (C, H, W) exactly as routers/view.py serialises it.
+    // Channel c carries (c + 1) * tag, not one constant for the whole array.
     //
-    // The tag still identifies the matrix -- channel 0 is 1 * tag and, planar,
-    // channel 0 is also the *first* run of the body, so state.payload.data[0]
-    // reads it straight off exactly as it did when the body was interleaved.
-    // But the channels differ from each other, which is what lets a per-channel
-    // range be told apart from the shared one. Filled with a single constant,
-    // every channel's 99th percentile came out at the header's own vmax and
-    // "shared vs per-tile" was unobservable: the histogram path ran and the
-    // assertion could not fail.
-    // チャンネルcの値を (c+1)*tag にし、routers/view.py と同じ planar (C, H, W)
-    // で並べる。planar でもチャンネル0が先頭なので data[0] はこれまで通り
-    // 行列の識別子を返す。全体を同一定数で埋めるとチャンネル別分位点が
-    // ヘッダのvmaxと一致してしまい、shared と per_tile を区別できなかった。
+    // The tag still identifies the matrix -- channel 0 is 1 * tag, and it is
+    // the first element of the body in *both* layouts (planar: the first run;
+    // interleaved: the first pixel's first channel), so state.payload.data[0]
+    // reads it straight off either way and payloadTag() needs no layout
+    // knowledge. But the channels differ from each other, which is what lets a
+    // per-channel range be told apart from the shared one. Filled with a single
+    // constant, every channel's 99th percentile came out at the header's own
+    // vmax and "shared vs per-tile" was unobservable: the histogram path ran
+    // and the assertion could not fail.
+    // チャンネルcの値を (c+1)*tag にする。チャンネル0は 1*tag であり、planar
+    // でもインタリーブでも本体の先頭要素なので data[0] は layout を問わず
+    // 行列の識別子を返し、payloadTag() は layout を知らなくてよい。全体を
+    // 同一定数で埋めるとチャンネル別分位点がヘッダのvmaxと一致してしまい、
+    // shared と per_tile を区別できなかった。
     const tag = tagForPath[matrixPath] ?? 0;
+    const interleaved = INTERLEAVED_VIEWS.has(key);
     const data = new Float32Array(H * W * spec.channels);
-    for (let c = 0; c < spec.channels; c++) {
-      const value = (c + 1) * tag;
-      data.fill(value, c * H * W, (c + 1) * H * W);
+    if (interleaved) {
+      for (let i = 0; i < data.length; i++) data[i] = ((i % spec.channels) + 1) * tag;
+    } else {
+      for (let c = 0; c < spec.channels; c++) {
+        data.fill((c + 1) * tag, c * H * W, (c + 1) * H * W);
+      }
     }
-    return new Response(data.buffer, {
-      headers: {
-        "X-Height": String(H), "X-Width": String(W),
-        "X-Channels": String(spec.channels), "X-Layout": "planar",
-        "X-Kind": spec.kind,
-        "X-Vmin": "-1.0", "X-Vmax": "1.0",
-        "X-Labels-B64": Buffer.from(JSON.stringify(viewLabels(spec)), "utf-8").toString("base64"),
-      },
-    });
+    const headers = {
+      "X-Height": String(H), "X-Width": String(W),
+      "X-Channels": String(spec.channels), "X-Kind": spec.kind,
+      "X-Vmin": "-1.0", "X-Vmax": "1.0",
+      "X-Labels-B64": Buffer.from(JSON.stringify(viewLabels(spec)), "utf-8").toString("base64"),
+    };
+    // Omitted, not set to "interleaved": the client must reach that layout via
+    // api.js's default, which is what a pre-planar endpoint actually looks like.
+    // "interleaved" と明示せず省く。旧エンドポイントの実際の見え方を再現する。
+    if (!interleaved) headers["X-Layout"] = "planar";
+    return new Response(data.buffer, { headers });
   }
   throw new Error(`unexpected url ${url}`);
 };
@@ -262,7 +307,7 @@ if (!started) {
   emit();
   process.exit(0);
 }
-const { state } = globalThis.window.__viewer;
+const { state, views } = globalThis.window.__viewer;
 
 // Click 読み込み for `matrixPath` the way the user does.
 function clickLoad(matrixPath) {
@@ -271,6 +316,36 @@ function clickLoad(matrixPath) {
 }
 
 const payloadTag = () => (state.payload ? state.payload.data[0] : null);
+
+// What each tile most recently uploaded: the value filling the plane GLView
+// pulled out of the body. Tile c must get channel c, i.e. (c + 1) * tag,
+// whichever layout the body arrived in.
+// 各タイルが最後に載せた平面の値。layout に関わらずタイルcはチャンネルc、
+// すなわち (c + 1) * tag を受け取らねばならない。
+const uploadedPlanes = () => views.map((v) => {
+  const u = v.gl.__uploads;
+  return u.length ? u[u.length - 1] : null;
+});
+
+// Expected per-tile plane for matrix `tag`: full size, filled with (c+1)*tag.
+const expectedPlanes = (tag, channels) => Array.from({ length: channels }, (_, c) => ({
+  length: H * W, first: (c + 1) * tag, last: (c + 1) * tag,
+}));
+
+// Hover one pixel and read the 12 readout cells back off the DOM, which is the
+// only place showProbe's layout arithmetic is observable.
+// 1画素をホバーして読み取りセルをDOMから読む。showProbe の添字計算が外から
+// 見えるのはここだけ。
+const probeTexts = (col = 2, row = 1) => {
+  views[0].onHover({ col, row });
+  return el("probe-grid").children
+    .filter((e) => e.className === "probe-cell")
+    .map((e) => e.textContent);
+};
+
+const expectedProbe = (tag, channels) =>
+  Array.from({ length: channels }, (_, c) => ((c + 1) * tag).toFixed(4));
+
 const statusText = () => el("status").textContent;
 const settled = () => waitFor(() => !el("btn-load").disabled && !/取得中|読み込み中/.test(statusText()));
 
@@ -366,6 +441,23 @@ if (SCENARIO === "views") {
   await settled();
   check("baseline load rendered the first view", payloadTag() === 1, `tag=${payloadTag()}`);
 
+  // --- planar body (X-Layout: planar): the channel is a contiguous run
+  //
+  // Both halves of the layout handling are checked here, because each fails
+  // silently on its own: a wrong plane still draws a picture, and a wrong probe
+  // index still prints numbers. The picture and the numbers just stop being of
+  // the channel their tile is labelled with.
+  // どちらも単独では静かに壊れる（誤った平面でも絵は出るし、誤った添字でも
+  // 数値は出る）。ラベルと中身の対応だけが失われる。
+  check("planar body is declared and read as planar",
+    state.payload.layout === "planar", `layout=${state.payload.layout}`);
+  check("planar body: tile c uploads channel c's plane",
+    JSON.stringify(uploadedPlanes()) === JSON.stringify(expectedPlanes(1, 12)),
+    JSON.stringify(uploadedPlanes().map((u) => u && u.first)));
+  check("planar body: the hover readout reads channel c for cell c",
+    JSON.stringify(probeTexts()) === JSON.stringify(expectedProbe(1, 12)),
+    JSON.stringify(probeTexts()));
+
   // --- an unsupported kind must fail loudly, not render as if it were scalar
   const before = state.payload;
   el("view-select").value = "gamut";
@@ -391,6 +483,22 @@ if (SCENARIO === "views") {
     el("range-info").textContent);
   check("switching back to a scalar view still renders",
     /表示中/.test(statusText()), statusText());
+
+  // --- interleaved body (no X-Layout at all): the pre-planar wire format
+  //
+  // `plain_tiles` is served interleaved and header-less on purpose; see
+  // INTERLEAVED_VIEWS. Without this the fallback the client deliberately keeps
+  // has no test execution anywhere and is free to rot unnoticed.
+  // `plain_tiles` だけ旧形式で返している。これが無いと、意図的に残している
+  // フォールバックはどこからも実行されず、黙って腐る。
+  check("a response without X-Layout falls back to interleaved",
+    state.payload.layout === "interleaved", `layout=${state.payload.layout}`);
+  check("interleaved body: tile c uploads channel c's plane",
+    JSON.stringify(uploadedPlanes()) === JSON.stringify(expectedPlanes(1, 12)),
+    JSON.stringify(uploadedPlanes().map((u) => u && u.first)));
+  check("interleaved body: the hover readout reads channel c for cell c",
+    JSON.stringify(probeTexts()) === JSON.stringify(expectedProbe(1, 12)),
+    JSON.stringify(probeTexts()));
 }
 
 if (SCENARIO === "button") {
