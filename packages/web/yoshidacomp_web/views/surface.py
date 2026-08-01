@@ -109,9 +109,17 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     # bottom and the active region renders as one flat black frame --
     # indistinguishable from "no data" and from "exactly zero".
     #
-    # So: keep 0 when the data is non-negative, and drop to the data's own 1st
-    # percentile when it is not. The percentile mirrors the 99th used for vmax
+    # So: keep 0 unless the 1st *percentile* is itself below it, and drop to
+    # that percentile when it is. The percentile mirrors the 99th used for vmax
     # and is robust to one wild pixel in the same way a bare min() would not be.
+    #
+    # Read that literally, because it is not the same as "drop whenever any
+    # value is negative": a response whose negative values are a sub-1% tail
+    # keeps vmin = 0 and clips them. That is the intended trade. A handful of
+    # pixels is not the ambient-light regime this exists for, and letting them
+    # move the black point would hand the whole picture a hue it does not have
+    # on the strength of a rounding artefact.
+    #
     # Note this also keeps the span strictly positive: vmin <= 0 < 1e-6 <= vmax.
     #
     # 黒レベルは可能な限り0に固定する。rgb経路は [vmin, vmax] を [0,1] へ写す
@@ -119,8 +127,11 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     # 明るさではなく彩度が変わる（「投影面が何色か」を問うビューで色相が狂う）。
     # 一方で P=(0,0,0) の応答 -b·A^-1 は環境光があれば負であり、0固定では
     # 一様な黒になって「データ無し」とも「ちょうど0」とも区別がつかない。
-    # よって負値があるときだけ1パーセンタイル（vmax の99の鏡像で、外れ値1画素に
-    # 引きずられない）まで下げる。これで span も必ず正になる。
+    # よって1パーセンタイル（vmax の99の鏡像で、外れ値1画素に引きずられない）が
+    # 負のときだけそこまで下げる。「負値があれば下げる」ではない点に注意。
+    # 負値が全体の1%未満しかなければ vmin は0のままクリップされる。少数の画素で
+    # 黒レベルを動かし、丸め誤差程度のもので画面全体の色相を変えないためである。
+    # これで span も必ず正になる。
     vmin = min(0.0, float(np.percentile(finite, 1))) if finite.size else 0.0
 
     return ViewResult(data=data, vmin=vmin, vmax=max(vmax, 1e-6), labels=LABELS)

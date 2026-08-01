@@ -208,7 +208,7 @@ _MUTATIONS = [
     # rgbビューの2つの要素を1つずつ外す。どちらも描画自体は成功してしまう。
     pytest.param(
         "rgb",
-        [('  if (payload.kind === "rgb") {', "  if (false) {")],
+        [('  if (payload.kind === "rgb" && payload.channels === 3) {', "  if (false) {")],
         "draws one tile",
         id="rgb_view_falls_back_to_one_tile_per_channel",
     ),

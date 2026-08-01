@@ -271,7 +271,16 @@ function fallbackAxes(labels, channels) {
 // 読み取りグリッドだけは別で、ホバー1画素につき数値は3つあるためチャンネル数
 // で組む。両者が食い違うのはここだけ。
 function layoutFor(payload, current) {
-  if (payload.kind === "rgb") {
+  // `channels === 3` as well as the kind: an rgb view is one colour per pixel,
+  // so three channels is what "rgb" means here. requireRgbHasThreeChannels has
+  // already refused anything else by the time this runs -- this condition is
+  // defence in depth, not the active guard -- but a single-tile layout is only
+  // correct for a payload the rgb upload path can actually pack, and the two
+  // must not be able to disagree.
+  // kind だけでなく channels も見る。rgb は1画素1色＝3チャンネルのこと。
+  // 実際に弾いているのは requireRgbHasThreeChannels 側で、ここは多重防御だが、
+  // 1枚タイルが正しいのは rgb 経路が詰められるペイロードに限られる。
+  if (payload.kind === "rgb" && payload.channels === 3) {
     return {
       rows: [""],
       cols: ["RGB"],
@@ -575,12 +584,37 @@ function requireSupportedKind(kind, where) {
   }
 }
 
+// An rgb view is three channels by definition -- one per colour.
+//
+// Without this the failure is loud but undiagnostic. A shorter payload reaches
+// packRgb, whose planar loop reads past the end of the array, and JavaScript
+// answers `undefined` rather than throwing; that becomes NaN in the Float32Array
+// and the NaN mask paints the entire tile. Nothing is drawn wrong -- but the
+// user sees "everything is masked" with no route back to "this view declared
+// the wrong channel count". Say which it is.
+// rgb は定義上3チャンネル。これが無いと packRgb が配列の終端を越えて読み、
+// undefined → NaN → タイル全面がマスク色になる。誤った絵は出ないが、
+// 「全部マスク」から「チャンネル数の宣言ミス」へは辿り着けない。
+function requireRgbHasThreeChannels(kind, channels, where) {
+  if (kind === "rgb" && channels !== 3) {
+    throw new Error(
+      `${where} は kind="rgb" ですがチャンネル数が ${channels} です` +
+      "（rgb は R/G/B の3チャンネルのみ描画できます）。"
+    );
+  }
+}
+
 // `req` is inherited when load() drives the reload, so the whole click stays
 // one logical request; a bare reload() (a server-parameter change) claims a
 // new one.
 async function reload(req = beginRequest()) {
   if (!state.matrixId || !state.spec) return;
-  requireSupportedKind(state.spec.kind, `ビュー "${state.spec.label || state.spec.key}"`);
+  // Checked from the registry first, so a view that cannot be drawn is refused
+  // before the transfer rather than after it.
+  // まず登録内容で判定し、描けないビューは転送前に断る。
+  const specName = `ビュー "${state.spec.label || state.spec.key}"`;
+  requireSupportedKind(state.spec.kind, specName);
+  requireRgbHasThreeChannels(state.spec.kind, state.spec.channels, specName);
   const params = serverParams();
   status(`ビュー取得中… (${state.spec.key} ${JSON.stringify(params)})`);
 
@@ -590,6 +624,7 @@ async function reload(req = beginRequest()) {
   if (isStale(req)) return;   // a newer request owns the screen now
   // Backstop: the registry and the response could disagree.
   requireSupportedKind(payload.kind, "サーバの応答");
+  requireRgbHasThreeChannels(payload.kind, payload.channels, "サーバの応答");
   state.payload = payload;
 
   const layout = layoutFor(payload, state.layout);
