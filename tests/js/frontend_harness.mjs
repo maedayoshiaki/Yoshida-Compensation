@@ -284,7 +284,36 @@ const VIEWS = [
   // `surface` の直後にこれが来ると1枚のグレースケールに「RGB」という見出しが
   // 付く。行列由来の軸かどうかを区別しているのが corner である。
   { key: "mono_scalar", label: "1chスカラー", kind: "scalar", channels: 1, params: [] },
+  // Served with no `X-Layout` header at all. The client used to read that as
+  // "interleaved"; it now refuses, because nothing in this repository omits the
+  // header and a stripped one is otherwise indistinguishable from a declared
+  // interleaved body -- which is precisely the silent misattribution the guard
+  // exists for. Registered alongside `mangled_layout` so both halves of "the
+  // header must be present *and* known" have a fixture.
+  // `X-Layout` を一切付けずに返す。以前はインタリーブとして読んでいたが、
+  // このリポジトリにヘッダを省く経路は無く、欠落は「インタリーブと申告された
+  // 本体」と区別が付かない——ガードが防ぎたい静かな取り違えそのものである。
+  // 「ヘッダが有り、かつ既知であること」の両方にフィクスチャを持たせる。
+  { key: "headerless_tiles", label: "配置未申告タイル", kind: "scalar", channels: 12, params: [] },
+  // Answered with a real FastAPI-shaped refusal: 400 and `{"detail": …}`. This
+  // is what `surface` returns for a camera-space matrix, and the only fixture
+  // here that exercises the *server's* error path rather than a client-side
+  // guard. `fetchView` used to `throw new Error(await res.text())`, which put
+  // the whole JSON envelope on screen -- braces, quotes and backslashes -- in a
+  // status bar that is otherwise Japanese prose.
+  // FastAPI と同じ形の拒否（400 + `{"detail": …}`）を返す。カメラ座標の行列に
+  // 対して `surface` が返すものであり、クライアント側のガードではなく
+  // *サーバ側*のエラー経路を通す唯一のフィクスチャである。以前は本文をそのまま
+  // 投げていたため、JSONの外側ごと（波括弧も引用符も）ステータス行に出ていた。
+  { key: "refused_view", label: "サーバが断るビュー", kind: "scalar", channels: 12, params: [] },
 ];
+
+// The `detail` the fake server refuses `refused_view` with. Contains a quote,
+// so a raw-body render is unmistakable: it would show the backslash escape.
+// 引用符を含めてある。生のまま出せばバックスラッシュのエスケープが見えるので、
+// 取り違えようがない。
+const REFUSAL_DETAIL =
+  'view "refused_view" needs a projector-space matrix; this one is in camera space.';
 
 // Keyed by view rather than by channel count: `surface` has 3 channels and
 // would otherwise be handed the 4 categorical labels, which the backend's own
@@ -309,23 +338,26 @@ const LABELS_BY_KEY = {
   // 意図的に "a -> b" 形式にしない。fallbackAxes 経由で1行1列に至る経路が
   // corner のガードが守っているものだからである。
   mono_scalar: ["only"],
+  headerless_tiles: TILE_LABELS,
 };
 
 const viewLabels = (spec) => LABELS_BY_KEY[spec.key];
 
-// `plain_tiles` and `legacy_tiles` are served the *old* way: interleaved
-// (H, W, C) and with no X-Layout header at all.
+// `plain_tiles` and `legacy_tiles` are served interleaved (H, W, C) -- and say
+// so, with `X-Layout: interleaved`.
 //
-// The shipped client keeps an interleaved path on purpose -- api.js defaults to
-// "interleaved" so an endpoint that has not been converted still renders. Once
+// The shipped client keeps an interleaved decode path on purpose, and once
 // every fixture became planar that path had no test execution anywhere and was
-// free to rot. Serving one view the old way exercises it, and exercises
-// api.js's default at the same time: nothing else here omits the header.
-// `plain_tiles` だけは旧来通りインタリーブ (H, W, C) で、X-Layout も付けずに
-// 返す。出荷クライアントは未変換のエンドポイントのために意図的にインタリーブ
-// 経路を残しているが、全フィクスチャを planar にした時点でその経路はどこから
-// も実行されなくなった。1つだけ旧形式で返して経路と api.js の既定値の両方を
-// 実際に通す。
+// free to rot. These two exercise it. They used to omit the header entirely,
+// relying on api.js's "absent means interleaved" default; that default is gone
+// (a stripped header is now refused, see `headerless_tiles`), so the layout
+// they are actually using is now declared rather than inferred.
+// `plain_tiles` と `legacy_tiles` はインタリーブ (H, W, C) で返し、
+// `X-Layout: interleaved` と明示する。出荷クライアントは意図的にインタリーブ
+// の復号経路を残しているが、全フィクスチャを planar にした時点でその経路は
+// どこからも実行されなくなった。この2つがそれを通す。以前はヘッダを省いて
+// api.js の既定値に頼っていたが、その既定値は廃止した（欠落は
+// `headerless_tiles` のとおり拒否される）ので、使っている配置を明示する。
 const INTERLEAVED_VIEWS = new Set(["plain_tiles", "legacy_tiles"]);
 
 // Per-matrix delays, so responses can be made to resolve in a different order
@@ -381,6 +413,12 @@ globalThis.fetch = async (url, options) => {
     resolved.add(`view:${matrixPath}`);
     const counted = `${matrixPath}:${key}`;
     viewFetchCount.set(counted, (viewFetchCount.get(counted) ?? 0) + 1);
+    if (key === "refused_view") {
+      return new Response(JSON.stringify({ detail: REFUSAL_DETAIL }), {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      });
+    }
     const spec = VIEWS.find((v) => v.key === key);
     // Channel c carries (c + 1) * tag, not one constant for the whole array.
     //
@@ -414,11 +452,13 @@ globalThis.fetch = async (url, options) => {
       "X-Vmin": "-1.0", "X-Vmax": "1.0",
       "X-Labels-B64": Buffer.from(JSON.stringify(viewLabels(spec)), "utf-8").toString("base64"),
     };
-    // Omitted, not set to "interleaved": the client must reach that layout via
-    // api.js's default, which is what a pre-planar endpoint actually looks like.
-    // "interleaved" と明示せず省く。旧エンドポイントの実際の見え方を再現する。
+    // Every view declares its layout, except `headerless_tiles`, whose whole
+    // purpose is to omit the header and be refused for it.
+    // すべてのビューが配置を申告する。唯一の例外が `headerless_tiles` で、
+    // ヘッダを省いて拒否されることそのものが役目である。
     if (key === "mangled_layout") headers["X-Layout"] = "Planar";
-    else if (!interleaved) headers["X-Layout"] = "planar";
+    else if (key === "headerless_tiles") { /* deliberately omitted */ }
+    else headers["X-Layout"] = interleaved ? "interleaved" : "planar";
     return new Response(data.buffer, { headers });
   }
   throw new Error(`unexpected url ${url}`);
@@ -528,7 +568,31 @@ const stageParam = (name, value) => {
   return true;
 };
 
+// Type a value and press Enter, in the order a browser produces the events.
+//
+// This order is the whole point. The value property updates as the user types,
+// so it is already current when `keydown` fires; the browser only fires
+// `change` *afterwards*, to say the edit was committed. A frontend that armed
+// its "not applied" indicator from the `change` event therefore re-armed it
+// immediately after Enter had applied the value, and nothing came along to
+// clear it again.
+// ブラウザが出す順序どおりに再現する。この順序こそが要点で、`value` は入力中に
+// 更新されるため `keydown` の時点で既に新しく、`change` は「確定した」ことを
+// 告げるためにその*後*で来る。「未適用」表示を `change` で立てる実装は、
+// Enter が適用し終えた直後に立て直してしまい、以後それを降ろす者がいない。
+const pressEnter = (name, value) => {
+  const control = el(`sp-${name}`);
+  if (!control) return false;
+  control.value = value;
+  control.__fire("keydown", { key: "Enter" });
+  control.__fire("change");
+  return true;
+};
+
 const applyParams = () => el("sp-apply").__fire("click");
+
+// Does the 適用 button claim there are unapplied changes?
+const applyPending = () => /\bpending\b/.test(el("sp-apply").className);
 
 const statusText = () => el("status").textContent;
 const settled = () => waitFor(() => !el("btn-load").disabled && !/取得中|読み込み中/.test(statusText()));
@@ -618,7 +682,7 @@ if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
     options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,surface,"
-      + "tri_scalar,bad_rgb,mangled_layout,mono_scalar",
+      + "tri_scalar,bad_rgb,mangled_layout,mono_scalar,headerless_tiles,refused_view",
     options.join(","));
   check("a second registered view is reachable from the selector",
     options.includes("plain_tiles"), options.join(","));
@@ -705,7 +769,7 @@ if (SCENARIO === "views") {
   // has no test execution anywhere and is free to rot unnoticed.
   // `plain_tiles` だけ旧形式で返している。これが無いと、意図的に残している
   // フォールバックはどこからも実行されず、黙って腐る。
-  check("a response without X-Layout falls back to interleaved",
+  check("a body declared interleaved is read as interleaved",
     state.payload.layout === "interleaved", `layout=${state.payload.layout}`);
   check("interleaved body: tile c uploads channel c's plane",
     JSON.stringify(uploadedPlanes()) === JSON.stringify(expectedPlanes(1, 12)),
@@ -762,6 +826,49 @@ if (SCENARIO === "views") {
     /X-Layout/.test(statusText()) && /Planar/.test(statusText()), statusText());
   check("an unknown X-Layout leaves state.payload identity unchanged",
     state.payload === beforeMangled, `same object: ${state.payload === beforeMangled}`);
+
+  // --- and a *missing* X-Layout must be refused too, not assumed
+  //
+  // Stripping is at least as ordinary as mangling, and it used to land in the
+  // silent class: absent read as "interleaved", so a planar body was walked
+  // with the wrong stride and the tiles, the readout and the ranges all agreed
+  // about the wrong channels. `headerless_tiles` is served planar-shaped with
+  // no header, which is exactly what a proxy that drops X-* headers produces.
+  // ヘッダの欠落も断ること。欠落は書き換えと同程度にありふれており、以前は
+  // 静かな側に落ちていた（欠落＝インタリーブとみなし、planar の本体を誤った
+  // ストライドで走査して、タイル・読み取り値・レンジがそろって誤る）。
+  // `headerless_tiles` は X-* を落とすプロキシが作るものそのものである。
+  const beforeHeaderless = state.payload;
+  el("view-select").value = "headerless_tiles";
+  el("view-select").__fire("change");
+  await sleep(300);
+  check("a missing X-Layout is refused rather than assumed to be interleaved",
+    /X-Layout/.test(statusText()), statusText());
+  check("a missing X-Layout leaves state.payload identity unchanged",
+    state.payload === beforeHeaderless,
+    `same object: ${state.payload === beforeHeaderless}`);
+
+  // --- a server-side refusal is shown as its message, not as its envelope
+  //
+  // The one fixture that fails on the *server* rather than at a client guard.
+  // The refusal that motivated this -- `surface` on a camera-space matrix --
+  // exists precisely so the user is told which matrix to load instead, and
+  // that only works if the sentence is legible. Both directions are asserted:
+  // the prose appears, and the JSON envelope does not.
+  // クライアント側のガードではなくサーバ側で失敗する唯一のフィクスチャ。
+  // この拒否（カメラ座標に対する `surface`）は「代わりにどの行列を読めばよいか」
+  // を伝えるために存在するので、文が読めなければ意味がない。文が出ることと、
+  // JSONの外側が出ないことの両方を確認する。
+  const beforeRefused = state.payload;
+  el("view-select").value = "refused_view";
+  el("view-select").__fire("change");
+  await sleep(300);
+  check("a server refusal is shown as its detail message",
+    statusText().includes("needs a projector-space matrix"), statusText());
+  check("a server refusal is not shown as a raw JSON envelope",
+    !/\{"detail"|\\"/.test(statusText()), statusText());
+  check("a server refusal leaves state.payload identity unchanged",
+    state.payload === beforeRefused, `same object: ${state.payload === beforeRefused}`);
 }
 
 if (SCENARIO === "button") {
@@ -907,6 +1014,9 @@ if (SCENARIO === "rgb") {
     viewRequestCount() === beforeStaging,
     `${beforeStaging} -> ${viewRequestCount()}`);
 
+  check("staged-but-unsent changes are shown as pending on 適用",
+    applyPending(), el("sp-apply").className);
+
   applyParams();
   await settled();
   check("適用 submits the whole group as exactly one fetch",
@@ -915,6 +1025,32 @@ if (SCENARIO === "rgb") {
   const applied = requestLog[requestLog.length - 1];
   check("適用 sends every staged value, not just the last one edited",
     /p_r=0/.test(applied) && /p_g=0/.test(applied) && /p_b=0/.test(applied), applied);
+  check("適用 clears the pending marker once the values are sent",
+    !applyPending(), el("sp-apply").className);
+
+  // --- Enter applies, and must not leave the UI claiming it did not
+  //
+  // The value goes out correctly either way; what broke was the *indicator*.
+  // The browser fires `keydown` before committing the edit and firing `change`,
+  // so Enter ran apply -> clear -> (change) re-arm, and the ring stayed on over
+  // a value that had just been applied, with the status line still asking the
+  // user to press 適用. Asserted through both: the fetch happened exactly once,
+  // and the button and status line agree that it did.
+  // Enter でも値は正しく送られる。壊れていたのは表示のほうで、ブラウザは編集を
+  // 確定して `change` を出す前に `keydown` を出すため、適用→解除→（change で）
+  // 再点灯となり、適用済みの値の上にリングが残って「適用を押せ」と言い続けた。
+  // フェッチがちょうど1回であることと、ボタンとステータス行がそれに同意して
+  // いることの両方で確認する。
+  const beforeEnter = viewRequestCount();
+  check("the p_r control is there to type into", pressEnter("p_r", "1"));
+  await settled();
+  check("Enter in a server-param field submits exactly one fetch",
+    viewRequestCount() === beforeEnter + 1,
+    `${beforeEnter} -> ${viewRequestCount()}`);
+  check("Enter does not leave 適用 claiming the value was never applied",
+    !applyPending(), el("sp-apply").className);
+  check("Enter does not leave the status line asking for 適用",
+    !/適用 を押す/.test(statusText()), statusText());
 
   // --- a 1-channel scalar view must not inherit the rgb view's axis label
   //

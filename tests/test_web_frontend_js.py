@@ -229,9 +229,11 @@ _MUTATIONS = [
             "a view without a `normalize` param is fetched without one",
             "its per-tile control is gone from the DOM",
             "its ranges are shared, not per-tile",
-            "a response without X-Layout falls back to interleaved",
+            "a body declared interleaved is read as interleaved",
             "interleaved body: per-tile ranges follow each channel",
             "an unknown X-Layout is refused with a message naming it",
+            "a missing X-Layout is refused rather than assumed to be interleaved",
+            "a server refusal is shown as its detail message",
         ),
         id="view_selector_removed",
     ),
@@ -336,22 +338,29 @@ _MUTATIONS = [
     #
     # ``api.js`` defaulted an absent header to "interleaved" and four consumers
     # then compared against a bare ``"planar"`` literal with no validation
-    # anywhere. A header that is present but says something else -- "Planar",
-    # or whatever a proxy rewrote it to -- failed all four comparisons at once
-    # and routed every one of them to the interleaved walk. Nothing throws:
-    # every channel is attributed to the wrong tile, the hover readout agrees
-    # with the wrong tiles, and the per-tile ranges agree with both. Three
-    # independent readings corroborating a single mistake.
+    # anywhere. A header that is absent, or present but saying something else --
+    # "Planar", or whatever a proxy rewrote it to -- failed all four comparisons
+    # at once and routed every one of them to the interleaved walk. Nothing
+    # throws: every channel is attributed to the wrong tile, the hover readout
+    # agrees with the wrong tiles, and the per-tile ranges agree with both.
+    # Three independent readings corroborating a single mistake.
+    #
+    # Both halves fail together under one mutation because both reach the same
+    # guard: ``mangled_layout`` sends ``"Planar"`` and ``headerless_tiles``
+    # sends nothing, and ``LAYOUTS.includes`` is what refuses each.
     #
     # ヘッダが無い場合の既定が "interleaved" で、4つの読み手が素の文字列比較を
-    # していた。値が有って未知（"Planar" など）だと4つとも一斉にインタリーブ側
-    # へ落ちる。例外は出ず、タイル・読み取り値・レンジが同じ間違い方で一致する。
+    # していた。欠落でも、値が有って未知（"Planar" など）でも、4つとも一斉に
+    # インタリーブ側へ落ちる。例外は出ず、タイル・読み取り値・レンジが同じ
+    # 間違い方で一致する。両方が同じガードに来るので変異は1つで足りる。
     pytest.param(
         "views",
         [("contract.js", "  if (!LAYOUTS.includes(layout)) {", "  if (false) {")],
         (
             "an unknown X-Layout is refused with a message naming it",
             "an unknown X-Layout leaves state.payload identity unchanged",
+            "a missing X-Layout is refused rather than assumed to be interleaved",
+            "a missing X-Layout leaves state.payload identity unchanged",
         ),
         id="unknown_layout_silently_read_as_interleaved",
     ),
@@ -399,13 +408,65 @@ _MUTATIONS = [
     # reqId が事後に捨てる）。画面からは見えない——正しい絵は最後には出る。
     pytest.param(
         "rgb",
-        [("main.js", "    el.addEventListener(\"change\", () => { markParamsPending(); });",
+        [("main.js", "    el.addEventListener(\"change\", () => { refreshParamsPending(); });",
           "    el.addEventListener(\"change\", () => { applyServerParams(); });")],
         (
             "changing three server params issues no fetch on its own",
             "適用 submits the whole group as exactly one fetch",
+            # Staging now fetches, so nothing is ever left staged to show.
+            # 置いた時点で送ってしまうので「未適用」が存在しなくなる。
+            "staged-but-unsent changes are shown as pending",
+            # And Enter's `change` fires a second fetch behind the keydown's.
+            # Enter では keydown の1回に続いて change がもう1回撃つ。
+            "Enter in a server-param field submits exactly one fetch",
         ),
         id="each_server_param_control_fetches_on_its_own",
+    ),
+    # ---- the "not applied" indicator, which used to be armed by events
+    #
+    # A `change`-armed / reload-cleared pair cannot be ordered correctly,
+    # because the browser fires `keydown` *before* it commits the edit and fires
+    # `change`. Enter therefore ran apply -> clear -> re-arm, and the ring stayed
+    # lit over a value that had just been applied, with the status line still
+    # asking for 適用. Forcing the derived comparison to a constant reproduces
+    # exactly that: an indicator that reports its own event history rather than
+    # the state it claims to describe.
+    # `change` で立て reload で降ろす方式は順序では直せない。ブラウザは編集を
+    # 確定して `change` を出す*前*に `keydown` を出すため、Enter では
+    # 適用→解除→再点灯となる。比較を定数に潰すと、まさにその「状態ではなく
+    # 自分のイベント履歴を報告する指標」が再現する。
+    pytest.param(
+        "rgb",
+        [(
+            "main.js",
+            "  const pending = !!state.matrixId\n"
+            "    && JSON.stringify(serverParams()) !== JSON.stringify(state.sentParams);",
+            "  const pending = !!state.matrixId;",
+        )],
+        (
+            "適用 clears the pending marker once the values are sent",
+            "Enter does not leave 適用 claiming the value was never applied",
+            "Enter does not leave the status line asking for 適用",
+        ),
+        id="pending_indicator_reports_events_not_state",
+    ),
+    # ---- a server refusal shown as its envelope instead of its message
+    #
+    # ``fetchView`` used to ``throw new Error(await res.text())``. The
+    # camera-space refusal that ``views/surface.py`` exists to give therefore
+    # reached the status bar as the literal string
+    # ``{"detail":"view \"surface\" needs a projector-space matrix; …"}``.
+    # The information was all there and the sentence was unreadable, which for
+    # a message whose entire job is "load this other matrix instead" is most of
+    # the way to not having sent one.
+    # 拒否の本文をそのまま出していたため、`surface` が返す説明が JSON の外側
+    # ごとステータス行に出ていた。情報はあるが文としては読めず、「代わりに
+    # この行列を読め」という用途にはほとんど役に立たない。
+    pytest.param(
+        "views",
+        [("api.js", '    if (parsed && typeof parsed.detail === "string") {', "    if (false) {")],
+        ("a server refusal is not shown as a raw JSON envelope",),
+        id="server_refusal_shown_as_its_json_envelope",
     ),
 ]
 

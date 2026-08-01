@@ -30,29 +30,37 @@ export const LAYOUT_PLANAR = "planar";
 export const LAYOUT_INTERLEAVED = "interleaved";
 export const LAYOUTS = Object.freeze([LAYOUT_PLANAR, LAYOUT_INTERLEAVED]);
 
-// An absent `X-Layout` is not an error -- it is what a pre-planar endpoint
-// looks like, and api.js deliberately reads it as interleaved so such an
-// endpoint still renders. A *present* value outside the set is a different
-// thing entirely: something produced it on purpose and got it wrong.
+// The layout must be declared, and must be one of the two. Absent counts as
+// unknown -- `res.headers.get` yields null, which is not in LAYOUTS.
 //
 // The failure this refuses is silent by construction. "Planar" with a capital
-// P, or a header a proxy rewrote, fails every `=== "planar"` test and routes
-// all four consumers to the interleaved walk at once. Nothing throws. Every
-// channel is attributed to the wrong tile, the hover readout agrees with the
-// wrong tiles, and the per-tile ranges agree with both -- three independent
-// readings that corroborate each other because they are all wrong the same way.
+// P, a header a proxy rewrote, or no header at all fails every `=== "planar"`
+// test and routes all four consumers to the interleaved walk at once. Nothing
+// throws. Every channel is attributed to the wrong tile, the hover readout
+// agrees with the wrong tiles, and the per-tile ranges agree with both -- three
+// independent readings that corroborate each other because they are all wrong
+// in the same way.
 //
-// ヘッダが無いのは誤りではない（planar 化前のエンドポイントの見え方であり、
-// api.js は意図的にインタリーブとして読む）。しかし値が有って集合の外にある
-// のは別物で、誰かが意図して作って間違えたということである。"Planar" のような
-// 大文字違いは `=== "planar"` を全て外し、4つの読み手が一斉にインタリーブ側へ
-// 落ちる。例外は出ず、タイル・読み取り値・タイル別レンジの3者が「同じ間違い方」
-// で一致するため、互いに裏付け合ってしまう。
+// Absence is not treated leniently. It once was, so that an endpoint predating
+// the planar format would still render, but this repository has no such
+// endpoint -- routers/view.py sends the header on every response -- so the
+// leniency guarded nothing and left stripping, which is at least as ordinary as
+// mangling, in the silent class.
+//
+// 配置は必ず申告されねばならず、既知の2つのどちらかでなければならない。
+// ヘッダが無い場合は `res.headers.get` が null を返し、これも未知として扱う。
+// "Planar" のような大文字違い、プロキシによる書き換え、そして欠落は、いずれも
+// `=== "planar"` を全て外し、4つの読み手を一斉にインタリーブ側へ落とす。例外は
+// 出ず、タイル・読み取り値・タイル別レンジの3者が「同じ間違い方」で一致する
+// ため、互いに裏付け合ってしまう。欠落を大目に見ていた時期もあるが、planar 化
+// 前のエンドポイントはこのリポジトリに存在せず（routers/view.py は常に付ける）、
+// 何も守らないまま欠落だけを静かな側に残していた。
 export function requireKnownLayout(layout, where) {
   if (!LAYOUTS.includes(layout)) {
     throw new Error(
-      `${where} の X-Layout="${layout}" はこのビューアの知らない配置です` +
-      `（扱えるのは "${LAYOUTS.join('" / "')}" のみ）。`
+      `${where} の X-Layout=${JSON.stringify(layout)} は` +
+      `このビューアの知らない配置です（扱えるのは ` +
+      `"${LAYOUTS.join('" / "')}" のみ。ヘッダが無い場合も断ります）。`
     );
   }
 }

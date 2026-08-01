@@ -235,16 +235,16 @@ export class GLView {
       const n = width * height;
       plane = img.data.subarray(channel * n, (channel + 1) * n);
     } else {
-      // Interleaved (H, W, C): one strided walk per channel. This is the
-      // fallback for a response that omits X-Layout -- api.js defaults to
-      // "interleaved" rather than assuming the newer format, so an endpoint
-      // that has not been converted still renders instead of drawing garbage.
-      // Note the `channels === 1` case never reaches either branch: a
-      // single-channel body is already the plane and is uploaded without a copy.
-      // インタリーブ (H, W, C) はチャンネルごとのストライド走査になる。
-      // X-Layout を返さない応答のための経路であり、api.js は既定を
-      // "interleaved" にして新形式を勝手に仮定しない。なお `channels === 1`
-      // はどちらの分岐にも入らず、複製なしでそのまま載る。
+      // Interleaved (H, W, C): one strided walk per channel. Reached only when
+      // the response *declares* `X-Layout: interleaved`; api.js no longer
+      // infers this layout from a missing header, so nothing lands here by
+      // accident. Note the `channels === 1` case never reaches either branch:
+      // a single-channel body is already the plane and is uploaded without a
+      // copy.
+      // インタリーブ (H, W, C) はチャンネルごとのストライド走査になる。ここへ
+      // 来るのは応答が明示的に `X-Layout: interleaved` を申告した場合だけで、
+      // api.js はヘッダの欠落からこの配置を推測しない（事故で落ちてこない）。
+      // なお `channels === 1` はどちらの分岐にも入らず、複製なしでそのまま載る。
       const n = width * height;
       plane = new Float32Array(n);
       for (let i = 0, k = channel; i < n; i++, k += channels) plane[i] = img.data[k];

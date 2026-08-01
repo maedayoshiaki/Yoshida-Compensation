@@ -78,6 +78,7 @@ const state = {
   ranges: null,     // [{ vmin, vmax }] per *tile* (per channel except for rgb)
   layout: DEFAULT_LAYOUT,
   pinned: null,     // { col, row } while the readout is frozen
+  sentParams: null, // the server-side params the newest request carried
   // Monotonic request id. Fetches are not cancelled, they are *ignored*: a
   // 95 MB transfer takes seconds, and a second 読み込み during the first one
   // used to leave the header describing matrix B while state.payload -- which
@@ -500,23 +501,44 @@ function serverParams() {
 // 安いか」という第二の情報源をフロント側に持ち、規約でバックエンドと
 // 一致させ続ける必要があり、ビューのコストが変わった瞬間に嘘になる。
 // 規則は1つ——コントロールは値を置くだけ、送るのは 適用。
-function markParamsPending() {
+// Whether the controls on screen differ from what the last request sent --
+// *derived*, not tracked by events.
+//
+// This started as a pair of set/clear calls: `change` armed the ring, and
+// reload() cleared it. That is unfixable by ordering, because the browser fires
+// `keydown` before it commits the value and fires `change`. Pressing Enter
+// therefore ran apply -> reload -> clear, and only *then* the `change` that
+// re-armed the ring -- leaving the button asserting "not applied" about a value
+// that had just been applied, with nothing left to clear it. A UI lying about
+// its own state is the exact failure class the rest of this branch removes.
+//
+// Comparing the two values has no such ordering to get wrong: whenever anything
+// happens, ask the question again. `keydown` reads the input's live `value`
+// (already updated by the time the key event fires), so the request carries the
+// new value and the `change` that follows finds nothing pending.
+//
+// Guarded on `state.matrixId` because with no matrix loaded nothing is on
+// screen, so no control can differ from what is displayed.
+//
+// 画面上のコントロールが、最後に送った値と違うかどうか。イベントで追うのでは
+// なく比較で導く。以前は `change` で立て reload() で降ろしていたが、これは
+// 順序では直せない——ブラウザは値を確定して `change` を出す*前*に `keydown` を
+// 出すため、Enter では 適用→reload→解除 のあとに `change` が来て旗を立て直し、
+// 「適用済みの値について未適用と主張するボタン」が残る。UIが自分の状態について
+// 嘘をつくのは、このブランチが他所で潰してきた失敗そのものである。
+// 比較なら間違える順序が無い。何か起きるたびに問い直せばよい。`keydown` の
+// 時点で入力欄の `value` は既に新しいので、送られるのは新しい値であり、後続の
+// `change` は「差分なし」を見る。行列未読み込みなら画面に何も無いので比較しない。
+function refreshParamsPending() {
   const apply = $("sp-apply");
-  if (apply) apply.className = "primary pending";
-  status("パラメータ変更あり — 適用 を押すと再取得します");
-}
-
-// Cleared by reload(), not by the 適用 handler: every path into reload() reads
-// the controls through serverParams(), so 読み込み and a view switch apply the
-// staged values too. Clearing only in the handler would leave the ring on after
-// those, saying "not applied" about values that just were.
-// 解除は 適用 のハンドラではなく reload() 側で行う。reload() へ入る経路は
-// どれも serverParams() でコントロールを読むため、読み込みやビュー切替でも
-// 置いた値は反映される。ハンドラだけで消すと、反映済みの値に対して
-// 「未適用」の表示が残る。
-function clearParamsPending() {
-  const apply = $("sp-apply");
-  if (apply) apply.className = "primary";
+  if (!apply) return;
+  const pending = !!state.matrixId
+    && JSON.stringify(serverParams()) !== JSON.stringify(state.sentParams);
+  apply.className = pending ? "primary pending" : "primary";
+  // Only claim the status line when there is something to say. Clearing is
+  // reload()'s business -- it owns the line once a fetch is under way.
+  // 何か言うことがあるときだけステータス行を取る。消すのは reload() の仕事。
+  if (pending) status("パラメータ変更あり — 適用 を押すと再取得します");
 }
 
 function applyServerParams() {
@@ -552,9 +574,9 @@ function buildServerParams(spec) {
     }
     el.id = `sp-${p.name}`;
     el.value = p.default;
-    // Stages the value; it does not fetch. See markParamsPending above.
+    // Stages the value; it does not fetch. See refreshParamsPending above.
     // 値を置くだけでフェッチはしない。
-    el.addEventListener("change", () => { markParamsPending(); });
+    el.addEventListener("change", () => { refreshParamsPending(); });
     // Enter in a typed field is "I am done with this value", so it submits the
     // group -- otherwise a keyboard user has to reach for the mouse.
     // 入力欄での Enter は「この値でよい」の意なのでグループを送る。
@@ -695,7 +717,14 @@ async function reload(req = beginRequest()) {
   requireSupportedKind(state.spec.kind, specName);
   requireRgbHasThreeChannels(state.spec.kind, state.spec.channels, specName);
   const params = serverParams();
-  clearParamsPending();
+  // What the screen is about to be showing. Recorded at issue time rather than
+  // on arrival, so the indicator answers "are the controls ahead of the last
+  // request?" -- the in-flight state is the status line's job, not the ring's.
+  // これから画面が表す値。到着時ではなく発行時に記録する。指標が答えるのは
+  // 「コントロールは最後の要求より先に進んでいるか」であり、転送中かどうかは
+  // ステータス行の担当である。
+  state.sentParams = params;
+  refreshParamsPending();
   status(`ビュー取得中… (${state.spec.key} ${JSON.stringify(params)})`);
 
   const t0 = performance.now();
