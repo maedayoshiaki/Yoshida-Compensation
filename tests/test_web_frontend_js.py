@@ -192,7 +192,7 @@ def test_load_button_is_released_after_a_reload_during_a_load() -> None:
 
 # ------------------------------------------------------------- discrimination
 
-# (id, scenario, [(js file, find, replace), ...], the checks that must fail)
+# (id, scenario, [(file under static/, find, replace), ...], the checks that must fail)
 #
 # The last field is the *complete* set of failing check names, matched as
 # substrings. Anything else failing is itself a finding; see the assertion.
@@ -203,43 +203,46 @@ def test_load_button_is_released_after_a_reload_during_a_load() -> None:
 # before it existed. If any of these stops failing, the corresponding test above
 # has stopped testing anything.
 #
-# The file is named per edit because the guards do not all live in ``main.js``:
-# the planar upload is ``glview.js``'s ``setImage``, and a mutation table that
-# could only reach one file would have left that one permanently unguarded.
+# The file is named per edit, as a path relative to ``static/``, because the
+# guards do not all live in ``main.js``: the planar upload is ``glview.js``'s
+# ``setImage``, and *where an element sits* is ``index.html`` -- a table that
+# could only reach ``static/js/`` would have left the page's own structure
+# permanently unguarded, which is precisely where the readout's placement lives.
 # 各項目はガードを1つだけ外し、修正前の挙動を再現する。ここが落ちなくなったら
-# 対応するテストは何も検証していない。編集ごとにファイル名を持つのは、ガードが
-# ``main.js`` だけにあるわけではないため（planar のアップロードは ``glview.js``）。
+# 対応するテストは何も検証していない。編集ごとに ``static/`` からの相対パスを
+# 持つのは、ガードが ``main.js`` だけにあるわけではないため（planar の
+# アップロードは ``glview.js``、要素の置き場所は ``index.html``）。
 _MUTATIONS = [
     pytest.param(
         "ordering",
-        [("main.js", "  if (isStale(req)) return;   // a newer request owns the screen now\n", "")],
+        [("js/main.js", "  if (isStale(req)) return;   // a newer request owns the screen now\n", "")],
         ("slow view fetch", "state.payload is the newest matrix's data"),
         id="reload_drops_its_stale_check",
     ),
     pytest.param(
         "ordering",
-        [("main.js", "    if (isStale(req)) return;\n    state.matrixId = res.id;", "    state.matrixId = res.id;")],
+        [("js/main.js", "    if (isStale(req)) return;\n    state.matrixId = res.id;", "    state.matrixId = res.id;")],
         ("slow session POST", "displayed metadata describes the newest matrix (D)"),
         id="load_drops_its_stale_check",
     ),
     pytest.param(
         "button",
         [
-            ("main.js", "  setLoadBusy(true);", "  $(\"btn-load\").disabled = true;"),
-            ("main.js", "    setLoadBusy(false);", "    if (!isStale(req)) $(\"btn-load\").disabled = false;"),
+            ("js/main.js", "  setLoadBusy(true);", "  $(\"btn-load\").disabled = true;"),
+            ("js/main.js", "    setLoadBusy(false);", "    if (!isStale(req)) $(\"btn-load\").disabled = false;"),
         ],
         ("released after a reload", "released after a view switch"),
         id="button_borrows_the_request_counter",
     ),
     pytest.param(
         "views",
-        [("contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
+        [("js/contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
         ("unsupported kind is refused", "leaves state.payload identity unchanged"),
         id="unsupported_kind_renders_as_scalar",
     ),
     pytest.param(
         "views",
-        [("main.js", "    buildViewSelect(specs);\n", "")],
+        [("js/main.js", "    buildViewSelect(specs);\n", "")],
         (
             # Removing the selector removes the only route into every view
             # switch the scenario makes, so the blast radius really is this
@@ -268,7 +271,7 @@ _MUTATIONS = [
     # rgbビューの2つの要素を1つずつ外す。どちらも描画自体は成功してしまう。
     pytest.param(
         "rgb",
-        [("main.js", "  if (traits.singleTile && payload.channels === 3) {", "  if (false) {")],
+        [("js/main.js", "  if (traits.singleTile && payload.channels === 3) {", "  if (false) {")],
         (
             "draws one tile",
             # The three tiles share one range object, so applyDisplay reads
@@ -283,7 +286,7 @@ _MUTATIONS = [
     ),
     pytest.param(
         "rgb",
-        [("main.js", "        kind: payload.kind,", '        kind: "scalar",')],
+        [("js/main.js", "        kind: payload.kind,", '        kind: "scalar",')],
         ("packed interleaved RGB texture", "told it is in rgb mode", "u_mode = 1 for the rgb tile"),
         id="rgb_view_uploads_only_its_first_channel",
     ),
@@ -303,7 +306,7 @@ _MUTATIONS = [
     pytest.param(
         "views",
         [(
-            "glview.js",
+            "js/glview.js",
             "      plane = img.data.subarray(channel * n, (channel + 1) * n);",
             "      plane = img.data.subarray(((channel + 1) % channels) * n,"
             " (((channel + 1) % channels) + 1) * n);",
@@ -313,13 +316,13 @@ _MUTATIONS = [
     ),
     pytest.param(
         "views",
-        [("main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = true;")],
+        [("js/main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = true;")],
         ("interleaved body: the hover readout",),
         id="probe_assumes_every_body_is_planar",
     ),
     pytest.param(
         "views",
-        [("main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = false;")],
+        [("js/main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = false;")],
         ("planar body: per-tile ranges follow each channel",),
         id="per_tile_ranges_read_a_planar_body_as_interleaved",
     ),
@@ -333,7 +336,7 @@ _MUTATIONS = [
     # 走査はどこからも実行されておらず、planar 側に置き換えても何も落ちなかった。
     pytest.param(
         "views",
-        [("main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = true;")],
+        [("js/main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = true;")],
         ("interleaved body: per-tile ranges follow each channel",),
         id="per_tile_ranges_read_an_interleaved_body_as_planar",
     ),
@@ -341,7 +344,7 @@ _MUTATIONS = [
     pytest.param(
         "rgb",
         [(
-            "main.js",
+            "js/main.js",
             "  if (traits.singleTile && payload.channels === 3) {",
             "  if (payload.channels === 3) {",
         )],
@@ -351,7 +354,7 @@ _MUTATIONS = [
     pytest.param(
         "rgb",
         [(
-            "main.js",
+            "js/main.js",
             "  requireRgbHasThreeChannels(state.spec.kind, state.spec.channels, specName);\n",
             "",
         )],
@@ -379,7 +382,7 @@ _MUTATIONS = [
     # 間違い方で一致する。両方が同じガードに来るので変異は1つで足りる。
     pytest.param(
         "views",
-        [("contract.js", "  if (!LAYOUTS.includes(layout)) {", "  if (false) {")],
+        [("js/contract.js", "  if (!LAYOUTS.includes(layout)) {", "  if (false) {")],
         (
             "an unknown X-Layout is refused with a message naming it",
             "an unknown X-Layout leaves state.payload identity unchanged",
@@ -400,7 +403,7 @@ _MUTATIONS = [
     # 有効のままだと、何も起きないドロップダウンを見せることになる。
     pytest.param(
         "rgb",
-        [("main.js", "  $(\"cmap-select\").disabled = !traits.colormap;",
+        [("js/main.js", "  $(\"cmap-select\").disabled = !traits.colormap;",
           "  $(\"cmap-select\").disabled = false;")],
         ("the colormap control is disabled for an rgb view",),
         id="colormap_stays_enabled_for_an_rgb_view",
@@ -409,7 +412,7 @@ _MUTATIONS = [
     pytest.param(
         "rgb",
         [(
-            "main.js",
+            "js/main.js",
             "  const inheritable = current.corner === MATRIX_CORNER\n"
             "    && current.rows.length * current.cols.length === payload.channels;",
             "  const inheritable ="
@@ -432,7 +435,7 @@ _MUTATIONS = [
     # reqId が事後に捨てる）。画面からは見えない——正しい絵は最後には出る。
     pytest.param(
         "rgb",
-        [("main.js", "    el.addEventListener(\"change\", () => { refreshParamsPending(); });",
+        [("js/main.js", "    el.addEventListener(\"change\", () => { refreshParamsPending(); });",
           "    el.addEventListener(\"change\", () => { applyServerParams(); });")],
         (
             "changing three server params issues no fetch on its own",
@@ -462,7 +465,7 @@ _MUTATIONS = [
     pytest.param(
         "rgb",
         [(
-            "main.js",
+            "js/main.js",
             "  const pending = !!state.matrixId\n"
             "    && JSON.stringify(serverParams()) !== JSON.stringify(state.sentParams);",
             "  const pending = !!state.matrixId;",
@@ -488,7 +491,7 @@ _MUTATIONS = [
     # この行列を読め」という用途にはほとんど役に立たない。
     pytest.param(
         "views",
-        [("api.js", '    if (parsed && typeof parsed.detail === "string") {', "    if (false) {")],
+        [("js/api.js", '    if (parsed && typeof parsed.detail === "string") {', "    if (false) {")],
         ("a server refusal is not shown as a raw JSON envelope",),
         id="server_refusal_shown_as_its_json_envelope",
     ),
@@ -510,14 +513,14 @@ _MUTATIONS = [
     # 「ポインタが去った画素の係数が、別の画素の見出しの下に」出る。
     pytest.param(
         "probe",
-        [("main.js", "  if (state.probeInFlight) return;", "  if (false) return;")],
+        [("js/main.js", "  if (state.probeInFlight) return;", "  if (false) return;")],
         ("a fast drag costs one point query in flight",),
         id="hover_probe_fetches_once_per_mousemove",
     ),
     pytest.param(
         "probe",
         [(
-            "main.js",
+            "js/main.js",
             "        if (want.seq !== state.probeSeq) continue;   // the pointer has moved on",
             "        if (false) continue;   // the pointer has moved on",
         )],
@@ -538,7 +541,7 @@ _MUTATIONS = [
     pytest.param(
         "probe",
         [(
-            "main.js",
+            "js/main.js",
             "        const body = await probeMatrix(matrixId, want.row, want.col);",
             "        const body = await probeMatrix(matrixId, want.col, want.row);",
         )],
@@ -560,6 +563,16 @@ _MUTATIONS = [
             "a null coefficient renders as a masked NaN cell",
             "a fast drag costs one point query in flight",
             "answered after its claim was retired",
+            # Whether a pixel is inside the active region is per-pixel, so it
+            # transposes with everything else: the fixture's out-of-region pixel
+            # is at (row 0, col 2), whose transpose (row 2, col 0) is inside.
+            # The marker therefore goes missing rather than surviving the swap,
+            # which is the whole reason it is not on the diagonal.
+            # 領域の内外は画素ごとの性質なので、これも一緒に転置する。
+            # フィクスチャの領域外画素 (row 0, col 2) の転置 (row 2, col 0) は
+            # 領域内なので、印は付いたままにならず消える（対角線上に置かない
+            # 理由がこれである）。
+            "outside the active region is marked as such",
         ),
         id="hover_probe_transposes_row_and_col",
     ),
@@ -587,24 +600,24 @@ _MUTATIONS = [
         "probe",
         [
             (
-                "main.js",
+                "js/main.js",
                 "  state.probeSeq += 1;\n"
                 "  state.probeWanted = { col: hit.col, row: hit.row, seq: state.probeSeq };",
                 "  state.reqId += 1;\n"
                 "  state.probeWanted = { col: hit.col, row: hit.row, seq: state.reqId };",
             ),
             (
-                "main.js",
+                "js/main.js",
                 "        if (want.seq !== state.probeSeq) continue;   // the pointer has moved on",
                 "        if (want.seq !== state.reqId) continue;   // the pointer has moved on",
             ),
             (
-                "main.js",
+                "js/main.js",
                 "        if (want.seq !== state.probeSeq) continue;\n        clearMatrixCells();",
                 "        if (want.seq !== state.reqId) continue;\n        clearMatrixCells();",
             ),
             (
-                "main.js",
+                "js/main.js",
                 "  clearMatrixCells();\n  state.probeSeq += 1;\n  state.probeWanted = null;",
                 "  clearMatrixCells();\n  state.reqId += 1;\n  state.probeWanted = null;",
             ),
@@ -623,9 +636,109 @@ _MUTATIONS = [
     # どちらへ倒してももっともらしい数値は出て、ラベルと中身の対応だけが失われる。
     pytest.param(
         "views",
-        [("main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = false;")],
+        [("js/main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = false;")],
         ("planar body: the hover readout",),
         id="view_values_read_a_planar_body_as_interleaved",
+    ),
+    # ---- the readout's own shape, which is a behaviour and not a decoration
+    #
+    # Both of these were the state that shipped, and neither produces an error
+    # of any kind: the viewer draws, the numbers are right, and the only thing
+    # wrong is that they cannot be read together. Twelve seven-character cells
+    # stretched across a 1600px window put one number per 500px column, and the
+    # display range and the three timings sat below the controls in a sidebar
+    # that has ``overflow-y: auto`` -- off the bottom of a short window, while
+    # the strip they belong in had room to spare.
+    # どちらも実際に出荷されていた状態であり、エラーは一切出ない。描画は
+    # 成功し、数値も正しく、ただ同時に読めないだけである。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "    `${PROBE_HEAD_PX}px repeat(${cols.length}, ${PROBE_CELL_PX}px)`;",
+            "    `var(--rowhead) repeat(${cols.length}, minmax(0, 1fr))`;",
+        )],
+        ("the readout table's columns are fixed width",),
+        id="readout_table_stretches_across_the_window",
+    ),
+    # Relocated rather than deleted: removing the elements would make
+    # ``$("range-info")`` null and throw on the first render, which is a loud
+    # failure and not the one this pins. The sidebar is where they used to be,
+    # so this reproduces the layout exactly as it shipped.
+    # 消すのではなく戻す。要素ごと消すと ``$("range-info")`` が null になって
+    # 描画時に例外になり、それは派手な失敗であってここで見たいものではない。
+    pytest.param(
+        "probe",
+        [
+            (
+                "index.html",
+                "\n    <div class=\"rd-panel\">\n"
+                "      <div class=\"rd-title mono\">表示レンジ</div>\n"
+                "      <div class=\"rd-rows mono\">\n"
+                "        <div><span id=\"range-info\" class=\"val\">—</span></div>\n"
+                "      </div>\n"
+                "    </div>\n"
+                "\n    <div class=\"rd-panel\">\n"
+                "      <div class=\"rd-title mono\">計測</div>\n"
+                "      <div class=\"rd-rows mono\">\n"
+                "        <div>転送 <span id=\"perf-fetch\" class=\"val\">—</span></div>\n"
+                "        <div>GPU転送 <span id=\"perf-upload\" class=\"val\">—</span></div>\n"
+                "        <div>JSヒープ <span id=\"perf-heap\" class=\"val\">—</span></div>\n"
+                "      </div>\n"
+                "    </div>\n",
+                "",
+            ),
+            (
+                "index.html",
+                "      <div class=\"group legend\">",
+                "      <div class=\"group readouts mono\">\n"
+                "        <div>表示レンジ <span id=\"range-info\" class=\"val\">—</span></div>\n"
+                "        <div>転送 <span id=\"perf-fetch\" class=\"val\">—</span></div>\n"
+                "        <div>GPU転送 <span id=\"perf-upload\" class=\"val\">—</span></div>\n"
+                "        <div>JSヒープ <span id=\"perf-heap\" class=\"val\">—</span></div>\n"
+                "      </div>\n\n"
+                "      <div class=\"group legend\">",
+            ),
+        ],
+        ("the display range and the timings sit in the readout dashboard",),
+        id="the_range_and_timings_go_back_into_the_sidebar",
+    ),
+    # ---- the heading that says whose numbers the second panel holds
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  $(\"view-title\").textContent = state.spec.label || state.spec.key;\n",
+            "",
+        )],
+        ("names the view whose values it is showing",),
+        id="view_value_panel_never_names_its_view",
+    ),
+    # ---- and the readout's last remaining lie
+    #
+    # ``inside_active_region`` was shipped by the point query and consumed by
+    # nobody. The mask ``coef_tiles.py`` and ``surface.py`` paint is applied at
+    # *render* time, so outside the active region the tile is grey while the
+    # stored array still holds a finite coefficient -- and the readout, which
+    # reads the array, printed it in the same type, colour and precision as a
+    # real one. On data/linear_pipeline_1080/matrices_linear_gamma.npy (active
+    # region [613, 201, 722, 722]) hovering row 5, col 5 gave
+    # ``13.440 / 1.197 / 0.017`` under a grey tile, with nothing on screen to
+    # say those numbers mean nothing. Dropping the call restores exactly that:
+    # the position line is still written synchronously by ``showProbe``, so the
+    # readout keeps working and keeps lying.
+    # 点クエリが返している ``inside_active_region`` を誰も消費していなかった
+    # 状態に戻す。位置は ``showProbe`` が同期的に書くので、読み取り欄は
+    # 動いたまま嘘をつく。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "        setProbePos(want.col, want.row, body.inside_active_region === false);\n",
+            "",
+        )],
+        ("outside the active region is marked as such",),
+        id="readout_never_says_a_pixel_is_outside_the_active_region",
     ),
 ]
 
@@ -649,7 +762,7 @@ def test_harness_catches_the_regressions_it_exists_for(
     shutil.copytree(_STATIC_DIR, mutated_static)
 
     for filename, find, replace in edits:
-        target = mutated_static / "js" / filename
+        target = mutated_static / filename
         source = target.read_text(encoding="utf-8")
         assert find in source, f"mutation anchor no longer present in {filename}: {find!r}"
         target.write_text(source.replace(find, replace, 1), encoding="utf-8", newline="")

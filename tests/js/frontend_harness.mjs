@@ -121,7 +121,7 @@ function makeEl(tag = "div") {
     innerHTML: "", value: "", checked: false, disabled: false,
     className: "", hidden: false, type: "", step: "",
     width: 0, height: 0, clientWidth: 480, clientHeight: 240,
-    children: [],
+    children: [], parentElement: null,
     style: { setProperty(k, v) { el.style[k] = v; } },
     // Backed by `className`, the way the DOM backs it, rather than swallowed.
     //
@@ -145,7 +145,11 @@ function makeEl(tag = "div") {
         if (on) this.add(name); else this.remove(name);
       },
     },
-    appendChild(child) { el.children.push(child); return child; },
+    // Parentage is recorded, not just membership: a check has to be able to
+    // ask *where* an element sits, and `children` alone only answers downwards.
+    // 親も記録する。要素が「どこに居るか」を問うチェックには下向きの
+    // `children` だけでは足りない。
+    appendChild(child) { child.parentElement = el; el.children.push(child); return child; },
     addEventListener(name, fn) { (listeners[name] ||= []).push(fn); },
     removeEventListener() {},
     // Test-side: fire a listener the way a user interaction would.
@@ -171,7 +175,11 @@ function makeEl(tag = "div") {
   Object.defineProperty(el, "textContent", {
     get: () => el._text,
     set: (v) => {
-      for (const child of el.children) unregister(child);
+      // Detached, not merely forgotten: a removed child that kept its
+      // `parentElement` would still walk up into a tree it is no longer in.
+      // 取り外した子は親への参照も切る。残すと、既に木から外れた要素が
+      // 祖先を辿れてしまう。
+      for (const child of el.children) { unregister(child); child.parentElement = null; }
       el.children.length = 0;
       el._text = v;
     },
@@ -184,16 +192,76 @@ function unregister(el) {
   for (const child of el.children) unregister(child);
 }
 
-// Pre-register exactly the ids that index.html declares, and nothing else, so
-// a reference to an id the page does not have throws rather than silently
+// Build the element *tree* index.html declares, not merely its ids.
+//
+// The registry alone answers "does this element exist", which was all the
+// earlier checks asked. It cannot answer "*where* does it sit", and that is a
+// real property of this page: the display range and the timings have to be in
+// the bottom dashboard, beside the matrix, rather than at the foot of a sidebar
+// that scrolls -- and an id registry is perfectly indifferent to which of the
+// two contains them. Rather than weaken that check to "the ids still exist"
+// (which is the shape of a check that cannot fail), the stub grew a parser.
+//
+// Deliberately minimal: it records the tag, the `class` and the `id`, and the
+// nesting. Not `value`, not boolean attributes -- every one of those would
+// change what the *existing* scenarios see at startup, and a stub that starts
+// simulating a browser more broadly than the checks need is a new source of
+// false answers rather than a better fixture.
+//
+// index.html が宣言している要素の木を組む。id の登録だけでは「その要素が
+// 在るか」しか答えられず、「どこに在るか」——表示レンジと計測が、縦に溢れる
+// サイドバーの末尾ではなく下部ダッシュボードに在ること——を検証できない。
+// 「idが在ること」にチェックを弱めるのは「落ちないテスト」を作ることなので、
+// 代わりにスタブ側を直す。記録するのはタグ・class・id・入れ子だけに留める
+// （value や真偽属性まで再現すると既存シナリオの初期状態が変わり、
+// フィクスチャの改善ではなく新しい誤答の発生源になる）。
+const VOID_ELEMENTS = new Set([
+  "area", "base", "br", "col", "embed", "hr", "img",
+  "input", "link", "meta", "param", "source", "track", "wbr",
+]);
+// Comments first, so a commented-out tag cannot open an element. Attribute
+// values are matched as quoted runs so a ">" inside one does not end the tag.
+// コメントを先に食う。属性値は引用符ごと拾い、値の中の ">" でタグが
+// 終わらないようにする。
+const TAG_RE = /<!--[\s\S]*?-->|<(\/?)([a-zA-Z][\w-]*)((?:"[^"]*"|'[^']*'|[^>])*?)(\/?)>/g;
+const ATTR_RE = /([a-zA-Z_:][-\w:.]*)\s*=\s*"([^"]*)"/g;
+
+function parseHtml(source) {
+  const root = makeEl("#document");
+  const open = [root];
+  for (const m of source.matchAll(TAG_RE)) {
+    if (m[0].startsWith("<!--")) continue;
+    const [, closing, rawTag, rawAttrs, selfClosed] = m;
+    const tag = rawTag.toLowerCase();
+    if (closing) {
+      // Close the innermost element of that name. An unbalanced close is
+      // ignored rather than unwinding the stack to the root.
+      // 同名の最も内側の要素を閉じる。対応が無ければ無視する。
+      for (let i = open.length - 1; i > 0; i--) {
+        if (open[i].tagName === tag.toUpperCase()) { open.length = i; break; }
+      }
+      continue;
+    }
+    const node = makeEl(tag);
+    const attrs = {};
+    for (const a of rawAttrs.matchAll(ATTR_RE)) attrs[a[1].toLowerCase()] = a[2];
+    if (attrs.class) node.className = attrs.class;
+    if (attrs.id) node.id = attrs.id;          // the setter is what registers it
+    open[open.length - 1].appendChild(node);
+    if (!selfClosed && !VOID_ELEMENTS.has(tag)) open.push(node);
+  }
+  return root;
+}
+
+// Exactly the ids index.html declares are registered, and nothing else, so a
+// reference to an id the page does not have throws rather than silently
 // finding a blank stub.
-// index.html が宣言しているidだけを事前登録する。存在しないidの参照は
-// 黙って空要素を拾わず例外になる。
-const html = readFileSync(path.join(STATIC_DIR, "index.html"), "utf-8");
-for (const m of html.matchAll(/id="([^"]+)"/g)) registry.set(m[1], makeEl());
+// 宣言されているidだけが登録される。存在しないidの参照は黙って空要素を
+// 拾わず例外になる。
+const documentTree = parseHtml(readFileSync(path.join(STATIC_DIR, "index.html"), "utf-8"));
 
 globalThis.document = {
-  documentElement: makeEl("html"),
+  documentElement: documentTree.children.find((e) => e.tagName === "HTML") ?? makeEl("html"),
   getElementById: (id) => registry.get(id) ?? null,
   createElement: (tag) => makeEl(tag),
 };
@@ -397,6 +465,29 @@ const INTERLEAVED_VIEWS = new Set(["plain_tiles", "legacy_tiles"]);
 // 「落ちないテスト」の作り方である。
 const PROBE_OVERRIDES = new Map();   // "row,col" -> a 4x3 (entries may be null)
 const probeKey = (row, col) => `${row},${col}`;
+
+// Pixels the fake server answers with `inside_active_region: false`.
+//
+// The values it returns for them are ordinary finite numbers, because that is
+// what the real file holds: `coef_tiles.py` applies the NaN mask *at render
+// time*, so the tile is painted grey while the stored array still has a
+// plausible-looking coefficient underneath. On
+// data/linear_pipeline_1080/matrices_linear_gamma.npy (active region
+// [613, 201, 722, 722]) row 5, col 5 reads 13.440 / 1.197 / 0.017 -- numbers
+// that mean nothing, under a grey tile, in a table that used to present them
+// exactly as it presents real ones.
+//
+// Not on the diagonal: (row 0, col 2) transposes to (row 2, col 0), which is
+// inside, so a client that swapped the two coordinates loses the marker instead
+// of coincidentally keeping it.
+//
+// この画素に対しても値は有限で返す。実ファイルがそうだからである——NaNマスクは
+// `coef_tiles.py` が描画時に掛けるので、タイルは灰色でも配列にはもっともらしい
+// 係数が残っている（実測: row 5, col 5 で 13.440 / 1.197 / 0.017）。読み取り表は
+// それを本物と同じ顔で出していた。対角線上に置かないのは、row と col を
+// 取り違えた実装が (row 2, col 0)＝領域内を訊くことになり、印が消えるように
+// するためである。
+const OUTSIDE_ACTIVE_REGION = new Set([probeKey(0, 2)]);
 const probeBlock = (row, col) =>
   PROBE_OVERRIDES.get(probeKey(row, col))
   ?? [0, 1, 2, 3].map((i) =>
@@ -496,7 +587,8 @@ globalThis.fetch = async (url, options) => {
       }), { status: 400, headers: { "content-type": "application/json" } });
     }
     return new Response(JSON.stringify({
-      row, col, values: probeBlock(row, col), inside_active_region: true,
+      row, col, values: probeBlock(row, col),
+      inside_active_region: !OUTSIDE_ACTIVE_REGION.has(probeKey(row, col)),
     }), { headers: { "content-type": "application/json" } });
   }
 
@@ -676,6 +768,22 @@ const expectedMatrixTexts = (row, col) =>
 const expectedRanges = (tag, channels) => Array.from({ length: channels }, (_, c) => ({
   vmin: -(c + 1) * tag, vmax: (c + 1) * tag,
 }));
+
+// Where an element sits in the page, from the tree parsed out of index.html.
+// `panelOf` is the chain of class names above it, which is what a placement
+// check reports when it fails -- "sidebar > group readouts" says what happened
+// far better than "false".
+// index.html から組んだ木の上での位置。失敗時は上位のクラス名の連なりを出す
+// （「false」より「sidebar > group readouts」のほうが原因に近い）。
+const ancestors = (node) => {
+  const out = [];
+  for (let p = node && node.parentElement; p; p = p.parentElement) out.push(p);
+  return out;
+};
+const sitsIn = (id, className) =>
+  ancestors(el(id)).some((a) => a.classList.contains(className));
+const panelOf = (id) =>
+  `${id}: ${ancestors(el(id)).map((a) => a.className || a.tagName).reverse().join(" > ")}`;
 
 // The tile grid's column headers, which is where an inherited axis label shows.
 // タイルグリッドの列見出し。継承された軸ラベルが表に出るのはここである。
@@ -1265,6 +1373,40 @@ if (SCENARIO === "probe") {
   // `in_R -> out_R` の下に投影面のRGBが並ぶ）。以下を `surface` で回すのは
   // そのためで、`coef_tiles` では新旧どちらも同じ12個を出すため差が見えない。
 
+  // --- the readout has to be compact, and share the strip with everything else
+  //
+  // Both of these are about space rather than arithmetic, and both were real:
+  // twelve cells stretched across a 1600px window put `-0.1234` in the middle
+  // of a 500px column, while the display range and the three timings sat at the
+  // bottom of a sidebar that had to be scrolled to reach them. The point of the
+  // readout is to be read *while* looking at the tiles, so anything that has to
+  // be scrolled to, or that pushes the tiles up to make room for whitespace,
+  // fails at the only job it has.
+  //
+  // Asserted about the page as loaded, before any matrix is: neither fact
+  // depends on data, and putting them first means a failure here is not
+  // confusable with a failure in the point query below.
+  //
+  // どちらも「場所」の検証であり、どちらも実際に起きていた。12個のセルを
+  // 1600px の窓幅いっぱいに引き伸ばすと、`-0.1234` の7文字が500pxの列の
+  // 真ん中に浮く。一方で表示レンジと計測はサイドバーの下端にあり、見るには
+  // スクロールが要った。読み取り欄はタイルを見ながら読むためのものなので、
+  // スクロールしないと届かない・余白のためにタイルを押し上げる、のどちらも
+  // 唯一の役目を果たしていない。行列の読み込み前に検証する（どちらもデータに
+  // 依存しないし、下の点クエリの失敗と混ざらない）。
+  const DASHBOARD_IDS = ["range-info", "perf-fetch", "perf-upload", "perf-heap"];
+  check("the display range and the timings sit in the readout dashboard, not the sidebar",
+    DASHBOARD_IDS.every((id) => sitsIn(id, "readout") && !sitsIn(id, "sidebar")),
+    DASHBOARD_IDS.map(panelOf).join(" | "));
+
+  // The 4x3 is built at startup (buildGrid -> buildProbeGrid), so its column
+  // template is already on the element. Fixed lengths only: `minmax(0, 1fr)`
+  // is what spread twelve seven-character cells across the whole window.
+  // 4x3 は起動時に組まれるので列の指定は既に載っている。固定長のみを許す。
+  const probeCols = String(el("probe-grid").style.gridTemplateColumns);
+  check("the readout table's columns are fixed width, not stretched to the window",
+    /px/.test(probeCols) && !/fr\b/.test(probeCols), probeCols);
+
   // --- nothing loaded yet: there is no matrix to ask about
   //
   // The 12 empty tiles exist from startup, so onHover is reachable long before
@@ -1330,6 +1472,28 @@ if (SCENARIO === "probe") {
       && JSON.stringify(viewValueNumbers()) === JSON.stringify(expectedProbe(1, 3)),
     `${JSON.stringify(viewValueLabels())} ${JSON.stringify(viewValueNumbers())}`);
 
+  // --- and it says which view those values belong to
+  //
+  // Two panels of numbers now stand side by side, and only one of them is the
+  // matrix. Without a heading that names the view, the right-hand three numbers
+  // under `surface` are just three unlabelled numbers next to twelve
+  // coefficients -- and the reading a user takes away is that they are part of
+  // the same table. The label comes from the spec that was actually rendered,
+  // so a refused view switch must not move it.
+  // 数値の板が2枚並ぶが、行列はそのうち1枚だけである。ビュー名の見出しが
+  // 無ければ、`surface` の3つの数値は12個の係数の隣に並んだ無名の3つでしかなく、
+  // 同じ表の一部として読まれる。見出しは実際に描かれたビューの名前であり、
+  // 拒否されたビュー切替で動いてはならない。
+  // Read defensively only because a *missing* heading is one of the outcomes
+  // this is checking for, and a thrown TypeError here would take the rest of
+  // the scenario's results down with it.
+  // 見出しが無いことも検査対象の結果の1つなので、ここだけは null を許して読む
+  // （例外にすると以降のチェック結果ごと失われる）。
+  const viewTitle = el("view-title");
+  check("the view-value panel names the view whose values it is showing",
+    !!viewTitle && viewTitle.textContent === "投影面の色",
+    viewTitle ? viewTitle.textContent : "#view-title does not exist");
+
   // --- a null coefficient is a masked value, not a missing one
   //
   // `null` is what routers/session.py sends for every non-finite coefficient,
@@ -1357,6 +1521,47 @@ if (SCENARIO === "probe") {
       && JSON.stringify(matrixClasses()) === JSON.stringify(
         [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0].map((n) => (n ? "probe-cell nan" : "probe-cell"))),
     `${JSON.stringify(matrixTexts())} ${JSON.stringify(matrixClasses())}`);
+
+  // --- a pixel outside the active projection region must say so
+  //
+  // This is the readout's one remaining way of lying. The mask that
+  // `coef_tiles.py` and `surface.py` paint is applied *at render time*; the
+  // stored array holds finite, meaningless numbers outside the active region.
+  // So the tile is grey and the table -- which reads the array through the
+  // point query -- prints 13.440 / 1.197 / 0.017 in exactly the type, colour
+  // and precision it prints a real coefficient in. Nothing on screen
+  // distinguishes them, and the numbers are plausible enough to be written down.
+  //
+  // Both directions are checked in one place on purpose. A readout that always
+  // warns is as useless as one that never does, and "always" passes the half of
+  // this that only looks at the masked pixel. The two pixels differ in `row`
+  // alone, so the marker cannot be following the column instead.
+  //
+  // 読み取り欄に残っていた最後の嘘。マスクは描画時に掛かるものであり、配列
+  // 自身は有効領域の外にも有限で無意味な値を持つ。したがってタイルは灰色でも、
+  // 点クエリ経由で配列を読む表は本物の係数と同じ字体・同じ色・同じ桁数で
+  // 13.440 / 1.197 / 0.017 と出す。画面上に区別は無く、しかも書き留めるに
+  // 足るほどもっともらしい。常に警告する実装は一度も警告しない実装と同じく
+  // 役に立たないので、両方向を1つのチェックで見る。2つの画素は row だけが
+  // 違うので、印が列に付いているだけということも起こらない。
+  views[0].onHover({ col: 2, row: 0 });                    // outside
+  await waitFor(() => matrixTexts()[0] === expectedMatrixTexts(0, 2)[0]);
+  const outsideSaid = el("probe-pos").textContent;
+  const outsideFlagged = el("probe-pos").classList.contains("outside");
+  const outsideCells = matrixTexts();
+  views[0].onHover({ col: 2, row: 1 });                    // inside, same column
+  await waitFor(() => matrixTexts()[0] === expectedMatrixTexts(1, 2)[0]);
+  const insideSaid = el("probe-pos").textContent;
+  const insideFlagged = el("probe-pos").classList.contains("outside");
+  check("a pixel outside the active region is marked as such, and one inside is not",
+    /有効投影領域の外/.test(outsideSaid) && outsideFlagged
+      && /col 2, row 0/.test(outsideSaid)
+      && JSON.stringify(outsideCells) === JSON.stringify(expectedMatrixTexts(0, 2))
+      && !/有効投影領域の外/.test(insideSaid) && !insideFlagged
+      && /col 2, row 1/.test(insideSaid),
+    `outside=${outsideSaid} flagged=${outsideFlagged} `
+      + `cells=${JSON.stringify(outsideCells)} `
+      + `inside=${insideSaid} flagged=${insideFlagged}`);
 
   // --- and the view-value panel marks a masked channel the same way
   //

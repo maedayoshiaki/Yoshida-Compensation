@@ -67,6 +67,28 @@ const DEFAULT_LAYOUT = {
   corner: MATRIX_CORNER,
 };
 
+// The readout table's column widths, in CSS pixels.
+//
+// Fixed lengths, not fractions. The table is always the matrix's own 4x3 and a
+// cell holds seven characters, so `minmax(0, 1fr)` stretched `-0.1234` across a
+// 500px column on a 1600px window -- 12 numbers occupying the full width of the
+// screen, with the display range and the transfer timings pushed into the
+// sidebar's overflow because there was nowhere else for them to go. At these
+// widths the whole table is about 240px and the rest of the readout fits beside
+// it.
+//
+// Set here rather than in style.css because buildProbeGrid writes the template
+// inline, and an inline style wins: a value in the sheet would look live and be
+// dead. See the note on .probe-grid there.
+//
+// 読み取り表の列幅（CSSピクセル）。分数ではなく固定長にする。表は常に行列
+// 自身の4x3で、1セルは7文字しかないため、`1fr` では1600pxの窓で1列500pxに
+// なっていた——12個の数値が画面の全幅を占め、表示レンジと計測はサイドバーの
+// 溢れた先へ追いやられていた。この幅なら表は約240pxで、残りは横に並ぶ。
+// style.css ではなくここに書くのは、インライン指定が優先されるためである。
+const PROBE_HEAD_PX = 38;
+const PROBE_CELL_PX = 66;
+
 // Gamma bounds for the typed input. The shader guards with max(u_gamma, 1e-6),
 // so the floor here is about keeping the control usable rather than safe.
 // 数値入力で受け付けるγの範囲。シェーダ側は max(u_gamma, 1e-6) で守られているので、
@@ -424,7 +446,8 @@ function buildProbeGrid() {
   const rows = DEFAULT_ROWS, cols = DEFAULT_COLS;
   const grid = $("probe-grid");
   grid.textContent = "";
-  grid.style.gridTemplateColumns = `var(--rowhead) repeat(${cols.length}, minmax(0, 1fr))`;
+  grid.style.gridTemplateColumns =
+    `${PROBE_HEAD_PX}px repeat(${cols.length}, ${PROBE_CELL_PX}px)`;
   probeCells.length = 0;
 
   grid.appendChild(document.createElement("div"));
@@ -475,6 +498,42 @@ function clearMatrixCells() {
   for (const cell of probeCells) { cell.textContent = "—"; cell.className = "probe-cell"; }
 }
 
+// The position line, and the one warning the table cannot give by itself.
+//
+// `outside` says the pixel is excluded from the mask coef_tiles.py and
+// surface.py paint -- and the numbers below are still printed, because they are
+// what the file holds. That is the whole problem: the mask is applied at
+// *render* time, so the tile is grey while the stored array keeps a finite,
+// meaningless coefficient underneath. Measured on
+// data/linear_pipeline_1080/matrices_linear_gamma.npy (active region
+// [613, 201, 722, 722]), row 5 col 5 reads 13.440 / 1.197 / 0.017 -- set in the
+// same type, the same colour and the same four decimals as a real one. Nothing
+// distinguished them, and they are plausible enough to be written down.
+//
+// They are labelled rather than hidden: blanking them would make this
+// indistinguishable from "nothing has been read yet" (the "—" clearReadout
+// writes), and would also hide the one thing worth seeing here, which is that
+// the file has values out there at all.
+//
+// Written from `want`/`hit` in full every time rather than appended to, so the
+// text cannot end up describing a different pixel from the one that produced
+// the numbers, and a second answer for the same pixel cannot double the suffix.
+//
+// 位置の表示と、表だけでは出せない唯一の警告。`outside` は
+// coef_tiles.py / surface.py が塗るマスクの外側であることを指す。値は消さずに
+// 出す——マスクは描画時に掛かるものなので、タイルが灰色でも配列には有限で
+// 無意味な係数が残っているからである（実測: 上記の行列の row 5 col 5 で
+// 13.440 / 1.197 / 0.017。本物と同じ字体・色・桁数で出ていた）。消さないのは、
+// 消すと「まだ何も読んでいない」を意味する「—」と区別が付かなくなるうえ、
+// 「ファイルには領域外にも値が入っている」という見るべき事実まで隠れるため。
+// 毎回まるごと書き直すのは、数値を出した画素と表示が食い違わないようにする
+// ためと、同じ画素への2度目の応答で接尾辞が重ならないようにするため。
+function setProbePos(col, row, outside) {
+  const el = $("probe-pos");
+  el.textContent = `col ${col}, row ${row}${outside ? " — 有効投影領域の外（下の値は無効）" : ""}`;
+  el.classList.toggle("outside", !!outside);
+}
+
 // Reset both panels, and retire whatever claim is in flight.
 //
 // Called on pointer-leave and after a render. Without the `probeSeq` bump a
@@ -485,6 +544,7 @@ function clearMatrixCells() {
 // 「—」と表示された位置の下に表を描き直す。
 function clearReadout() {
   $("probe-pos").textContent = "—";
+  $("probe-pos").classList.remove("outside");
   $("view-values").textContent = "";
   clearMatrixCells();
   state.probeSeq += 1;
@@ -492,10 +552,19 @@ function clearReadout() {
 }
 
 // The position and the view's own values, both from data already here.
-// 位置と、表示中のビューの値。どちらも手元にあるものだけで書ける。
+//
+// The position goes up without the active-region marker, because whether the
+// pixel is inside is the server's answer and has not arrived yet. Claiming
+// either way from here would be guessing, and the direction that guesses
+// "inside" is exactly the silence this marker exists to break.
+//
+// 位置と、表示中のビューの値。どちらも手元にあるものだけで書ける。有効領域の
+// 印は付けない——内側かどうかはサーバの答えであり、まだ届いていない。ここで
+// 決め打ちすれば当て推量になり、しかも「内側」と推量する側は、この印が破ろうと
+// している沈黙そのものである。
 function showProbe(hit) {
   if (!hit) { clearReadout(); return; }
-  $("probe-pos").textContent = `col ${hit.col}, row ${hit.row}`;
+  setProbePos(hit.col, hit.row, false);
   showViewValues(hit);
   requestMatrixProbe(hit);
 }
@@ -644,6 +713,12 @@ async function runMatrixProbes() {
       try {
         const body = await probeMatrix(matrixId, want.row, want.col);
         if (want.seq !== state.probeSeq) continue;   // the pointer has moved on
+        // Only an explicit `false` is a claim. A response without the field is
+        // a server that does not answer this question, and "it did not say"
+        // must not be rendered as "it said you are inside".
+        // 明示的な false のときだけ主張する。フィールドが無い応答は「この問いに
+        // 答えないサーバ」であって、「内側だと答えた」ではない。
+        setProbePos(want.col, want.row, body.inside_active_region === false);
         showMatrixValues(body.values);
         reportProbeError(null);
       } catch (e) {
@@ -938,6 +1013,19 @@ async function reload(req = beginRequest()) {
   const traits = traitsFor(payload.kind, "サーバの応答");
   requireRgbHasThreeChannels(payload.kind, payload.channels, "サーバの応答");
   state.payload = payload;
+  // The heading over #view-values, set with the payload it describes.
+  //
+  // Two panels of numbers now sit side by side and only one of them is the
+  // matrix; without this the three values under `surface` are just three
+  // unlabelled numbers next to twelve coefficients. Written here rather than
+  // when the selector changes, so a view that is refused -- an unsupported
+  // kind, a server-side 400 -- leaves the heading naming what is still on
+  // screen instead of a view that never rendered.
+  // #view-values の見出し。数値の板が2枚並ぶが行列はそのうち1枚だけであり、
+  // これが無いと `surface` の3つは12個の係数の隣に並んだ無名の数値になる。
+  // セレクタの変更時ではなくペイロード確定時に書くので、拒否されたビューの
+  // 名前が画面に残ることはない。
+  $("view-title").textContent = state.spec.label || state.spec.key;
 
   const layout = layoutFor(payload, state.layout, traits);
   // Compared by value, and only then rebuilt: buildGrid disposes and recreates

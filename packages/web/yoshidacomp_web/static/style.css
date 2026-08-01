@@ -34,6 +34,28 @@ body {
   font-family: var(--sans); color: var(--ink); background: var(--bg);
   font-size: 14px; -webkit-font-smoothing: antialiased;
 }
+/* Each band is placed in its own row *by name*, not by document order.
+   The template above is positional, and `#space-note` is `hidden` whenever the
+   matrix is in projector space -- `display: none` removes it as a grid item
+   entirely, so every band after it slid up one row and the `1fr` landed on the
+   readout instead of on the tiles. Measured (Chrome, 1600x1000, this matrix):
+   `main` came out exactly as tall as the sidebar's own content, 717px with
+   `coef_tiles` and 688px with `surface`, and the readout absorbed the slack --
+   140px of box around 110px of panels, a 30px blank band under the table, and
+   the tiles quietly resized by how many controls the current view happens to
+   declare. Naming the rows makes a hidden band collapse its own row and
+   nothing else's.
+   各段を文書順ではなく名指しで行に置く。上のテンプレートは位置で決まるが、
+   `#space-note` は投影座標の行列では `hidden` になり、`display: none` は
+   グリッド項目そのものを消すため、以降の段が1行ずつ繰り上がって `1fr` が
+   タイルではなく読み取り欄に載っていた（実測: `main` はサイドバーの内容と
+   ちょうど同じ高さになり、余りは読み取り欄の下の空白になっていた。つまり
+   タイルの高さは、そのビューが宣言しているコントロールの数で決まっていた）。 */
+.toolbar { grid-row: 1; }
+#space-note { grid-row: 2; }
+main { grid-row: 3; }
+.readout { grid-row: 4; }
+footer#status { grid-row: 5; }
 .mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
 
@@ -127,25 +149,51 @@ input.num {
   border-radius: 4px;
 }
 hr { border: none; border-top: 1px solid var(--border); margin: 14px 0; }
-.readouts div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0; font-size: 11.5px; }
-.readouts .val { color: var(--accent); text-align: right; }
 
 .legend { display: flex; align-items: center; gap: 7px; font-size: 11px; }
 .legend-swatch { width: 34px; height: 12px; border-radius: 3px; border: 1px solid var(--border); flex-shrink: 0; }
 .legend-swatch.nan { background: var(--nan); }
 .legend-swatch.grad { background: linear-gradient(to right, #3b4cbf, #fff, #b5051f); }
 
-/* Hover readout */
-.readout { background: var(--panel); border-top: 1px solid var(--border); padding: 7px 12px 9px; }
-.readout-head { font-size: 12px; color: var(--ink-2); margin-bottom: 5px; }
-.readout-head .val { color: var(--accent); }
-.probe-grid { display: grid; gap: 2px 6px; grid-template-columns: var(--rowhead) repeat(3, minmax(0, 1fr)); }
+/* Hover readout: one row of panels along the bottom.
+   下部の読み取り欄。板を横に並べる。 */
+.readout {
+  display: flex; gap: 20px; align-items: flex-start; flex-wrap: wrap;
+  background: var(--panel); border-top: 1px solid var(--border); padding: 7px 12px 9px;
+}
+/* Only the view-value panel absorbs the leftover width. The other three hold
+   content of a known size (a 4x3 table, one range, three timings), so letting
+   them grow would spread three short lines over half the window again -- the
+   exact thing this layout replaced.
+   余った幅を取るのはビュー値の板だけにする。他の3枚は中身の幅が決まって
+   おり（4x3の表・レンジ1つ・計測3行）、伸ばせば短い行が窓幅に散らばる。 */
+.rd-panel { min-width: 0; }
+.rd-panel.grow { flex: 1 1 240px; }
+.rd-title { font-size: 11px; color: var(--muted); margin-bottom: 4px; white-space: nowrap; }
+.rd-title .val { color: var(--accent); }
+.rd-rows div { display: flex; gap: 8px; font-size: 11.5px; padding: 1px 0; white-space: nowrap; }
+.rd-rows .val { color: var(--accent); }
+
+/* `grid-template-columns` is deliberately absent: js/main.js sets it inline
+   (PROBE_HEAD_PX / PROBE_CELL_PX) and an inline style wins over this sheet, so
+   a value here would be dead text that reads like the live one. One source
+   only -- the same rule as --nan above.
+   列幅はここに書かない。js/main.js がインラインで設定し、インラインが優先
+   されるため、ここに書いた値は「生きているように見える死んだ記述」になる。 */
+.probe-grid { display: grid; gap: 2px 6px; }
 .probe-head { font-size: 11px; color: var(--muted); }
 .probe-cell { font-size: 11.5px; color: var(--ink); text-align: right; }
 .probe-cell.nan { color: var(--nan); }
-.readout .readout-head { margin-top: 8px; }
+/* The hovered pixel is outside the active projection region, so the twelve
+   numbers below are whatever the file happens to hold there. Coloured as an
+   error rather than muted: the readout is asserting that its own contents are
+   not to be trusted, which is not a footnote.
+   有効投影領域の外を指しているという表示。下の12個はファイルに残っている
+   だけの値である。控えめではなくエラー色にするのは、読み取り欄が自分の
+   中身を信用するなと言っている場面だからである。 */
+#probe-pos.outside { color: var(--error); }
 .view-values { display: flex; flex-wrap: wrap; gap: 2px 12px; }
-.view-value { display: flex; gap: 6px; font-size: 11.5px; }
+.view-value { display: flex; gap: 6px; font-size: 11.5px; white-space: nowrap; }
 .vv-label { color: var(--muted); }
 .vv-num { color: var(--ink); }
 .vv-num.nan { color: var(--nan); }
