@@ -126,6 +126,25 @@ def test_view_selector_reaches_a_second_view_and_refuses_unknown_kinds() -> None
     _assert_all_passed(_run_harness(_STATIC_DIR, "views"))
 
 
+def test_an_rgb_view_draws_one_colour_tile_and_keeps_a_three_channel_readout() -> None:
+    """An ``rgb`` view must be one colour picture, not three greyscale ones.
+
+    Nothing about this fails loudly on its own, which is why it is here. The
+    grid is derived from the channel labels, and ``surface``'s are ``R``/``G``/
+    ``B`` -- not the ``"a -> b"`` form ``axesFromLabels`` parses -- so the
+    label-derived fallback yields a 1x3 grid and each component goes through
+    the scalar path on its own tile. That draws. It draws three greyscale
+    pictures of a colour, from a viewer that looks like it is working.
+
+    The upload is checked at the same time, because the wire format is planar
+    and WebGL textures are interleaved: the one pack this path needs has to
+    actually happen, and the harness's recorded ``head`` is what separates a
+    correct ``R,G,B,R,G,B`` upload from the planar buffer passed through
+    unchanged (identical length, first and last).
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "rgb"))
+
+
 def test_load_button_is_released_after_a_reload_during_a_load() -> None:
     """Touching a server-side control mid-load must not wedge 読み込み.
 
@@ -172,7 +191,7 @@ _MUTATIONS = [
     ),
     pytest.param(
         "views",
-        [("  if (kind !== SUPPORTED_KIND) {", "  if (false) {")],
+        [("  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
         "unsupported kind is refused",
         id="unsupported_kind_renders_as_scalar",
     ),
@@ -181,6 +200,23 @@ _MUTATIONS = [
         [("    buildViewSelect(specs);\n", "")],
         "view selector is populated",
         id="view_selector_removed",
+    ),
+    # The rgb view's two halves, removed one at a time. Both mutations still
+    # *render* -- that is the point of testing them. One draws three greyscale
+    # tiles where one colour tile belongs; the other draws one tile of channel 0
+    # only. Neither throws, neither logs, and both look like a working viewer.
+    # rgbビューの2つの要素を1つずつ外す。どちらも描画自体は成功してしまう。
+    pytest.param(
+        "rgb",
+        [('  if (payload.kind === "rgb") {', "  if (false) {")],
+        "draws one tile",
+        id="rgb_view_falls_back_to_one_tile_per_channel",
+    ),
+    pytest.param(
+        "rgb",
+        [('        mode: payload.kind === "rgb" ? "rgb" : "scalar",', '        mode: "scalar",')],
+        "packed interleaved RGB texture",
+        id="rgb_view_uploads_only_its_first_channel",
     ),
 ]
 

@@ -2,7 +2,7 @@
 //
 // Usage: node frontend_harness.mjs <static-dir> <scenario>
 //   <static-dir>  directory holding index.html and js/{main,glview,api}.js
-//   <scenario>    "ordering" | "views" | "button"
+//   <scenario>    "ordering" | "views" | "button" | "rgb"
 // Prints one JSON object to stdout: { scenario, checks: [{name, ok, detail}] }.
 //
 // Why a stub instead of a browser: the behaviours under test -- request
@@ -54,16 +54,41 @@ function emit() {
 // あり、これを取らないと planar とインタリーブの2分岐は外部から区別できず、
 // どちらが壊れても誰も気付かない。`subarray` がペイロード全体を保持しない
 // よう、配列そのものではなく要約を記録する。
-function glStub(uploads) {
-  const fn = function () { return glStub(uploads); };
+//
+// `head` is what makes the rgb pack observable. Length, first and last alone
+// cannot tell a correctly interleaved (R,G,B,R,G,B,...) upload from the planar
+// buffer handed over unpacked: both are 3*H*W long, both start at channel 0's
+// value and end at channel 2's. The first six elements separate them
+// immediately -- [1,2,3,1,2,3] against [1,1,1,1,1,1].
+// `head` があってはじめて RGB の詰め替えが外から見える。長さ・先頭・末尾だけ
+// では、正しくインタリーブした配列と planar のまま渡した配列を区別できない。
+//
+// `uniform1i` is the other call not swallowed, for the same reason one step
+// later: the texture can be uploaded as RGB32F and the shader still told
+// u_mode = 0, which reads only its red component and draws a greyscale tile
+// that looks like a working view of a colour. Uniform locations are handed back
+// as their own names so the value is attributable to a uniform from out here.
+// `uniform1i` も飲み込まない。RGB32F を載せておきながら u_mode を0のままに
+// すると、赤成分だけを読んだグレースケールが「動いているビュー」の顔で出る。
+// 値をどの uniform のものか判別できるよう、ロケーションは名前そのものを返す。
+function glStub(uploads, uniforms) {
+  const fn = function () { return glStub(uploads, uniforms); };
   return new Proxy(fn, {
     get(_t, prop) {
       if (prop === Symbol.toPrimitive || prop === "valueOf") return () => 1;
       if (prop === "__uploads") return uploads;
+      if (prop === "__uniforms") return uniforms;
+      if (prop === "getUniformLocation") return (_prog, name) => name;
+      if (prop === "uniform1i") return (name, value) => { uniforms[name] = value; };
       if (prop === "texImage2D") {
         return (...args) => {
           const px = args[args.length - 1];
-          uploads.push({ length: px.length, first: px[0], last: px[px.length - 1] });
+          uploads.push({
+            length: px.length,
+            first: px[0],
+            last: px[px.length - 1],
+            head: Array.from(px.slice(0, 6)),
+          });
         };
       }
       if (typeof prop === "string" && /^[A-Z0-9_]+$/.test(prop)) return 1;
@@ -97,7 +122,7 @@ function makeEl(tag = "div") {
     // One context per element, kept, so each tile's uploads accumulate on its
     // own GLView rather than on a fresh proxy per call.
     // 要素ごとに1つのコンテキストを保持し、タイル別に記録が貯まるようにする。
-    getContext() { return (el.__gl ||= glStub([])); },
+    getContext() { return (el.__gl ||= glStub([], {})); },
     getBoundingClientRect() { return { left: 0, top: 0 }; },
     setPointerCapture() {},
   };
@@ -174,10 +199,30 @@ const VIEWS = [
   { key: "plain_tiles", label: "パラメータなしタイル", kind: "scalar", channels: 12, params: [] },
   // Declared in the Python ViewKind but unimplemented in the frontend (F4).
   { key: "gamut", label: "色域外判定", kind: "categorical", channels: 4, params: [] },
+  // Three channels that are one colour, not three pictures -- the rgb scenario.
+  {
+    key: "surface", label: "投影面の色", kind: "rgb", channels: 3,
+    params: [
+      { name: "p_r", label: "投影 R", type: "number", default: 1.0, choices: [] },
+      { name: "p_g", label: "投影 G", type: "number", default: 1.0, choices: [] },
+      { name: "p_b", label: "投影 B", type: "number", default: 1.0, choices: [] },
+    ],
+  },
 ];
 
-const viewLabels = (spec) =>
-  spec.channels === 12 ? TILE_LABELS : ["色域外", "1超クリップ", "両方", "範囲内, 補正可"];
+// Keyed by view rather than by channel count: `surface` has 3 channels and
+// would otherwise be handed the 4 categorical labels, which the backend's own
+// channels/labels agreement check would never allow.
+// チャンネル数ではなくキーで引く。3チャンネルの `surface` に4つのラベルを
+// 渡さないため。
+const LABELS_BY_KEY = {
+  coef_tiles: TILE_LABELS,
+  plain_tiles: TILE_LABELS,
+  gamut: ["色域外", "1超クリップ", "両方", "範囲内, 補正可"],
+  surface: ["R", "G", "B"],
+};
+
+const viewLabels = (spec) => LABELS_BY_KEY[spec.key];
 
 // `plain_tiles` is served the *old* way: interleaved (H, W, C) and with no
 // X-Layout header at all.
@@ -330,7 +375,17 @@ const uploadedPlanes = () => views.map((v) => {
 // Expected per-tile plane for matrix `tag`: full size, filled with (c+1)*tag.
 const expectedPlanes = (tag, channels) => Array.from({ length: channels }, (_, c) => ({
   length: H * W, first: (c + 1) * tag, last: (c + 1) * tag,
+  head: Array.from({ length: 6 }, () => (c + 1) * tag),
 }));
+
+// Expected upload for a 3-channel rgb view: one texture holding all three
+// channels interleaved, so the first six elements cycle 1*tag, 2*tag, 3*tag.
+// rgbビューの期待値。3チャンネルを1枚に詰めるので先頭6要素は tag の1,2,3倍を
+// 2周する。
+const expectedPackedRgb = (tag) => [{
+  length: H * W * 3, first: tag, last: 3 * tag,
+  head: [tag, 2 * tag, 3 * tag, tag, 2 * tag, 3 * tag],
+}];
 
 // Hover one pixel and read the 12 readout cells back off the DOM, which is the
 // only place showProbe's layout arithmetic is observable.
@@ -433,7 +488,7 @@ if (SCENARIO === "ordering") {
 if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
-    options.join(",") === "coef_tiles,plain_tiles,gamut", options.join(","));
+    options.join(",") === "coef_tiles,plain_tiles,gamut,surface", options.join(","));
   check("a second registered view is reachable from the selector",
     options.includes("plain_tiles"), options.join(","));
 
@@ -551,6 +606,68 @@ if (SCENARIO === "button") {
   check("button is released after a view switch during an in-flight load",
     el("btn-load").disabled === false,
     `disabled=${el("btn-load").disabled}`);
+}
+
+if (SCENARIO === "rgb") {
+  // An rgb view is three channels that are *one picture*, and every assertion
+  // here is about that difference surviving the round trip.
+  //
+  // The failure mode this guards is not a crash. `surface`'s labels are
+  // ["R","G","B"], which `axesFromLabels` cannot parse, so the label-derived
+  // fallback produces a 1x3 grid: three tiles, each drawing one component
+  // through the scalar path. That renders. It just renders three greyscale
+  // pictures of a colour, which is precisely the thing the view exists not to
+  // do -- and it looks like a working viewer while doing it.
+  // rgbビューの3チャンネルは1枚の絵である。ラベル ["R","G","B"] は
+  // `axesFromLabels` では解釈できず、フォールバックだと1行3列＝3枚の
+  // グレースケールになる。落ちはしないが、このビューが避けたいものそのもの。
+  clickLoad("A");
+  await settled();
+  check("baseline scalar load drew one tile per channel",
+    views.length === 12, `tiles=${views.length}`);
+
+  el("view-select").value = "surface";
+  el("view-select").__fire("change");
+  await settled();
+
+  check("an rgb view renders instead of being refused as an unknown kind",
+    /表示中/.test(statusText()), statusText());
+  check("an rgb view draws one tile, not one greyscale tile per channel",
+    views.length === 1, `tiles=${views.length}`);
+  check("the rgb payload is uploaded as one packed interleaved RGB texture",
+    JSON.stringify(uploadedPlanes()) === JSON.stringify(expectedPackedRgb(1)),
+    JSON.stringify(uploadedPlanes()));
+  check("the single tile is told it is in rgb mode",
+    views[0].image && views[0].image.mode === "rgb",
+    `mode=${views[0].image && views[0].image.mode}`);
+  // And so is the shader. Uploading RGB32F while leaving u_mode at 0 draws the
+  // red component alone through the scalar colormap -- a picture, of one third
+  // of the data, with nothing to say so.
+  // シェーダ側にも伝わっていること。RGB32Fを載せて u_mode を0のままにすると
+  // 赤成分だけがカラーマップを通り、3分の1のデータの絵が黙って出る。
+  check("the shader is told u_mode = 1 for the rgb tile",
+    views[0].gl.__uniforms.u_mode === 1, `u_mode=${views[0].gl.__uniforms.u_mode}`);
+  // One tile, but still three numbers to report: the readout grid keeps one
+  // cell per channel rather than mirroring the tile grid.
+  // タイルは1枚でも読み取り値は3つある。読み取りグリッドはチャンネル数で組む。
+  check("the hover readout still reports all three channels",
+    JSON.stringify(probeTexts()) === JSON.stringify(expectedProbe(1, 3)),
+    JSON.stringify(probeTexts()));
+
+  // Going back has to rebuild the 12-tile grid. A one-way trip into rgb would
+  // leave a single tile drawing coefficient 0 and eleven channels invisible.
+  // 戻れることまで確認する。片道だと係数タイルが1枚だけになる。
+  el("view-select").value = "coef_tiles";
+  el("view-select").__fire("change");
+  await settled();
+  check("switching back to a scalar view restores one tile per channel",
+    views.length === 12, `tiles=${views.length}`);
+  check("switching back to a scalar view uploads single-channel planes again",
+    JSON.stringify(uploadedPlanes()) === JSON.stringify(expectedPlanes(1, 12)),
+    JSON.stringify(uploadedPlanes().map((u) => u && u.length)));
+  check("switching back to a scalar view puts the shader back in u_mode = 0",
+    views.every((v) => v.gl.__uniforms.u_mode === 0),
+    JSON.stringify(views.map((v) => v.gl.__uniforms.u_mode)));
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

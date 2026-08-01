@@ -220,6 +220,81 @@ def test_surface_masks_outside_active_region_and_composes_with_singularity(
     assert np.all(np.isnan(planar[:, x, y]))
 
 
+def test_surface_keeps_zero_as_the_black_point_while_the_response_is_positive(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """A positive response must keep ``vmin == 0``, so the colour is the colour.
+
+    The rgb branch of the shader maps ``[vmin, vmax]`` onto ``[0, 1]`` and then
+    tone-maps, so ``vmin`` *is* the black point. Letting it float up to the
+    data's own minimum would subtract a constant from all three channels, which
+    is not a brightness change but a desaturation: a surface reading
+    ``(0.25, 0.375, 0.5)`` would be drawn with a hue it does not have. This
+    view's whole question is "what colour is the projection surface", so its
+    zero has to stay at zero whenever the data allows it.
+
+    rgb経路は ``[vmin, vmax]`` を ``[0, 1]`` へ写すので ``vmin`` が黒レベルに
+    なる。データの最小値へ浮かせると3チャンネルから同じ定数を引くことになり、
+    明るさではなく彩度が変わる。「投影面が何色か」を問うビューなので、
+    データが許す限り 0 を黒に固定する。
+    """
+    store.clear()
+    stand_in_projector_config(width=5, height=4)
+    client = TestClient(create_app())
+
+    matrices = np.zeros((4, 5, 4, 3), dtype=np.float32)
+    for c in range(3):
+        matrices[:, :, c, c] = 2.0
+    matrices[:, :, 3, :] = np.array([0.5, 0.25, 0.0], dtype=np.float32)
+    matrix_id = _load(client, tmp_path, matrices)
+
+    response = client.get(f"/api/matrix/{matrix_id}/view/surface")
+    assert response.status_code == 200
+    # Response is ((1-0.5)/2, (1-0.25)/2, (1-0)/2) = (0.25, 0.375, 0.5) everywhere.
+    assert float(response.headers["X-Vmin"]) == 0.0
+    assert float(response.headers["X-Vmax"]) == pytest.approx(0.5)
+
+
+def test_surface_lets_vmin_follow_the_data_when_the_response_goes_negative(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """An ambient-only command is all-negative and must not render as black.
+
+    ``P = (0, 0, 0)`` gives ``-b A^-1``, which is negative wherever the ambient
+    term is positive -- the case this view answers "how much light is on the
+    surface with the projector dark". With ``vmin`` pinned at 0 every one of
+    those values clips to the bottom and the whole active region renders as a
+    flat black frame, indistinguishable from "no data" and from "exactly zero".
+    So the floor drops to the data's own 1st percentile (the mirror of the 99th
+    used for ``vmax``, and equally robust to a single wild pixel) *when, and
+    only when, that is below zero*.
+
+    ``P=(0,0,0)`` の応答 ``-b A^-1`` は負であり、``vmin`` を0に固定すると
+    有効領域が一様な黒になって「データ無し」とも「ちょうど0」とも区別が
+    つかない。負値があるときだけ下端を1パーセンタイル（``vmax`` の99の鏡像）
+    まで下げる。
+    """
+    store.clear()
+    stand_in_projector_config(width=5, height=4)
+    client = TestClient(create_app())
+
+    matrices = np.zeros((4, 5, 4, 3), dtype=np.float32)
+    for c in range(3):
+        matrices[:, :, c, c] = 2.0
+    matrices[:, :, 3, :] = np.array([0.5, 0.25, 0.0], dtype=np.float32)
+    matrix_id = _load(client, tmp_path, matrices)
+
+    response = client.get(
+        f"/api/matrix/{matrix_id}/view/surface?p_r=0&p_g=0&p_b=0"
+    )
+    assert response.status_code == 200
+    # Response is -(0.5, 0.25, 0)/2 = (-0.25, -0.125, 0.0) everywhere.
+    assert float(response.headers["X-Vmin"]) == pytest.approx(-0.25)
+    # The span still has to be positive, or the shader's max(vmax - vmin, 1e-9)
+    # would be doing the work instead of the range.
+    assert float(response.headers["X-Vmax"]) > float(response.headers["X-Vmin"])
+
+
 def test_surface_is_listed_with_its_params() -> None:
     store.clear()
     client = TestClient(create_app())

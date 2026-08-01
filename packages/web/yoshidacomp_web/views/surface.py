@@ -93,7 +93,37 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     data = np.ascontiguousarray(response, dtype=np.float32)
     finite = data[np.isfinite(data)]
     vmax = float(np.percentile(finite, 99)) if finite.size else 1.0
-    return ViewResult(data=data, vmin=0.0, vmax=max(vmax, 1e-6), labels=LABELS)
+
+    # The black point is 0 whenever the data allows it, and only then.
+    #
+    # The frontend's rgb branch maps [vmin, vmax] onto [0, 1] and tone-maps
+    # what comes out, so vmin *is* the black level of the picture. Because all
+    # three channels share one range, moving vmin off zero subtracts the same
+    # constant from R, G and B -- which is not a brightness change but a
+    # desaturation. This view's question is "what colour is the projection
+    # surface", so a floating floor would answer it with the wrong hue.
+    #
+    # But the answer is legitimately negative: P = (0,0,0) asks "what does the
+    # camera see with the projector dark" and yields -b·A^-1, negative wherever
+    # there is ambient light. Pinned at 0, every one of those clips to the
+    # bottom and the active region renders as one flat black frame --
+    # indistinguishable from "no data" and from "exactly zero".
+    #
+    # So: keep 0 when the data is non-negative, and drop to the data's own 1st
+    # percentile when it is not. The percentile mirrors the 99th used for vmax
+    # and is robust to one wild pixel in the same way a bare min() would not be.
+    # Note this also keeps the span strictly positive: vmin <= 0 < 1e-6 <= vmax.
+    #
+    # 黒レベルは可能な限り0に固定する。rgb経路は [vmin, vmax] を [0,1] へ写す
+    # ため vmin が黒レベルそのものであり、3チャンネル共通のレンジをずらすと
+    # 明るさではなく彩度が変わる（「投影面が何色か」を問うビューで色相が狂う）。
+    # 一方で P=(0,0,0) の応答 -b·A^-1 は環境光があれば負であり、0固定では
+    # 一様な黒になって「データ無し」とも「ちょうど0」とも区別がつかない。
+    # よって負値があるときだけ1パーセンタイル（vmax の99の鏡像で、外れ値1画素に
+    # 引きずられない）まで下げる。これで span も必ず正になる。
+    vmin = min(0.0, float(np.percentile(finite, 1))) if finite.size else 0.0
+
+    return ViewResult(data=data, vmin=vmin, vmax=max(vmax, 1e-6), labels=LABELS)
 
 
 def _command_param(name: str, label: str) -> ParamSpec:

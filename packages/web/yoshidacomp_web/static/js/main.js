@@ -1,9 +1,14 @@
-// Application wiring for the 12-coefficient tile viewer.
+// Application wiring for the matrix viewer.
+//
+// Two shapes of view are drawn: a scalar one, one tile per channel (the 12
+// coefficients), and an rgb one, three channels on a single colour tile (the
+// projection surface). `kind` from the registry decides which; see layoutFor.
 //
 // The load-bearing rule here is the separation between *display* and
 // *recompute*. Exposure, gamma, colormap and dither only push uniforms into the
-// 12 GLViews; they must never touch the network. Only a server-side view
-// parameter (currently `normalize`) re-issues the binary fetch.
+// GLViews; they must never touch the network. Only a server-side view
+// parameter (`normalize` for the coefficient tiles, the projection command for
+// the surface) re-issues the binary fetch.
 // 露出・γ・カラーマップ・ディザは uniform を更新するだけでサーバへ行かない。
 // サーバ側ビューパラメータの変更だけが再フェッチを起こす。
 //
@@ -19,10 +24,10 @@ import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
 
 const $ = (id) => document.getElementById(id);
 
-// The only view B1 can draw. `rgb` and `categorical` are declared in the
-// Python ViewKind but have no implementation here; see requireSupportedKind.
-// B1が描けるのはこれだけ。rgb / categorical は未実装。
-const SUPPORTED_KIND = "scalar";
+// The views this frontend can draw. `categorical` is declared in the Python
+// ViewKind but has no implementation here; see requireSupportedKind.
+// 描けるのはこの2つ。categorical は未実装。
+const SUPPORTED_KINDS = ["scalar", "rgb"];
 
 // Startup fallback only -- the real axis labels always arrive from the server
 // (axesFromLabels over the X-Labels-B64 header). These mirror
@@ -34,6 +39,20 @@ const SUPPORTED_KIND = "scalar";
 // 正はあちら側。
 const DEFAULT_ROWS = ["in_R", "in_G", "in_B", "bias"];
 const DEFAULT_COLS = ["out_R", "out_G", "out_B"];
+
+// The corner cell of a coefficient grid, where the row and column axes meet.
+// An rgb view has no such axes, so it gets an empty corner rather than a
+// caption that describes a matrix it is not.
+const MATRIX_CORNER = "in \\ out";
+
+// rows x cols is the *tile* grid; probeCols is the readout grid, which for an
+// rgb view is not the same thing. See layoutFor.
+const DEFAULT_LAYOUT = {
+  rows: DEFAULT_ROWS,
+  cols: DEFAULT_COLS,
+  probeCols: DEFAULT_COLS,
+  corner: MATRIX_CORNER,
+};
 
 // Gamma bounds for the typed input. The shader guards with max(u_gamma, 1e-6),
 // so the floor here is about keeping the control usable rather than safe.
@@ -48,9 +67,8 @@ const state = {
   specs: [],        // every ViewSpec from /api/views
   spec: null,       // the active one
   payload: null,    // { data, width, height, channels, layout, vmin, vmax, labels }
-  ranges: null,     // [{ vmin, vmax }] per channel
-  rows: DEFAULT_ROWS,
-  cols: DEFAULT_COLS,
+  ranges: null,     // [{ vmin, vmax }] per *tile* (per channel except for rgb)
+  layout: DEFAULT_LAYOUT,
   pinned: null,     // { col, row } while the readout is frozen
   // Monotonic request id. Fetches are not cancelled, they are *ignored*: a
   // 95 MB transfer takes seconds, and a second 読み込み during the first one
@@ -226,7 +244,52 @@ function fallbackAxes(labels, channels) {
   };
 }
 
-function buildGrid(rows, cols) {
+// What grid a payload needs: how many tiles, and what to write on them.
+//
+// A scalar view draws one tile per channel -- 12 coefficients are 12 unrelated
+// numbers, and the grid's job is to name each one. An rgb view is the opposite:
+// its three channels *are* one colour, and drawing them as three greyscale
+// tiles would hide the only thing the view exists to show.
+//
+// So the tile grid branches on `kind` rather than being derived from the
+// labels, and it has to. `axesFromLabels` cannot express "one tile, three
+// channels": `surface`'s labels are ["R","G","B"], which have no "->", so it
+// returns null and `fallbackAxes` produces exactly the 1x3 grid of greyscale
+// tiles we do not want -- and it does so silently, drawing a viewer that looks
+// like it works. `kind` is the thing that actually says how many pictures are
+// in the payload, so that is what decides.
+//
+// The readout grid is deliberately *not* keyed the same way: a hovered pixel
+// still has three numbers, so it keeps one cell per channel and the two grids
+// differ in exactly that one place.
+//
+// タイル配置は kind で分岐させる。scalar はチャンネル数だけタイルを並べるが、
+// rgb の3チャンネルは1枚の絵であり、3枚のグレースケールにしては意味が無い。
+// ラベル ["R","G","B"] は `axesFromLabels` では解釈できず、フォールバックだと
+// まさにその1行3列になってしまう（しかも黙って描けてしまう）。ペイロードに
+// 絵が何枚あるかを知っているのは kind だけなので、それで決める。
+// 読み取りグリッドだけは別で、ホバー1画素につき数値は3つあるためチャンネル数
+// で組む。両者が食い違うのはここだけ。
+function layoutFor(payload, current) {
+  if (payload.kind === "rgb") {
+    return {
+      rows: [""],
+      cols: ["RGB"],
+      probeCols: fallbackAxes(payload.labels, payload.channels).cols,
+      corner: "",
+    };
+  }
+  const axes = axesFromLabels(payload.labels, payload.channels)
+    || (current.rows.length * current.cols.length === payload.channels
+      ? { rows: current.rows, cols: current.cols }
+      : fallbackAxes(payload.labels, payload.channels));
+  return {
+    rows: axes.rows, cols: axes.cols, probeCols: axes.cols, corner: MATRIX_CORNER,
+  };
+}
+
+function buildGrid(layout) {
+  const rows = layout.rows, cols = layout.cols;
   for (const v of views) v.dispose();
   views.length = 0;
   captions.length = 0;
@@ -238,7 +301,7 @@ function buildGrid(rows, cols) {
 
   const corner = document.createElement("div");
   corner.className = "corner mono";
-  corner.textContent = "in \\ out";
+  corner.textContent = layout.corner;
   grid.appendChild(corner);
   for (const c of cols) {
     const h = document.createElement("div");
@@ -266,7 +329,7 @@ function buildGrid(rows, cols) {
     }
   }
   linkViews();
-  buildProbeGrid(rows, cols);
+  buildProbeGrid(rows, layout.probeCols);
 }
 
 // Pan/zoom is shared by all tiles. The guard stops the propagation loop from
@@ -429,6 +492,26 @@ function specDeclares(name) {
 
 function computeRanges() {
   const p = state.payload;
+
+  // An rgb view has one tile and therefore one range, and the three components
+  // must share it. A per-channel range would rescale R, G and B independently,
+  // which is a white balance the data does not have -- the picture would still
+  // look like a plausible surface colour while being the wrong colour.
+  // Displayed as [vmin, vmax] rather than ±vmax because this range is not
+  // symmetric: vmin is 0 for a positive response and negative for an
+  // ambient-only one (see views/surface.py).
+  // rgbビューはタイル1枚＝レンジ1組で、3成分はそれを共有しなければならない。
+  // チャンネルごとに正規化すると、データに無いホワイトバランスを勝手に掛けた
+  // 「もっともらしいが違う色」になる。レンジは対称でないので ± ではなく
+  // [vmin, vmax] で出す。
+  if (p.kind === "rgb") {
+    state.ranges = [{ vmin: p.vmin, vmax: p.vmax }];
+    const text = `[${fmt(p.vmin)}, ${fmt(p.vmax)}]`;
+    if (captions.length) captions[0].textContent = `${p.labels.join(" ")}  ${text}`;
+    $("range-info").textContent = text;
+    return;
+  }
+
   // Defence in depth, not the active guard. What actually keeps `normalize`
   // out of a view that does not declare it is serverParams(), which iterates
   // state.spec.params -- so today this condition is unreachable and no test
@@ -477,17 +560,17 @@ function renderMeta() {
   }
 }
 
-// B1 renders scalar views only. Falling through for an unimplemented kind
-// would paint `rgb` or `categorical` data with the diverging scalar colormap:
-// plausible pixels for a view this frontend does not understand, which is the
-// same class of silent misreading the NaN mask exists to prevent.
+// Falling through for an unimplemented kind would paint `categorical` data
+// with the diverging scalar colormap: plausible pixels for a view this
+// frontend does not understand, which is the same class of silent misreading
+// the NaN mask exists to prevent.
 // 未対応の kind をそのまま描くと、理解していないデータを「それらしい」色で
 // 表示してしまう。黙って通さず、はっきり失敗させる。
 function requireSupportedKind(kind, where) {
-  if (kind !== SUPPORTED_KIND) {
+  if (!SUPPORTED_KINDS.includes(kind)) {
     throw new Error(
       `${where} の kind="${kind}" はこのビューアでは未対応です` +
-      `（対応しているのは kind="${SUPPORTED_KIND}" のみ）。`
+      `（対応しているのは kind="${SUPPORTED_KINDS.join('" / kind="')}" のみ）。`
     );
   }
 }
@@ -509,18 +592,19 @@ async function reload(req = beginRequest()) {
   requireSupportedKind(payload.kind, "サーバの応答");
   state.payload = payload;
 
-  const axes = axesFromLabels(payload.labels, payload.channels)
-    || (state.rows.length * state.cols.length === payload.channels
-      ? { rows: state.rows, cols: state.cols }
-      : fallbackAxes(payload.labels, payload.channels));
-  const axesChanged =
-    axes.rows.join(" ") !== state.rows.join(" ") ||
-    axes.cols.join(" ") !== state.cols.join(" ");
-  state.rows = axes.rows;
-  state.cols = axes.cols;
-  const gridRebuilt = views.length !== payload.channels || axesChanged;
+  const layout = layoutFor(payload, state.layout);
+  // Compared by value, and only then rebuilt: buildGrid disposes and recreates
+  // one WebGL context per tile, and the browser caps how many can be live at
+  // once (~16 in Chrome, against 12 tiles).
+  // 値で比較してから組み直す。タイル1枚につきWebGLコンテキスト1つを捨てて
+  // 作り直すため、ブラウザの上限（Chromeで約16、タイルは12枚）に近い。
+  const layoutChanged = JSON.stringify(layout) !== JSON.stringify(state.layout);
+  state.layout = layout;
+  // Tiles, not channels: an rgb view puts three channels on one tile.
+  const tiles = layout.rows.length * layout.cols.length;
+  const gridRebuilt = views.length !== tiles || layoutChanged;
   if (gridRebuilt) {
-    buildGrid(state.rows, state.cols);
+    buildGrid(state.layout);
     await nextFrame();
     if (isStale(req)) return;
   }
@@ -528,6 +612,13 @@ async function reload(req = beginRequest()) {
   const t2 = performance.now();
   computeRanges();
   const t3 = performance.now();
+
+  // The colormap gives a *number* a colour; rgb data is already a colour and
+  // the shader's rgb branch has no colormap in it at all. Disable the control
+  // rather than leave a dropdown that silently does nothing.
+  // カラーマップは数値に色を与える仕組みで、rgb経路はそもそも通さない。
+  // 何も起きないドロップダウンを残さず無効化する。
+  $("cmap-select").disabled = payload.kind === "rgb";
 
   // Decide before the upload, while the old image is still around: a reframe
   // is warranted only when there is no view worth keeping -- a rebuilt grid, a
@@ -545,14 +636,20 @@ async function reload(req = beginRequest()) {
 
   syncBusy = true;   // suppress 12x11 cross-syncs while every tile is loaded
   try {
-    for (let c = 0; c < payload.channels; c++) {
-      views[c].setImage({
+    // Iterating tiles rather than channels: the two are the same count for a
+    // scalar view, but an rgb view is one tile that consumes all three
+    // channels, and `mode` is what tells GLView which of those it is.
+    // チャンネルではなくタイルを回す。scalar では同数だが、rgb は3チャンネルを
+    // 1枚が受け取る。どちらかは `mode` で伝える。
+    for (let t = 0; t < views.length; t++) {
+      views[t].setImage({
         data: payload.data,
         width: payload.width,
         height: payload.height,
         channels: payload.channels,
-        channel: c,
+        channel: t,
         layout: payload.layout,
+        mode: payload.kind === "rgb" ? "rgb" : "scalar",
       });
     }
   } finally {
@@ -741,7 +838,7 @@ async function main() {
     state.spec = specs[0];
     buildViewSelect(specs);
     buildServerParams(state.spec);
-    buildGrid(state.rows, state.cols);
+    buildGrid(state.layout);
     status(`準備完了 — ビュー "${state.spec.label}" / パスを入れて読み込み`);
   } catch (e) {
     status(`起動に失敗: ${errorText(e)}`, true);

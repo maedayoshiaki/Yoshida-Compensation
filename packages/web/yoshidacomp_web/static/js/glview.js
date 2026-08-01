@@ -9,13 +9,15 @@
 //    soft -- that single line is the reason this project is not PyQt6.
 //  - laggy zoom : pan/zoom are just uniform (scale/translate) changes on one
 //    textured quad; nothing re-rasterizes on the CPU.
-//  - banding    : the texture holds float32 (R32F); colour mapping, sRGB
-//    encoding and dithering happen in the shader from full precision.
+//  - banding    : the texture holds float32 (R32F, or RGB32F for an rgb view);
+//    colour mapping, sRGB encoding and dithering happen in the shader from
+//    full precision.
 //
-// Differences from the reference: no ROI machinery, single-channel extraction
-// from a planar (C, H, W) -- or, still supported, interleaved (H, W, C) --
-// array, and u_vmin/u_vmax/u_colormap in place of
-// u_bandLo/u_bandHi/u_mode/u_bright.
+// Differences from the reference: no ROI machinery, channel extraction from a
+// planar (C, H, W) -- or, still supported, interleaved (H, W, C) -- array, and
+// u_vmin/u_vmax/u_colormap in place of u_bandLo/u_bandHi/u_bright. This
+// shader's u_mode is its own thing (scalar vs rgb), unrelated to the
+// reference's u_mode.
 //
 // この設計が「なぜこの形か」は、うっかり元に戻しやすいので日本語でも残す。
 //  - HiDPIのぼやけ: キャンバスのバッキングストアは *デバイス* ピクセル
@@ -51,6 +53,41 @@ export function nanColorCss(color = NAN_COLOR) {
   return `rgb(${to8(color[0])}, ${to8(color[1])}, ${to8(color[2])})`;
 }
 
+// Planar (C, H, W) -> interleaved (H, W, 3), for the rgb texture.
+//
+// This copy is unavoidable and it is the only one on this path: WebGL textures
+// are interleaved, the wire format is planar, so somebody has to transpose.
+// Three channels make it a quarter of the twelve-channel de-interleave that
+// moving the wire format to planar removed, and it happens once per upload --
+// it must never migrate into draw(), which the display controls call on every
+// slider tick. An already-interleaved body with exactly three channels is the
+// texture's own order and is uploaded with no copy at all.
+//
+// planar (C, H, W) を (H, W, 3) へ詰め替える。WebGLのテクスチャはインタリーブ
+// しか受け付けないので、この1回だけは避けられない。3チャンネルなので12chの
+// デインターリーブの1/4で済む。setImage の中だけで行い、draw() へ持ち込まない
+// こと（表示コントロールは毎回 draw() を呼ぶ）。既にインタリーブで3チャンネル
+// なら並びはそのままなので複製しない。
+function packRgb(data, width, height, channels, layout) {
+  const n = width * height;
+  if (layout !== "planar") {
+    if (channels === 3) return data;
+    const out = new Float32Array(n * 3);
+    for (let i = 0, k = 0; i < n; i++, k += channels) {
+      out[3 * i] = data[k];
+      out[3 * i + 1] = data[k + 1];
+      out[3 * i + 2] = data[k + 2];
+    }
+    return out;
+  }
+  const out = new Float32Array(n * 3);
+  for (let c = 0; c < 3; c++) {
+    const base = c * n;
+    for (let i = 0, o = c; i < n; i++, o += 3) out[o] = data[base + i];
+  }
+  return out;
+}
+
 function compile(gl, type, src) {
   const sh = gl.createShader(type);
   gl.shaderSource(sh, src);
@@ -81,7 +118,8 @@ export class GLView {
     this.prog = prog;
     this.u = {};
     for (const n of ["u_imageSize", "u_scale", "u_translate", "u_resolution", "u_tex",
-      "u_vmin", "u_vmax", "u_colormap", "u_exposure", "u_gamma", "u_dither", "u_nanColor"]) {
+      "u_vmin", "u_vmax", "u_mode", "u_colormap", "u_exposure", "u_gamma", "u_dither",
+      "u_nanColor"]) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
 
@@ -141,23 +179,35 @@ export class GLView {
     this._dprMq.addEventListener("change", this._onDpr);
   }
 
-  // img: { data, width, height, channels, channel, layout }
+  // img: { data, width, height, channels, channel, layout, mode }
   //
-  // `data` is the whole multi-channel array as fetched, in either layout. We
-  // slice one plane out of it and upload that as R32F. The caller keeps `data`
-  // alive on the CPU so pixel probing never needs a server round-trip.
+  // `data` is the whole multi-channel array as fetched, in either layout. The
+  // caller keeps it alive on the CPU so pixel probing never needs a server
+  // round-trip.
+  //
+  // `mode` decides what comes out of it. "scalar" (the default) slices one
+  // plane and uploads it as R32F, one tile per channel. "rgb" takes three
+  // channels as a single colour and uploads them as one RGB32F texture; the
+  // shader is told which via u_mode. RGB32F is texture-only in WebGL2 (not
+  // colour-renderable), which is all this needs -- and it is never filtered,
+  // see the NEAREST note below.
+  //
   // data は取得した多チャンネル配列そのもの（layout はどちらでもよい）。
-  // 1面だけ切り出して R32F で載せる。data は呼び出し側が保持し、画素読み取りは
-  // サーバに行かない。
+  // mode が "scalar" なら1面を切り出して R32F、"rgb" なら3チャンネルを1枚の
+  // RGB32F に詰めて載せる。どちらかはシェーダへ u_mode で伝える。
   setImage(img) {
     const gl = this.gl;
     const width = img.width, height = img.height;
     const channels = img.channels ?? 1;
     const channel = img.channel ?? 0;
+    const mode = img.mode === "rgb" ? "rgb" : "scalar";
     const previous = this.image;
 
     let plane;
-    if (channels === 1) {
+    if (mode === "rgb") {
+      // One transpose, here, never in draw(). See packRgb.
+      plane = packRgb(img.data, width, height, channels, img.layout);
+    } else if (channels === 1) {
       plane = img.data;
     } else if (img.layout === "planar") {
       // Planar (C, H, W): the channel is already contiguous. subarray shares
@@ -182,14 +232,23 @@ export class GLView {
       for (let i = 0, k = channel; i < n; i++, k += channels) plane[i] = img.data[k];
     }
 
-    this.image = { width, height, channel };
+    this.image = { width, height, channel, mode };
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    // NEAREST, in both modes. LINEAR would interpolate across the mask
+    // boundary and smear a NaN into its finite neighbours -- the mask exists
+    // precisely so those pixels are never given a plausible value.
+    // 両モードとも NEAREST。LINEAR にすると NaN が隣接画素へにじみ、
+    // マスク境界が汚染される。
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, plane);
+    if (mode === "rgb") {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB32F, width, height, 0, gl.RGB, gl.FLOAT, plane);
+    } else {
+      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, plane);
+    }
 
     // Only reframe when there is nothing sensible to keep. Re-fetching the
     // same matrix with a different server-side parameter replaces the pixels
@@ -289,6 +348,12 @@ export class GLView {
     const p = this.params;
     gl.uniform1f(this.u.u_vmin, p.vmin);
     gl.uniform1f(this.u.u_vmax, p.vmax);
+    // Not a display parameter: the mode follows the texture that was uploaded,
+    // so it comes from this.image rather than from params. Putting it in
+    // params would let a control set it and read an R32F texture as RGB.
+    // モードはアップロード済みテクスチャに従うので params ではなく image から
+    // 取る。params に置くとコントロールから切り替えられてしまう。
+    gl.uniform1i(this.u.u_mode, this.image.mode === "rgb" ? 1 : 0);
     gl.uniform1i(this.u.u_colormap, p.colormap | 0);
     gl.uniform1f(this.u.u_exposure, p.exposure);
     gl.uniform1f(this.u.u_gamma, p.gamma);
