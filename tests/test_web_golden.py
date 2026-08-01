@@ -129,6 +129,27 @@ def _rgb_body(source: str) -> str:
     return source[at:]
 
 
+def _scalar_region(source: str) -> str:
+    """Return everything before ``rgbColor()``'s definition: the scalar path.
+
+    Assertions about the scalar path must be made against *this*, not against
+    the whole source, because the rgb branch repeats the scalar tone chain line
+    for line. ``str.index`` returns the first occurrence, so once a second copy
+    exists, deleting the first one stops being visible: the index silently
+    relocates into ``rgbColor()`` and every ordering assertion still passes
+    while ``main()`` no longer applies exposure, gamma or the OETF at all.
+    Verified -- deleting those three lines from ``main()`` alone left this
+    module green until the searches were scoped.
+
+    スカラー経路の検証はここに対して行う。rgb経路が同じ行を繰り返しているため、
+    全体を対象にすると ``str.index`` が2つ目の写しへ滑り、``main()`` から
+    3行を消しても検出できなくなる（実際に緑のまま通ることを確認済み）。
+    """
+    at = source.find("vec3 rgbColor() {")
+    assert at != -1, "the shader has no rgbColor() definition"
+    return source[:at]
+
+
 def _shader_rgb_mode(
     values: list[float], vmin: float, vmax: float, exposure: float, gamma: float
 ) -> np.ndarray:
@@ -171,31 +192,39 @@ def test_numpy_mirror_still_matches_the_shipped_shader() -> None:
     - The exposure-then-gamma order: swapping the two lines changes every
       expected RGB triple in the golden test, and nothing else would notice.
 
+    Every assertion below is made against the *scalar region* of the shader
+    rather than the whole source. The rgb branch repeats the scalar tone chain
+    verbatim, so an unscoped ``str.index`` would find ``rgbColor()``'s copy and
+    a deletion from ``main()`` would go unnoticed. See ``_scalar_region``.
+
     numpy同士の比較には意味がないので、ブラウザが実際に読む
     ``static/js/shaders.js`` を読んで、ミラーが写している定数と
     ANGLE/D3D11向けNaN判定の存在を固定する。特に ``isNaNBits`` を消すと、
     有効投影領域外が「それらしい強い負の値」に見える不具合が静かに戻る。
+    検証対象はスカラー領域に限定する（``_scalar_region`` 参照）。
     """
-    source = _fragment_source()
+    scalar = _scalar_region(_fragment_source())
 
     # The ANGLE/D3D11 NaN workaround, both declared and actually wired in.
-    assert "bool isNaNBits(float x)" in source
-    assert "highp uint" in source
-    assert "0x7F800000u" in source
-    assert "isNaNBits(v)" in source, "isNaNBits is defined but not called from main()"
+    assert "bool isNaNBits(float x)" in scalar
+    assert "highp uint" in scalar
+    assert "0x7F800000u" in scalar
+    assert "isNaNBits(v)" in scalar, "isNaNBits is defined but not called from main()"
 
     # Constants the numpy mirror hard-codes.
-    assert np.allclose(_vec3(source, "cold"), _COLD)
-    assert np.allclose(_vec3(source, "warm"), _WARM)
-    assert f"step(vec3({_SRGB_KNEE})" in source
-    assert "12.92 * c" in source
-    assert "1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055" in source
+    assert np.allclose(_vec3(scalar, "cold"), _COLD)
+    assert np.allclose(_vec3(scalar, "warm"), _WARM)
+    assert f"step(vec3({_SRGB_KNEE})" in scalar
+    assert "12.92 * c" in scalar
+    assert "1.055 * pow(c, vec3(1.0 / 2.4)) - 0.055" in scalar
 
     # Exposure before gamma, gamma before the OETF -- the order the mirror
-    # applies and the golden triples below were computed with.
-    exposure_at = source.index("rgb *= exp2(u_exposure);")
-    gamma_at = source.index("pow(max(rgb, vec3(0.0)), vec3(1.0 / max(u_gamma, 1e-6)))")
-    srgb_at = source.index("rgb = srgbEncode(rgb);")
+    # applies and the golden triples below were computed with. Scoped, so that
+    # deleting any of the three from main() fails here instead of resolving to
+    # the rgb branch's identical copy further down the file.
+    exposure_at = scalar.index("rgb *= exp2(u_exposure);")
+    gamma_at = scalar.index("pow(max(rgb, vec3(0.0)), vec3(1.0 / max(u_gamma, 1e-6)))")
+    srgb_at = scalar.index("rgb = srgbEncode(rgb);")
     assert exposure_at < gamma_at < srgb_at
 
 
@@ -215,13 +244,14 @@ def test_rgb_branch_is_guarded_and_sits_after_the_scalar_one() -> None:
     - **No ``u_colormap``.** Running rgb data through the diverging map would
       recolour a colour.
     - **``rgbColor()`` defined *after* ``main()``.** The scalar assertions in
-      ``test_numpy_mirror_still_matches_the_shipped_shader`` locate the tone
-      chain by ``str.index``, which finds the *first* occurrence. The rgb branch
-      repeats those exact lines, so defining it above ``main()`` would move
-      every first occurrence into it and the scalar ordering would stop being
-      pinned at all -- silently. The forward declaration in the shader exists
-      for this reason; if it is ever removed, this assertion is the one that
-      says why it was there.
+      ``test_numpy_mirror_still_matches_the_shipped_shader`` are scoped to
+      everything preceding ``rgbColor()``'s definition, because the rgb branch
+      repeats the scalar tone chain line for line and an unscoped ``str.index``
+      would happily resolve into the second copy. That scoping is only correct
+      while ``main()`` comes first: define ``rgbColor()`` above it and the
+      "scalar region" would contain no ``main()`` at all. This assertion is what
+      turns that into an immediate, named failure instead of a confusing one in
+      another test -- and it is why the shader carries a forward declaration.
 
     rgb経路の3成分すべてに ``isNaNBits`` が掛かること、カラーマップを通さない
     こと、そして ``rgbColor()`` が ``main()`` より後ろで定義されることを固定する。
