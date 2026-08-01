@@ -71,18 +71,51 @@ def get_matrix_meta(matrix_id: str) -> dict[str, Any]:
 def _finite_or_none(value: float) -> float | None:
     """Return ``value`` as a float, or ``None`` when it is not finite.
 
-    Python の ``json`` は NaN と Infinity を JSON として不正なリテラルで
-    書き出し、ブラウザの ``JSON.parse`` はそれを受け取れない。行列は有効投影
-    領域の外に NaN を持ちうるので、線に乗せる前に ``null`` へ落とす。
+    Non-finite coefficients must leave this endpoint as ``null``. Two
+    framework layers happen to agree today -- Pydantic's ``TypeAdapter``
+    (reached because this route has a return annotation) maps NaN/Inf to
+    ``null`` by default, and Starlette's ``JSONResponse`` uses
+    ``json.dumps(allow_nan=False)`` so a NaN that got past it would 500
+    rather than emit an invalid literal, never a malformed body reaching
+    ``JSON.parse``. Neither is this endpoint's own contract, and both
+    disappear if the route ever returns a ``Response`` directly or loses its
+    return annotation; then a matrix's out-of-region NaN turns the hover into
+    an opaque 500 instead of a readable masked value -- on the real matrix
+    that is 75% of the frame. Converting here makes ``null`` ours.
+    ``tests/test_web_matrix_probe.py::test_finite_or_none_maps_nan_and_infinities_to_none_directly``
+    is what holds this; no HTTP-level test can, because the framework
+    launders it either way.
+
+    非有限係数は必ず ``null`` としてこのエンドポイントを出る。今日は2つの
+    フレームワーク層がたまたま同じ結果を作っている――戻り値注釈つきの
+    ルートなので Pydantic の ``TypeAdapter`` が既定で NaN/Inf を ``null`` にし、
+    それをすり抜けても Starlette の ``JSONResponse`` は
+    ``json.dumps(allow_nan=False)`` を使うため不正なリテラルではなく500になる
+    （壊れた本文が ``JSON.parse`` に届くことはない）。しかしどちらもこの
+    エンドポイント自身の契約ではなく、``Response`` を直接返す・戻り値注釈を
+    外すといった変更で消える。そうなれば有効領域外のNaNは読み取り可能な
+    マスク値ではなく素の500になる――実機行列では全画素の75%が該当する。
+    ここで変換することで ``null`` をこのエンドポイント自身の契約にする。
     """
     v = float(value)
     return v if math.isfinite(v) else None
 
 
 def _inside_active_region(context: MatrixContext, row: int, col: int) -> bool:
-    """Return whether ``(row, col)`` falls inside ``context.active_region``.
+    """Return whether ``(row, col)`` is unmasked by ``context.active_region``.
 
-    ``active_region`` が ``None``（プロジェクタ座標でない行列）なら常に True。
+    This answers "is this pixel excluded from the NaN mask that
+    ``coef_tiles.py``/``surface.py`` apply", not literally "is there an
+    active region and is this point inside it". When ``active_region`` is
+    ``None`` (a camera-space matrix, which has no active-region concept at
+    all) this returns ``True`` for every pixel -- callers must not read a
+    bare ``True`` as "yes, there is a region and you are in it".
+
+    これが答えているのは「``coef_tiles.py``/``surface.py`` が適用するNaNマスク
+    から、この画素が除外されているか」であり、文字通りの「有効領域が存在し、
+    かつその内側か」ではない。``active_region`` が ``None``（カメラ座標の行列。
+    有効領域という概念自体を持たない）のときは全画素で ``True`` を返す。
+    呼び出し側はこの ``True`` を「領域が存在してその内側にいる」と読んではならない。
     """
     if context.active_region is None:
         return True

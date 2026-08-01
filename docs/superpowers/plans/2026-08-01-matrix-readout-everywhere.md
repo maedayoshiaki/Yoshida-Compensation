@@ -11,9 +11,16 @@
 ## Global Constraints
 
 - 行列そのもの `(H, W, 4, 3)` をレスポンスに乗せない。点クエリが返すのは1画素分の12個だけ。
-- **JSON に非有限値を出さない。** `float("nan")` は Python の `json` が `NaN` という
-  リテラルで書き出すが、これは JSON として不正で `JSON.parse` が例外を投げる。
-  非有限値は `null` に変換すること。行列は有効投影領域の外に NaN を持ちうる。
+- **非有限係数は明示的に `null` に変換すること。** 行列は有効投影領域の外に NaN を
+  持ちうる。今日この文脈では2つのフレームワーク層がたまたま同じ結果を作っている
+  ――返り値が戻り値注釈つきの `dict` のときは Pydantic の `TypeAdapter` が既定で
+  NaN/Inf を `null` にし、それをすり抜けた場合も Starlette の `JSONResponse` は
+  `json.dumps(allow_nan=False)` を使うため不正な `NaN` リテラルではなく **500** に
+  なる（`JSON.parse` が壊れた本文を受け取ることはない）。しかしどちらもこの
+  エンドポイント自身の契約ではなく、戻り値注釈を外す・`Response` を直接返す等の
+  変更で消える。変換を怠ると、有効領域外の画素をホバーしただけで 500 になり
+  読み取り欄が空白になる（実機行列では全画素の75%が対象）。明示的に変換して
+  `null` をこのエンドポイントの契約にする。
 - `yoshidacomp.compensation.color_mixing_matrix` を web 層から import しない
   （module scope で torch と psutil を引く）。
 - 数値の桁揃えは既存の `fmt()`（`packages/web/yoshidacomp_web/static/js/main.js`）を使う。
