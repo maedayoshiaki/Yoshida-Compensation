@@ -6,10 +6,11 @@
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from yoshidacomp.config import get_config
 
@@ -65,3 +66,57 @@ def get_matrix_meta(matrix_id: str) -> dict[str, Any]:
     """Return the stored metadata for a previously loaded matrix."""
     context = require_matrix(matrix_id)
     return _build_meta(matrix_id, context)
+
+
+def _finite_or_none(value: float) -> float | None:
+    """Return ``value`` as a float, or ``None`` when it is not finite.
+
+    Python の ``json`` は NaN と Infinity を JSON として不正なリテラルで
+    書き出し、ブラウザの ``JSON.parse`` はそれを受け取れない。行列は有効投影
+    領域の外に NaN を持ちうるので、線に乗せる前に ``null`` へ落とす。
+    """
+    v = float(value)
+    return v if math.isfinite(v) else None
+
+
+def _inside_active_region(context: MatrixContext, row: int, col: int) -> bool:
+    """Return whether ``(row, col)`` falls inside ``context.active_region``.
+
+    ``active_region`` が ``None``（プロジェクタ座標でない行列）なら常に True。
+    """
+    if context.active_region is None:
+        return True
+    x, y, w, h = context.active_region
+    return x <= col < x + w and y <= row < y + h
+
+
+@router.get("/matrix/{matrix_id}/probe")
+def probe_matrix(
+    matrix_id: str,
+    row: int = Query(..., description="行（0 起点、画像の上から）"),
+    col: int = Query(..., description="列（0 起点、画像の左から）"),
+) -> dict[str, Any]:
+    """Return the 4x3 coefficients at one pixel.
+
+    ビューが何であっても行列そのものを読めるようにするための点クエリ。
+    ``surface`` のような非係数ビューではクライアントに行列が無く、
+    99MB の2つ目のコピーを送るとヒープが計画B2以前に戻ってしまう。
+    mmap からの1画素読みなので転送量は12個の float に収まる。
+    """
+    context = require_matrix(matrix_id)
+    height, width = context.array.shape[0], context.array.shape[1]
+    if not (0 <= row < height and 0 <= col < width):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"pixel (row={row}, col={col}) is outside the matrix; "
+                f"expected 0 <= row < {height} and 0 <= col < {width}"
+            ),
+        )
+    block = context.array[row, col]
+    return {
+        "row": row,
+        "col": col,
+        "values": [[_finite_or_none(v) for v in coefficient_row] for coefficient_row in block],
+        "inside_active_region": _inside_active_region(context, row, col),
+    }
