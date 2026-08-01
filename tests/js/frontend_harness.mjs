@@ -2,7 +2,7 @@
 //
 // Usage: node frontend_harness.mjs <static-dir> <scenario>
 //   <static-dir>  directory holding index.html and js/{main,glview,api}.js
-//   <scenario>    "ordering" | "views" | "button" | "rgb"
+//   <scenario>    "ordering" | "views" | "button" | "rgb" | "probe"
 // Prints one JSON object to stdout: { scenario, checks: [{name, ok, detail}] }.
 //
 // Why a stub instead of a browser: the behaviours under test -- request
@@ -360,6 +360,57 @@ const viewLabels = (spec) => LABELS_BY_KEY[spec.key];
 // `headerless_tiles` のとおり拒否される）ので、使っている配置を明示する。
 const INTERLEAVED_VIEWS = new Set(["plain_tiles", "legacy_tiles"]);
 
+// ------------------------------------------------------------- point query
+//
+// One pixel's 4x3 coefficients, which is the whole of what the readout table
+// now gets from the server. Every value depends on *both* row and col and no
+// two positions overlap, so a transposed request is visible rather than
+// harmless; within a block the twelve values are distinct and ascending, so a
+// column-major render is visible too. A fixture symmetric enough to pass
+// either way is how this repository has repeatedly shipped tests that could
+// not fail.
+// 1画素分の4x3。読み取り表がサーバから受け取るのはこれだけである。値は row と
+// col の両方に依存し、位置ごとに範囲が重ならないので row/col の取り違えが
+// 見える。ブロック内の12個も相異なるため列優先で描いた場合も見える。どちら向き
+// でも通ってしまう対称なフィクスチャこそ、このリポジトリが繰り返し作ってきた
+// 「落ちないテスト」の作り方である。
+const PROBE_OVERRIDES = new Map();   // "row,col" -> a 4x3 (entries may be null)
+const probeKey = (row, col) => `${row},${col}`;
+const probeBlock = (row, col) =>
+  PROBE_OVERRIDES.get(probeKey(row, col))
+  ?? [0, 1, 2, 3].map((i) =>
+    [0, 1, 2].map((j) => (row + 1) * 1000 + (col + 1) * 100 + i * 3 + j));
+
+// Point-query responses can be held open, so "a request is in flight" becomes
+// a state a scenario can actually put the client into.
+//
+// Without this the coalescing and the staleness guard are both untestable, and
+// untestable in the quiet way: every fetch would settle within a microtask, so
+// five hovers would look identical whether they cost one round trip or five
+// (each having finished before the next began), and no response could ever
+// come back for a pixel the pointer had already left. The checks would pass
+// against an implementation with neither guard in it.
+// 点クエリの応答を保留できるようにする。これが無いと合流もスタール判定も
+// 検証できない——しかも静かに検証できない。すべての fetch がマイクロタスク内で
+// 解決してしまうため、5回のホバーが1往復でも5往復でも同じに見え（各回が次の前に
+// 完了する）、「ポインタが去った画素の応答が後から届く」状況自体が作れない。
+// どちらのガードも無い実装に対してチェックが通ってしまう。
+let holdProbes = false;
+const heldProbes = [];   // [{ key, release }] -- responses waiting to be let go
+const probeLog = [];     // every probe URL, recorded when it is *issued*
+
+const heldIndex = (row, col) => heldProbes.findIndex((h) => h.key === probeKey(row, col));
+function releaseProbe(row, col) {
+  const i = heldIndex(row, col);
+  if (i < 0) return false;
+  heldProbes.splice(i, 1)[0].release();
+  return true;
+}
+function releaseHeldProbes() {
+  while (heldProbes.length) heldProbes.shift().release();
+}
+const waitForHeld = (row, col) => waitFor(() => heldIndex(row, col) >= 0);
+
 // Per-matrix delays, so responses can be made to resolve in a different order
 // from the one they were issued in. `session` delays POST /session/matrix
 // (which is what load() awaits) and `view` delays the binary view fetch (which
@@ -402,6 +453,29 @@ globalThis.fetch = async (url, options) => {
         space: "camera", path: matrixPath, active_region: null,
         projector: { width: 64, height: 48 },
       },
+    }), { headers: { "content-type": "application/json" } });
+  }
+
+  // The point query, answered the way routers/session.py::probe_matrix does:
+  // a row-major 4x3, `null` for every non-finite coefficient, and a 400 for a
+  // pixel outside the matrix.
+  // 点クエリ。routers/session.py::probe_matrix と同じ形で返す。
+  const probe = url.match(/^\/api\/matrix\/([^/?]+)\/probe\?(.*)$/);
+  if (probe) {
+    const [, , qs] = probe;
+    probeLog.push(url);
+    const query = new URLSearchParams(qs);
+    const row = Number(query.get("row")), col = Number(query.get("col"));
+    if (holdProbes) {
+      await new Promise((release) => heldProbes.push({ key: probeKey(row, col), release }));
+    }
+    if (!(row >= 0 && row < H && col >= 0 && col < W)) {
+      return new Response(JSON.stringify({
+        detail: `pixel (row=${row}, col=${col}) is outside the matrix`,
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+    return new Response(JSON.stringify({
+      row, col, values: probeBlock(row, col), inside_active_region: true,
     }), { headers: { "content-type": "application/json" } });
   }
 
@@ -517,19 +591,37 @@ const expectedPackedRgb = (tag) => [{
   head: [tag, 2 * tag, 3 * tag, tag, 2 * tag, 3 * tag],
 }];
 
-// Hover one pixel and read the 12 readout cells back off the DOM, which is the
-// only place showProbe's layout arithmetic is observable.
-// 1画素をホバーして読み取りセルをDOMから読む。showProbe の添字計算が外から
-// 見えるのはここだけ。
+// The readout is two panels with different sources, so it takes two readers.
+//
+// `#view-values` holds the *displayed view*'s channels at that pixel, read out
+// of the payload already in hand -- the only place showViewValues' layout
+// arithmetic is observable. `#probe-grid` holds the *matrix*'s own 4x3, which
+// arrives from the point query and therefore lands one round trip later.
+// 読み取り欄は出所の違う2枚の板でできているので、読み手も2つ要る。
+// `#view-values` は表示中のビューの値（手元のペイロードから同期的に作られる）で、
+// showViewValues の添字計算が外から見えるのはここだけ。`#probe-grid` は行列
+// そのものの4x3で、点クエリの1往復ぶん遅れて届く。
+const viewValueItems = () => el("view-values").children;
+const viewValueLabels = () => viewValueItems().map((item) => item.children[0].textContent);
+const viewValueNumbers = () => viewValueItems().map((item) => item.children[1].textContent);
+
+// Hover one pixel and read the view-value panel back off the DOM.
 const probeTexts = (col = 2, row = 1) => {
   views[0].onHover({ col, row });
-  return el("probe-grid").children
-    .filter((e) => e.className === "probe-cell")
-    .map((e) => e.textContent);
+  return viewValueNumbers();
 };
 
 const expectedProbe = (tag, channels) =>
   Array.from({ length: channels }, (_, c) => ((c + 1) * tag).toFixed(4));
+
+// The 12 matrix cells: their text, and their class (which is what carries
+// "this coefficient is masked" -- see .probe-cell.nan in style.css).
+// 行列の12セル。文字と、マスクを表すクラスの両方を見る。
+const matrixCells = () => el("probe-grid").children.filter((e) => /^probe-cell/.test(e.className));
+const matrixTexts = () => matrixCells().map((e) => e.textContent);
+const matrixClasses = () => matrixCells().map((e) => e.className);
+const expectedMatrixTexts = (row, col) =>
+  probeBlock(row, col).flat().map((v) => (v === null ? "NaN" : v.toFixed(4)));
 
 // Expected per-tile ranges under `normalize=per_tile`.
 //
@@ -1118,6 +1210,196 @@ if (SCENARIO === "rgb") {
   check("an rgb view that is not 3 channels is refused before the transfer, naming the count",
     /チャンネル数が 4/.test(statusText()) && badRgbFetches.length === 0,
     `${statusText()} | fetches=${badRgbFetches.length}`);
+}
+
+if (SCENARIO === "probe") {
+  // The hover readout, once it stopped reading `state.payload`.
+  //
+  // What it used to show was the *displayed view*'s values under headings that
+  // named the matrix: hovering `surface` printed three surface colours beneath
+  // `in_R -> out_R`, which is a readout naming one thing and showing another.
+  // Every check here is run on `surface` for that reason -- on `coef_tiles` the
+  // old behaviour and the new one produce the same twelve numbers, so the whole
+  // point of the change is invisible there.
+  // `state.payload` を読むのをやめた後のホバー読み取り。以前は「行列の見出しの
+  // 下に表示中のビューの値」が出ていた（`surface` をホバーすると
+  // `in_R -> out_R` の下に投影面のRGBが並ぶ）。以下を `surface` で回すのは
+  // そのためで、`coef_tiles` では新旧どちらも同じ12個を出すため差が見えない。
+
+  // --- nothing loaded yet: there is no matrix to ask about
+  //
+  // The 12 empty tiles exist from startup, so onHover is reachable long before
+  // any matrix is. A point query issued now would carry `null` as the matrix
+  // id, come back 404, and put that on the status line as the first thing the
+  // user ever sees.
+  // 起動時点で空のタイルは12枚あるので、行列より先にホバーが起きうる。ここで
+  // 点クエリを投げると行列IDが `null` のまま404になり、利用者が最初に見る
+  // ものがそのエラーになる。
+  views[0].onHover({ col: 1, row: 1 });
+  await sleep(40);
+  check("hovering with no matrix loaded issues no point query",
+    probeLog.length === 0, `probes=${probeLog.length} ${probeLog.join(" | ")}`);
+
+  clickLoad("A");
+  await settled();
+  el("view-select").value = "surface";
+  el("view-select").__fire("change");
+  await settled();
+  check("the readout is exercised on a view that is not the coefficient tiles",
+    state.spec.key === "surface" && views.length === 1,
+    `spec=${state.spec.key} tiles=${views.length}`);
+
+  // --- the hover asks the server for that pixel of the matrix
+  //
+  // (col 3, row 2) on a 5x4 fixture: both orderings are in range, so swapping
+  // them does not 400 -- it silently answers for a different pixel. The query
+  // string is read back by name rather than by pattern for the same reason.
+  // 5x4 のフィクスチャ上の (col 3, row 2)。入れ替えても範囲内なので400にはならず、
+  // 黙って別の画素を答える。だからクエリは名前で読む。
+  PROBE_OVERRIDES.set(probeKey(2, 3), [[1, 2, 3], [4, 5, 6], [7, 8, 9], [10, 11, 12]]);
+  views[0].onHover({ col: 3, row: 2 });
+  await waitFor(() => probeLog.length === 1);
+  const asked = new URLSearchParams((probeLog[0] ?? "").split("?")[1] ?? "");
+  check("hovering issues a point query for the hovered pixel of the matrix",
+    probeLog.length === 1
+      && probeLog[0].startsWith("/api/matrix/matrix_A/probe?")
+      && asked.get("row") === "2" && asked.get("col") === "3",
+    probeLog.join(" | "));
+
+  // --- and all twelve cells are filled from it, row-major
+  //
+  // 1..12 in the response, so the order the cells are written in is pinned:
+  // a column-major render would read 1,4,7,10,2,... and is not a permutation
+  // this can miss.
+  // 応答が 1..12 なので書き込み順が固定される。列優先なら 1,4,7,10,2,… となり
+  // 見逃しようがない。
+  await waitFor(() => matrixTexts()[0] !== "—");
+  check("the readout fills all twelve cells from the point query, row-major",
+    JSON.stringify(matrixTexts())
+      === JSON.stringify(Array.from({ length: 12 }, (_, k) => (k + 1).toFixed(4))),
+    JSON.stringify(matrixTexts()));
+
+  // --- the view's own values keep a panel of their own
+  //
+  // Label and value are asserted together: `surface`'s three channels hold
+  // 1, 2 and 3, so a panel that paired them the wrong way round -- or listed
+  // the right numbers under the matrix's headings again -- is visible here.
+  // ラベルと値を同時に見る。`surface` の3チャンネルは 1, 2, 3 なので、対応が
+  // ずれた場合も、行列の見出しの下に並べ直した場合も、ここに出る。
+  check("the view-value panel lists the payload's channels with their labels",
+    JSON.stringify(viewValueLabels()) === JSON.stringify(["R", "G", "B"])
+      && JSON.stringify(viewValueNumbers()) === JSON.stringify(expectedProbe(1, 3)),
+    `${JSON.stringify(viewValueLabels())} ${JSON.stringify(viewValueNumbers())}`);
+
+  // --- a null coefficient is a masked value, not a missing one
+  //
+  // `null` is what routers/session.py sends for every non-finite coefficient,
+  // and on the real matrix roughly three quarters of the frame is outside the
+  // active projection region and holds NaN. So this is the ordinary answer for
+  // most of the image, not an error path: it has to read as "masked", in the
+  // same colour the tiles already paint those pixels, rather than as the "—"
+  // that means "nothing has been read yet".
+  // 非有限係数は `null` で届き、実機の行列では投影領域外＝全画素の約75%が該当
+  // する。つまりこれは例外ではなく大半の画素の通常の答えであり、「まだ何も
+  // 読んでいない」を意味する「—」ではなく、タイルと同じマスク色で出なければ
+  // ならない。
+  PROBE_OVERRIDES.set(probeKey(0, 0), [[null, 1, 2], [3, null, 4], [5, 6, null], [7, 8, 9]]);
+  views[0].onHover({ col: 0, row: 0 });
+  await waitFor(() => matrixTexts()[1] === "1.0000");
+  check("a null coefficient renders as a masked NaN cell, not as an empty one",
+    JSON.stringify(matrixTexts()) === JSON.stringify(expectedMatrixTexts(0, 0))
+      && JSON.stringify(matrixClasses()) === JSON.stringify(
+        [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0].map((n) => (n ? "probe-cell nan" : "probe-cell"))),
+    `${JSON.stringify(matrixTexts())} ${JSON.stringify(matrixClasses())}`);
+
+  // --- a fast drag costs two round trips, not one per mousemove
+  //
+  // A mousemove fires dozens of times a second and each one would otherwise be
+  // a request. Held open, the five hovers below have exactly one request in
+  // flight; releasing it must produce exactly one more, for the position the
+  // pointer actually ended on -- not for the position it was at when the first
+  // request went out, and not one per hover.
+  // mousemove は毎秒何十回も飛ぶので、1回ずつ投げれば全部が往復になる。保留した
+  // 状態での5回のホバーで飛ぶ要求はちょうど1つ、解いたあとに飛ぶのもちょうど1つ、
+  // しかも最終位置のものでなければならない。
+  holdProbes = true;
+  const base = probeLog.length;
+  for (let col = 0; col < 5; col++) views[0].onHover({ col, row: 1 });
+  await sleep(60);
+  const duringDrag = probeLog.length - base;
+  releaseProbe(1, 0);            // the first position -- the only one in flight
+  await waitForHeld(1, 4);       // the last position is what fires next
+  await sleep(40);
+  const afterFirst = probeLog.length - base;
+  releaseProbe(1, 4);            // the last position, which waited for it
+  await waitFor(() => matrixTexts()[0] === expectedMatrixTexts(1, 4)[0]);
+  await sleep(40);
+  const afterSecond = probeLog.length - base;
+  check("a fast drag costs one point query in flight plus one for the final position",
+    duringDrag === 1 && afterFirst === 2 && afterSecond === 2
+      && JSON.stringify(matrixTexts()) === JSON.stringify(expectedMatrixTexts(1, 4)),
+    `during=${duringDrag} afterFirst=${afterFirst} afterSecond=${afterSecond} `
+      + JSON.stringify(matrixTexts()));
+  releaseHeldProbes();
+  await sleep(40);
+
+  // --- an answer that outlived its claim must not reach the cells
+  //
+  // A claim can be retired two ways while its answer is still in the air, and
+  // one comparison retires both.
+  //
+  // The pointer moving on is the transient case: `#probe-pos` is written
+  // synchronously, so painting a superseded answer puts one pixel's
+  // coefficients under another pixel's heading until the newer answer lands.
+  //
+  // The pointer *leaving* is the permanent one, and it is the worse of the
+  // two: the readout is cleared, and an answer arriving afterwards refills all
+  // twelve cells beneath a position that reads "—". Nothing follows it, so the
+  // table sits there stating twelve coefficients of no stated pixel until
+  // something else is hovered.
+  //
+  // 権利が失効したあとに戻ってくる応答は2通りあり、同じ比較がどちらも捨てる。
+  // ポインタが先へ進んだ場合は一時的な誤り（位置の表示は同期的に変わるので、
+  // 「ある画素の係数が別の画素の見出しの下に」出る）。ポインタが画像の外へ出た
+  // 場合は恒久的な誤りで、こちらのほうが悪い——読み取りは消えているのに、後から
+  // 届いた応答が「—」という位置表示の下に12個の数値を並べ直し、次にホバー
+  // されるまでそのまま残る。
+  const beforeStale = matrixTexts();
+  holdProbes = true;
+  views[0].onHover({ col: 1, row: 0 });
+  await waitForHeld(0, 1);
+  views[0].onHover({ col: 4, row: 3 });
+  await sleep(40);
+  releaseProbe(0, 1);            // answers for a pixel the pointer has left
+  await waitForHeld(3, 4);
+  await sleep(40);
+  const midStale = matrixTexts();
+  releaseProbe(3, 4);
+  await waitFor(() => matrixTexts()[0] === expectedMatrixTexts(3, 4)[0]);
+  const afterStale = matrixTexts();
+
+  // ...and the same again, retired by the pointer leaving the image (GLView
+  // calls onHover(null) on pointer-out) rather than by a newer position.
+  views[0].onHover({ col: 2, row: 2 });
+  await waitForHeld(2, 2);
+  views[0].onHover(null);
+  const clearedPos = el("probe-pos").textContent;
+  const cleared = matrixTexts();
+  releaseProbe(2, 2);
+  await sleep(80);
+  const afterLeave = matrixTexts();
+  holdProbes = false;
+  releaseHeldProbes();
+
+  const dashes = JSON.stringify(new Array(12).fill("—"));
+  check("a point query answered after its claim was retired never reaches the cells",
+    JSON.stringify(midStale) === JSON.stringify(beforeStale)
+      && JSON.stringify(afterStale) === JSON.stringify(expectedMatrixTexts(3, 4))
+      && clearedPos === "—" && JSON.stringify(cleared) === dashes
+      && JSON.stringify(afterLeave) === dashes,
+    `before=${JSON.stringify(beforeStale)} mid=${JSON.stringify(midStale)} `
+      + `after=${JSON.stringify(afterStale)} pos=${clearedPos} `
+      + `cleared=${JSON.stringify(cleared)} afterLeave=${JSON.stringify(afterLeave)}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

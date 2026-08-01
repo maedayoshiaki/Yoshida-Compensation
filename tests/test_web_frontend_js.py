@@ -153,6 +153,30 @@ def test_an_rgb_view_draws_one_colour_tile_and_keeps_a_three_channel_readout() -
     _assert_all_passed(_run_harness(_STATIC_DIR, "rgb"))
 
 
+def test_the_hover_readout_reads_the_matrix_through_the_point_query() -> None:
+    """The readout must show the matrix on every view, one pixel at a time.
+
+    It used to read ``state.payload``, which is the *displayed view* -- so
+    hovering ``surface`` printed three projection-surface colours under
+    headings that said ``in_R -> out_R``. The matrix itself never crosses the
+    wire (a second 99 MB copy would undo the heap the planar transfer bought),
+    so the table is filled from ``GET /api/matrix/{id}/probe``.
+
+    Two of the checks are about timing rather than arithmetic and neither can
+    be observed against a fetch stub that settles immediately: the coalescing
+    (a mousemove fires dozens of times a second, and every one of them would
+    otherwise be a round trip) and the staleness guard (a response that comes
+    back for a pixel the pointer has already left must not be painted under
+    the newer position's heading). The harness holds point-query responses
+    open so both states are reachable.
+
+    読み取り欄は表示中のビューではなく行列を出す。行列本体は線に乗せないので、
+    1画素ずつの点クエリで取る。合流とスタール判定は応答を保留できないと
+    観測できないため、ハーネス側で点クエリの応答を止められるようにしてある。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "probe"))
+
+
 def test_load_button_is_released_after_a_reload_during_a_load() -> None:
     """Touching a server-side control mid-load must not wedge 読み込み.
 
@@ -467,6 +491,73 @@ _MUTATIONS = [
         [("api.js", '    if (parsed && typeof parsed.detail === "string") {', "    if (false) {")],
         ("a server refusal is not shown as a raw JSON envelope",),
         id="server_refusal_shown_as_its_json_envelope",
+    ),
+    # ---- the hover point query's two timing guards
+    #
+    # Both are invisible from a screenshot and invisible from a stub that
+    # settles every fetch immediately, which is why the harness can hold a
+    # point-query response open. Without the coalescing a mousemove is a round
+    # trip: a drag across the image issues one request per event, and the
+    # server answers every one of them. Without the staleness comparison the
+    # answer for a pixel the pointer has already left is painted anyway --
+    # under a ``#probe-pos`` that was updated synchronously and now names a
+    # different pixel, so the readout states twelve coefficients that were
+    # never true of the position it is captioned with.
+    #
+    # ホバーの点クエリが持つ2つの時間的ガード。どちらも画面写真からは見えず、
+    # 即座に解決するスタブからも見えない（ゆえにハーネスは応答を保留できる）。
+    # 合流が無ければ mousemove ごとに往復が発生し、スタール判定が無ければ
+    # 「ポインタが去った画素の係数が、別の画素の見出しの下に」出る。
+    pytest.param(
+        "probe",
+        [("main.js", "  if (state.probeInFlight) return;", "  if (false) return;")],
+        ("a fast drag costs one point query in flight",),
+        id="hover_probe_fetches_once_per_mousemove",
+    ),
+    pytest.param(
+        "probe",
+        [(
+            "main.js",
+            "        if (want.seq !== state.probeSeq) continue;   // the pointer has moved on",
+            "        if (false) continue;   // the pointer has moved on",
+        )],
+        ("answered after its claim was retired",),
+        id="hover_probe_paints_a_superseded_response",
+    ),
+    # ---- and the point query's coordinates, which are not symmetric
+    #
+    # The failure this repository has now shipped twice is the fixture that
+    # cannot tell two arguments apart. ``probeMatrix(matrixId, row, col)``
+    # feeds a query string whose two parameters are both plain integers, and a
+    # square test matrix -- or a probe point where row happens to equal col --
+    # accepts them in either order. The harness's matrix is 5x4 and the pixel
+    # is (col 3, row 2), so a transposition stays in range and answers,
+    # silently, for a different pixel.
+    # 取り違えても範囲内に収まるため、黙って別の画素を答える。行と列を区別
+    # できないフィクスチャこそ、このリポジトリが繰り返してきた失敗である。
+    pytest.param(
+        "probe",
+        [(
+            "main.js",
+            "        const body = await probeMatrix(matrixId, want.row, want.col);",
+            "        const body = await probeMatrix(matrixId, want.col, want.row);",
+        )],
+        (
+            # Listed in full rather than narrowed: this one guard is upstream of
+            # every value the table ever shows, so the breadth is the finding.
+            # The three checks that survive are the ones that do not depend on
+            # *which* pixel was asked for -- the null render (its fixture sits
+            # at (0, 0), where the two orderings coincide) and the view-value
+            # panel (which never leaves the client).
+            # 1つのガードが表に出る全ての値の上流にあるため、この広さ自体が事実。
+            # 生き残る3件は「どの画素を訊いたか」に依存しないもの——(0,0) に置いた
+            # null の描画と、そもそもサーバへ行かないビュー値パネルである。
+            "a point query for the hovered pixel",
+            "the readout fills all twelve cells from the point query, row-major",
+            "a fast drag costs one point query in flight",
+            "answered after its claim was retired",
+        ),
+        id="hover_probe_transposes_row_and_col",
     ),
 ]
 

@@ -17,14 +17,19 @@
 // サーバ側ビューパラメータだけが再フェッチを起こし、それも 適用 でまとめて
 // 送る（コントロールごとではなく操作ごとに1回のレンダ）。
 //
-// The fetched Float32Array stays on the CPU for the whole session so pixel
-// probing reads it locally. The body is planar (C, H, W) -- channel c of pixel
-// (row, col) is data[c * width * height + row * width + col] -- with the older
-// interleaved (H, W, C) still handled wherever `payload.layout` says so.
-// 取得した Float32Array は保持し続け、画素読み取りはローカルで済ませる。
-// 本体は planar (C, H, W)。従来のインタリーブも layout を見て扱う。
+// The fetched Float32Array stays on the CPU for the whole session, so the
+// hovered pixel's *view* values are read locally. The body is planar (C, H, W)
+// -- channel c of pixel (row, col) is data[c * width * height + row * width +
+// col] -- with the older interleaved (H, W, C) still handled wherever
+// `payload.layout` says so. The hovered pixel's *matrix* coefficients are not
+// in that array at all under a view like `surface`, and are fetched one pixel
+// at a time instead; see the readout section.
+// 取得した Float32Array は保持し続け、ホバー画素の「ビューの値」はローカルで
+// 読む。本体は planar (C, H, W)。従来のインタリーブも layout を見て扱う。
+// ホバー画素の「行列の係数」は `surface` のようなビューではこの配列に無いので、
+// 1画素ずつ取りに行く（読み取りの節を参照）。
 
-import { loadMatrix, listViews, fetchView } from "./api.js";
+import { loadMatrix, listViews, fetchView, probeMatrix } from "./api.js";
 import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
 import { LAYOUT_PLANAR, requireSupportedKind, traitsFor } from "./contract.js";
 
@@ -51,14 +56,14 @@ const DEFAULT_COLS = ["out_R", "out_G", "out_B"];
 // layoutFor が軸を引き継いでよいのはこれが付いている場合だけである。
 const MATRIX_CORNER = "in \\ out";
 
-// rows x cols is the *tile* grid; probeCols is the readout grid, which for an
-// rgb view is not the same thing. See layoutFor.
-// rows x cols はタイルの並び、probeCols は読み取りの並び。rgbビューでは
-// この2つは一致しない。
+// rows x cols is the *tile* grid -- the shape of whatever view is on screen.
+// The readout table is not derived from it; it is always the matrix's own
+// 4x3, built once from DEFAULT_ROWS x DEFAULT_COLS. See buildProbeGrid.
+// rows x cols はタイルの並び、すなわち表示中のビューの形である。読み取り表は
+// ここから導かれず、常に行列自身の4x3である。
 const DEFAULT_LAYOUT = {
   rows: DEFAULT_ROWS,
   cols: DEFAULT_COLS,
-  probeCols: DEFAULT_COLS,
   corner: MATRIX_CORNER,
 };
 
@@ -88,6 +93,23 @@ const state = {
   // where it no longer matches.
   // 連続フェッチの順序保証。最新のリクエストIDと一致しない結果は捨てる。
   reqId: 0,
+  // Hover readout. Fetches are coalesced rather than queued: a mousemove can
+  // fire dozens of times a second and every one of them would otherwise be a
+  // round trip. At most one request is in flight; the newest position waits
+  // for it and fires once, so a fast drag costs two requests, not fifty.
+  //
+  // Deliberately a series of its own rather than `reqId`. That one guards the
+  // view transfers, and sharing it would mark the in-flight view fetch stale
+  // on every mousemove -- the tiles would simply stop arriving while the
+  // pointer was over them, with nothing to say why.
+  //
+  // ホバーの点クエリは1つずつに合流させる。飛んでいる間の移動は最新の位置だけを
+  // 残し、戻ってきたら1回だけ追加で投げる。`reqId` とは別系列にすること。
+  // 流用するとホバーのたびに転送中のビュー取得がスタール扱いになり、ポインタを
+  // 載せている間タイルが届かなくなる（しかも理由がどこにも出ない）。
+  probeSeq: 0,        // monotonic; a response older than this is dropped
+  probeInFlight: false,
+  probeWanted: null,  // { col, row, seq } claimed while a fetch was in flight
 };
 
 // Uniform-only display parameters. Changing any of these must not fetch.
@@ -97,7 +119,7 @@ const display = {
 
 const views = [];       // one GLView per channel
 const captions = [];    // per-tile caption elements
-const probeCells = [];  // per-channel readout elements
+const probeCells = [];  // the 12 readout cells, row-major over DEFAULT_ROWS x DEFAULT_COLS
 let syncBusy = false;   // guards onViewChange against re-entry
 
 // ---------------------------------------------------------------- utilities
@@ -268,17 +290,11 @@ function fallbackAxes(labels, channels) {
 // like it works. `kind` is the thing that actually says how many pictures are
 // in the payload, so that is what decides.
 //
-// The readout grid is deliberately *not* keyed the same way: a hovered pixel
-// still has three numbers, so it keeps one cell per channel and the two grids
-// differ in exactly that one place.
-//
 // タイル配置は kind で分岐させる。scalar はチャンネル数だけタイルを並べるが、
 // rgb の3チャンネルは1枚の絵であり、3枚のグレースケールにしては意味が無い。
 // ラベル ["R","G","B"] は `axesFromLabels` では解釈できず、フォールバックだと
 // まさにその1行3列になってしまう（しかも黙って描けてしまう）。ペイロードに
 // 絵が何枚あるかを知っているのは kind だけなので、それで決める。
-// 読み取りグリッドだけは別で、ホバー1画素につき数値は3つあるためチャンネル数
-// で組む。両者が食い違うのはここだけ。
 function layoutFor(payload, current, traits) {
   // `channels === 3` as well as the trait: an rgb view is one colour per pixel,
   // so three channels is what "rgb" means here. requireRgbHasThreeChannels has
@@ -290,12 +306,7 @@ function layoutFor(payload, current, traits) {
   // 実際に弾いているのは requireRgbHasThreeChannels 側で、ここは多重防御だが、
   // 1枚タイルが正しいのは rgb 経路が詰められるペイロードに限られる。
   if (traits.singleTile && payload.channels === 3) {
-    return {
-      rows: [""],
-      cols: ["RGB"],
-      probeCols: fallbackAxes(payload.labels, payload.channels).cols,
-      corner: "",
-    };
+    return { rows: [""], cols: ["RGB"], corner: "" };
   }
   // Keeping the current axes is only sound when they *are* axes -- that is,
   // when the layout on screen came from a matrix-shaped set of labels. The
@@ -320,9 +331,7 @@ function layoutFor(payload, current, traits) {
     || (inheritable
       ? { rows: current.rows, cols: current.cols }
       : fallbackAxes(payload.labels, payload.channels));
-  return {
-    rows: axes.rows, cols: axes.cols, probeCols: axes.cols, corner: MATRIX_CORNER,
-  };
+  return { rows: axes.rows, cols: axes.cols, corner: MATRIX_CORNER };
 }
 
 function buildGrid(layout) {
@@ -366,7 +375,7 @@ function buildGrid(layout) {
     }
   }
   linkViews();
-  buildProbeGrid(rows, layout.probeCols);
+  buildProbeGrid();
 }
 
 // Pan/zoom is shared by all tiles. The guard stops the propagation loop from
@@ -404,7 +413,15 @@ function linkViews() {
   });
 }
 
-function buildProbeGrid(rows, cols) {
+// The readout table is the *matrix*, so it is always 4 inputs x 3 outputs --
+// no argument, and nothing about the view on screen reaches it. It used to be
+// built from the payload's own axes, which is why an rgb view produced a 1x3
+// table of surface colours under headings that named coefficients.
+// 読み取り表は行列そのものなので、常に入力4×出力3で組む。画面上のビューは
+// 一切影響しない。以前はペイロードの軸から組んでいたため、rgbビューでは
+// 係数の見出しの下に投影面のRGBが3つ並んでいた。
+function buildProbeGrid() {
+  const rows = DEFAULT_ROWS, cols = DEFAULT_COLS;
   const grid = $("probe-grid");
   grid.textContent = "";
   grid.style.gridTemplateColumns = `var(--rowhead) repeat(${cols.length}, minmax(0, 1fr))`;
@@ -432,16 +449,62 @@ function buildProbeGrid(rows, cols) {
   }
 }
 
-// Read all channels for one pixel straight out of the cached array. No fetch.
-// キャッシュ済み配列から全チャンネルを読む。フェッチはしない。
+// The readout is two panels with different sources, and keeping them apart is
+// the whole of this section.
+//
+// `#view-values` is what the *displayed view* holds at that pixel. It comes
+// out of `state.payload`, which is already in hand, so it is written
+// synchronously and costs nothing.
+//
+// `#probe-grid` is the *matrix*'s own 4x3, which the client does not have:
+// under `surface` there is no matrix on this side at all, and shipping a
+// second 99 MB copy to get one would undo the heap the planar transfer bought.
+// So it is fetched a pixel at a time. Until it was, the table showed the
+// payload too -- hovering `surface` printed three projection-surface colours
+// beneath headings that read `in_R -> out_R`.
+//
+// 読み取り欄は出所の違う2枚の板でできており、それを混ぜないことがこの節の要点。
+// `#view-values` は表示中のビューの値で、手元の `state.payload` から同期的に
+// 作れる。`#probe-grid` は行列そのものの4x3で、こちら側には無い（`surface` を
+// 見ているときクライアントに行列は存在せず、2つ目の99MBを送れば計画B2で
+// 半減させたヒープが元に戻る）。だから1画素ずつ取りに行く。それ以前は表も
+// ペイロードを読んでいたため、`surface` をホバーすると `in_R -> out_R` という
+// 見出しの下に投影面のRGBが並んでいた。
+
+function clearMatrixCells() {
+  for (const cell of probeCells) { cell.textContent = "—"; cell.className = "probe-cell"; }
+}
+
+// Reset both panels, and retire whatever claim is in flight.
+//
+// Called on pointer-leave and after a render. Without the `probeSeq` bump a
+// response already on its way would repaint the table a moment after it was
+// cleared, over a `#probe-pos` that says "—".
+// 両方の板を戻し、飛んでいる要求の権利を失効させる。ポインタが外れたときと
+// 再描画のあとに呼ぶ。`probeSeq` を進めないと、消した直後に飛来した応答が
+// 「—」と表示された位置の下に表を描き直す。
+function clearReadout() {
+  $("probe-pos").textContent = "—";
+  $("view-values").textContent = "";
+  clearMatrixCells();
+  state.probeSeq += 1;
+  state.probeWanted = null;
+}
+
+// The position and the view's own values, both from data already here.
+// 位置と、表示中のビューの値。どちらも手元にあるものだけで書ける。
 function showProbe(hit) {
-  const p = state.payload;
-  if (!p || !hit) {
-    $("probe-pos").textContent = "—";
-    for (const cell of probeCells) { cell.textContent = "—"; cell.className = "probe-cell"; }
-    return;
-  }
+  if (!hit) { clearReadout(); return; }
   $("probe-pos").textContent = `col ${hit.col}, row ${hit.row}`;
+  showViewValues(hit);
+  requestMatrixProbe(hit);
+}
+
+function showViewValues(hit) {
+  const host = $("view-values");
+  host.textContent = "";
+  const p = state.payload;
+  if (!p) return;
   // Planar (C, H, W) puts the channel index outermost; interleaved (H, W, C)
   // puts it innermost. Getting this backwards misreports every hovered value
   // while the tiles themselves still look right -- nothing would flag it.
@@ -450,13 +513,122 @@ function showProbe(hit) {
   const planar = p.layout === LAYOUT_PLANAR;
   const stride = p.width * p.height;
   const offset = hit.row * p.width + hit.col;
-  for (let c = 0; c < probeCells.length && c < p.channels; c++) {
+  for (let c = 0; c < p.channels; c++) {
     const v = planar
       ? p.data[c * stride + offset]
       : p.data[offset * p.channels + c];
-    const cell = probeCells[c];
-    cell.textContent = fmt(v);
-    cell.className = Number.isFinite(v) ? "probe-cell" : "probe-cell nan";
+    const item = document.createElement("div");
+    item.className = "view-value";
+    const label = document.createElement("span");
+    label.className = "vv-label";
+    label.textContent = String(p.labels[c] ?? c);
+    const value = document.createElement("span");
+    value.className = Number.isFinite(v) ? "vv-num" : "vv-num nan";
+    value.textContent = fmt(v);
+    item.appendChild(label);
+    item.appendChild(value);
+    host.appendChild(item);
+  }
+}
+
+// Write one 4x3 into the table.
+//
+// `null` arrives for every non-finite coefficient. That is the point query's
+// contract, not an accident (routers/session.py::_finite_or_none), and it is
+// the *ordinary* answer for most of the frame: the matrix is NaN everywhere
+// outside the active projection region, which on the real one is about three
+// quarters of the image.
+//
+// Read back to NaN here rather than branched on in the cell loop, so exactly
+// one place decides what a masked coefficient looks like. `fmt(null)` returns
+// "—", and in this readout "—" already means "nothing has been read yet" --
+// it is the initial text and what a failed query restores. Reusing it would
+// spell "outside the projection area" and "no answer" with the same glyph.
+// NaN prints "NaN" and takes the mask colour the tiles already paint those
+// same pixels in, so the table and the picture agree.
+//
+// 非有限係数は `null` で届く。これは点クエリの契約であって偶然ではなく
+// （routers/session.py::_finite_or_none）、しかも大半の画素にとっての通常の
+// 答えである（有効投影領域の外は全てNaNで、実機では画像の約75%）。
+// セル側で分岐させずここで NaN に読み替えるのは、マスクされた係数の見た目を
+// 決める場所を1つにするため。`fmt(null)` は「—」を返すが、この欄で「—」は
+// 既に「まだ何も読んでいない」を意味しており（初期値であり、失敗時に戻す値
+// でもある）、流用すると「投影領域の外」と「答えが無い」が同じ字面になる。
+// NaN ならタイルが同じ画素に塗っているマスク色が付き、表と絵が一致する。
+function showMatrixValues(values) {
+  for (let i = 0; i < DEFAULT_ROWS.length; i++) {
+    for (let j = 0; j < DEFAULT_COLS.length; j++) {
+      const cell = probeCells[i * DEFAULT_COLS.length + j];
+      if (!cell) continue;
+      const raw = (values[i] || [])[j];
+      const v = raw === null || raw === undefined ? NaN : raw;
+      cell.textContent = fmt(v);
+      cell.className = Number.isFinite(v) ? "probe-cell" : "probe-cell nan";
+    }
+  }
+}
+
+// The status line is shared with the loader and a hover fires dozens of times
+// a second, so repeating one failure would strobe it. Only a message that
+// differs from the last one is worth writing; a success just disarms it,
+// without clobbering whatever the loader put there.
+// ステータス行は読み込みと共用で、ホバーは毎秒何十回も起きるため、同じ失敗を
+// 連投すると点滅する。前回と違うときだけ書き、成功時は解除するだけにする。
+let lastProbeError = null;
+
+function reportProbeError(message) {
+  if (message === lastProbeError) return;
+  lastProbeError = message;
+  if (message) status(`読み取りに失敗: ${message}`, true);
+}
+
+// Claim the readout for this pixel, and fetch unless something is already in
+// flight -- in which case the claim is what the in-flight request picks up
+// when it returns.
+//
+// Every hover claims a new `probeSeq`, whether or not it gets to issue a
+// request. That is what keeps the position on screen and the numbers under it
+// describing the same pixel: `#probe-pos` is written synchronously, so a
+// response for a superseded claim would put one pixel's coefficients under
+// another pixel's heading.
+//
+// ホバーのたびに `probeSeq` を進める（要求を出せたかどうかに関わらず）。
+// 位置の表示は同期的に書き換わるので、追い越された要求の応答を描くと
+// 「ある画素の係数が別の画素の見出しの下に出る」ことになる。
+function requestMatrixProbe(hit) {
+  if (!state.matrixId) { clearMatrixCells(); return; }
+  state.probeSeq += 1;
+  state.probeWanted = { col: hit.col, row: hit.row, seq: state.probeSeq };
+  if (state.probeInFlight) return;
+  // Not awaited -- nothing here has anything to wait for. The loop reports its
+  // own failures; this catch is the net for a throw that is not a failed
+  // fetch, routed through the same de-duplication so a bug on the hover path
+  // cannot strobe the status line either.
+  // 待つものが無いので await しない。fetch の失敗はループ側が報告するので、この
+  // catch はそれ以外の例外のための網であり、同じ重複除去を通す。
+  runMatrixProbes().catch((e) => reportProbeError(errorText(e)));
+}
+
+async function runMatrixProbes() {
+  state.probeInFlight = true;
+  try {
+    while (state.probeWanted) {
+      const want = state.probeWanted;
+      state.probeWanted = null;
+      const matrixId = state.matrixId;
+      try {
+        const body = await probeMatrix(matrixId, want.row, want.col);
+        if (want.seq !== state.probeSeq) continue;   // the pointer has moved on
+        showMatrixValues(body.values);
+        reportProbeError(null);
+      } catch (e) {
+        if (want.seq !== state.probeSeq) continue;
+        clearMatrixCells();
+        reportProbeError(errorText(e));
+      }
+    }
+  } finally {
+    state.probeInFlight = false;
   }
 }
 
@@ -820,6 +992,12 @@ async function reload(req = beginRequest()) {
   if (needsFit) views[0].fit();
   state.pinned = null;
   $("probe-pin").textContent = "";
+  // What the readout was describing is no longer on screen -- a different
+  // matrix, or the same one through a different view. Clearing also retires
+  // any point query still in flight, so it cannot repaint the table afterwards.
+  // 読み取りが説明していたものは画面から消えた。飛んでいる点クエリの権利も
+  // ここで失効させる。
+  clearReadout();
 
   const bytes = payload.data.byteLength;
   const perf = {

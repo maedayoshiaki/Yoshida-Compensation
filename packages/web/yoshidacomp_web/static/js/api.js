@@ -83,6 +83,24 @@ export async function listViews() {
   return (await jsonOrThrow(await fetch("/api/views"))).views;
 }
 
+// One pixel's 4x3 coefficients. The matrix itself never crosses the wire --
+// see routers/session.py::probe_matrix for why this is a point query.
+//
+// Non-finite coefficients arrive as `null`, deliberately: the matrix carries
+// NaN everywhere outside the active projection region, which on the real one
+// is about three quarters of the frame, so `null` is the ordinary answer for
+// most pixels rather than a failure.
+//
+// 1画素分の4x3係数だけを取る。行列本体は線に乗せない。非有限係数は `null` で
+// 届く（有効投影領域の外はNaNであり、実機では全画素の約75%がそれに当たる）。
+export async function probeMatrix(matrixId, row, col) {
+  const res = await fetch(
+    `/api/matrix/${encodeURIComponent(matrixId)}/probe?row=${row}&col=${col}`,
+  );
+  if (!res.ok) throw new Error(await errorMessage(res));
+  return res.json();
+}
+
 export async function fetchView(matrixId, key, params) {
   const qs = new URLSearchParams(params).toString();
   const res = await fetch(`/api/matrix/${matrixId}/view/${key}?${qs}`);
