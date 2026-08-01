@@ -79,12 +79,23 @@ def _finite_or_none(value: float) -> float | None:
     rather than emit an invalid literal, never a malformed body reaching
     ``JSON.parse``. Neither is this endpoint's own contract, and both
     disappear if the route ever returns a ``Response`` directly or loses its
-    return annotation; then a matrix's out-of-region NaN turns the hover into
-    an opaque 500 instead of a readable masked value -- on the real matrix
-    that is 75% of the frame. Converting here makes ``null`` ours.
+    return annotation; then a NaN coefficient turns the hover into an opaque
+    500 instead of a readable masked value. Converting here makes ``null``
+    ours.
     ``tests/test_web_matrix_probe.py::test_finite_or_none_maps_nan_and_infinities_to_none_directly``
     is what holds this; no HTTP-level test can, because the framework
     launders it either way.
+
+    This is a contract for matrices that *do* carry NaN, not a description of
+    the ones this viewer has been pointed at. Measured on
+    ``data/linear_pipeline_1080/matrices_linear_gamma.npy`` (1080x1920x4x3):
+    **zero** non-finite values, while 74.86% of pixels are outside the active
+    region -- every one of them finite. The NaN in that frame is written by
+    ``views/coef_tiles.py`` at *render* time and never reaches the stored
+    array, which is exactly why the readout needs an out-of-region marker of
+    its own rather than letting NaN speak for it. But nothing in ``.npy``
+    forbids NaN and other pipelines in this repository produce masked arrays,
+    so a matrix that holds one must be answerable rather than a 500.
 
     非有限係数は必ず ``null`` としてこのエンドポイントを出る。今日は2つの
     フレームワーク層がたまたま同じ結果を作っている――戻り値注釈つきの
@@ -93,9 +104,19 @@ def _finite_or_none(value: float) -> float | None:
     ``json.dumps(allow_nan=False)`` を使うため不正なリテラルではなく500になる
     （壊れた本文が ``JSON.parse`` に届くことはない）。しかしどちらもこの
     エンドポイント自身の契約ではなく、``Response`` を直接返す・戻り値注釈を
-    外すといった変更で消える。そうなれば有効領域外のNaNは読み取り可能な
-    マスク値ではなく素の500になる――実機行列では全画素の75%が該当する。
-    ここで変換することで ``null`` をこのエンドポイント自身の契約にする。
+    外すといった変更で消える。そうなればNaNの係数は読み取り可能なマスク値では
+    なく素の500になる。ここで変換することで ``null`` をこのエンドポイント自身の
+    契約にする。
+
+    これは「NaNを持ちうる行列」に対する契約であって、このビューアが実際に
+    読んでいる行列の説明ではない。実測（``data/linear_pipeline_1080/
+    matrices_linear_gamma.npy``、1080x1920x4x3）: 非有限値は**0個**。
+    有効領域の外は全画素の74.86%あるが、そのすべてが有限である。あの画面の
+    NaNは ``views/coef_tiles.py`` が**描画時**に書いているもので、保存された
+    配列には入っていない――読み取り欄が独自の「領域外」の印を必要とするのは
+    まさにこのためである。とはいえ ``.npy`` がNaNを禁じているわけではなく、
+    このリポジトリの他の経路はマスク済み配列を作るので、NaNを持つ行列も
+    500ではなく答えられなければならない。
     """
     v = float(value)
     return v if math.isfinite(v) else None

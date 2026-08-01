@@ -98,6 +98,30 @@ const GAMMA_MAX = 10;
 
 const state = {
   matrixId: null,
+  // The matrix the *tiles* are currently drawn from, which is not the same
+  // thing as `matrixId` and must not be confused with it.
+  //
+  // `matrixId` is what the newest load registered; it changes the moment
+  // `POST /session/matrix` answers, seconds before the view transfer that will
+  // put that matrix on screen has finished. The readout describes the picture,
+  // so it has to ask about the picture: a hover during those seconds used to
+  // be answered by the arriving matrix while the tiles still held the previous
+  // one, and `inside_active_region` is per-matrix -- two matrices captured
+  // either side of a config edit have different active regions, which is
+  // routine here. The tile under the cursor would be grey (masked in the
+  // matrix on screen) while the readout showed finite numbers and no marker
+  // (inside the region of the matrix still arriving), or the reverse.
+  //
+  // Set beside `state.payload`, because the two are the same fact.
+  //
+  // タイルが今描いている行列。`matrixId`（最新の読み込みが登録したもの）とは
+  // 別物である。後者は `POST /session/matrix` が返った時点で変わり、その行列が
+  // 画面に出るまでには数秒の転送がある。読み取り欄は画面を説明するものなので、
+  // 画面に出ている行列に問い合わせなければならない。以前は転送中のホバーが
+  // 到着中の行列に答えられており、`inside_active_region` は行列ごとの性質
+  // なので、設定を変えた前後で撮った2つの行列（このリポジトリでは日常）だと
+  // 印と絵が転送のあいだずっと食い違う。`state.payload` と同じ場所で更新する。
+  shownMatrixId: null,
   meta: null,
   specs: [],        // every ViewSpec from /api/views
   spec: null,       // the active one
@@ -564,18 +588,32 @@ function clearReadout() {
 
 // The position and the view's own values, both from data already here.
 //
-// The position goes up without the active-region marker, because whether the
-// pixel is inside is the server's answer and has not arrived yet. Claiming
-// either way from here would be guessing, and the direction that guesses
-// "inside" is exactly the silence this marker exists to break.
+// The marker is carried over from whatever it already said, and that is the
+// point: the twelve cells are *not* cleared here, so until the point query
+// answers they still hold the previous pixel's coefficients -- and the marker
+// disclaims those numbers, not the heading above them. Writing `false` here
+// (which is what this did) cleared the marker while the out-of-region values
+// it referred to were still on screen, in the same type, colour and precision
+// as real ones: exactly the state setProbePos exists to make impossible, for
+// one round trip, every time the pointer left a masked pixel.
 //
-// 位置と、表示中のビューの値。どちらも手元にあるものだけで書ける。有効領域の
-// 印は付けない——内側かどうかはサーバの答えであり、まだ届いていない。ここで
-// 決め打ちすれば当て推量になり、しかも「内側」と推量する側は、この印が破ろうと
-// している沈黙そのものである。
+// Guessing "inside" is the direction this marker exists to break, so the
+// wrong-but-safe direction is to keep warning until the answer arrives. The
+// alternative -- blanking the twelve cells on every mousemove -- would strobe
+// the table during a drag and collide with the "—" that means "nothing read".
+//
+// 位置と、表示中のビューの値。印は「今出ている状態」をそのまま持ち越す。ここで
+// 12個のセルは消さないので、応答が来るまで表には前の画素の係数が残っており、
+// 印が打ち消しているのはその数値であって、上の見出しではない。以前のように
+// `false` を書くと、領域外の値が本物と同じ字体・色・桁数で表に残ったまま印だけ
+// が消える——マスクされた画素からポインタを動かすたびに、1往復のあいだ、
+// setProbePos が無くそうとしている状態そのものが再現していた。「内側」と
+// 推量する側こそこの印が破ろうとしている沈黙なので、誤るなら警告を残す側に
+// 倒す。12個を毎回消す案は、ドラッグ中に表が点滅し、「まだ何も読んでいない」を
+// 意味する「—」とも衝突する。
 function showProbe(hit) {
   if (!hit) { clearReadout(); return; }
-  setProbePos(hit.col, hit.row, false);
+  setProbePos(hit.col, hit.row, $("probe-pos").classList.contains("outside"));
   showViewValues(hit);
   requestMatrixProbe(hit);
 }
@@ -614,10 +652,14 @@ function showViewValues(hit) {
 // Write one 4x3 into the table.
 //
 // `null` arrives for every non-finite coefficient. That is the point query's
-// contract, not an accident (routers/session.py::_finite_or_none), and it is
-// the *ordinary* answer for most of the frame: the matrix is NaN everywhere
-// outside the active projection region, which on the real one is about three
-// quarters of the image.
+// contract, not an accident (routers/session.py::_finite_or_none). It is a
+// contract for matrices that carry NaN, though, and not a description of the
+// ones loaded here: the stored array is finite everywhere, including outside
+// the active projection region, and the NaN on screen is written by the views
+// at render time. That is the whole reason `#probe-pos` carries an
+// out-of-region marker -- see setProbePos, and the measurement quoted there.
+// A `null` here therefore means "this matrix really does hold a non-finite
+// coefficient at that pixel", which is rare and worth showing as such.
 //
 // Read back to NaN here rather than branched on in the cell loop, so exactly
 // one place decides what a masked coefficient looks like. `fmt(null)` returns
@@ -627,9 +669,13 @@ function showViewValues(hit) {
 // NaN prints "NaN" and takes the mask colour the tiles already paint those
 // same pixels in, so the table and the picture agree.
 //
-// 非有限係数は `null` で届く。これは点クエリの契約であって偶然ではなく
-// （routers/session.py::_finite_or_none）、しかも大半の画素にとっての通常の
-// 答えである（有効投影領域の外は全てNaNで、実機では画像の約75%）。
+// 非有限係数は `null` で届く。これは点クエリの契約であって偶然ではないが
+// （routers/session.py::_finite_or_none）、NaNを持ちうる行列のための契約で
+// あって、ここで読んでいる行列の説明ではない。保存された配列は有効投影領域の
+// 外も含めて全て有限で、画面上のNaNはビューが描画時に書いている。`#probe-pos`
+// が独自の「領域外」の印を持つ理由がこれである（setProbePos の実測値を参照）。
+// したがってここで `null` が来るということは「その画素に本当に非有限の係数が
+// 入っている」を意味し、それは稀であり、そう見えるべきである。
 // セル側で分岐させずここで NaN に読み替えるのは、マスクされた係数の見た目を
 // 決める場所を1つにするため。`fmt(null)` は「—」を返すが、この欄で「—」は
 // 既に「まだ何も読んでいない」を意味しており（初期値であり、失敗時に戻す値
@@ -701,7 +747,9 @@ function reportProbeError(message) {
 // 位置の表示は同期的に書き換わるので、追い越された要求の応答を描くと
 // 「ある画素の係数が別の画素の見出しの下に出る」ことになる。
 function requestMatrixProbe(hit) {
-  if (!state.matrixId) { clearMatrixCells(); return; }
+  // The matrix on screen, not the newest one registered. See state.shownMatrixId.
+  // 画面に出ている行列。最新の登録ではない。
+  if (!state.shownMatrixId) { clearMatrixCells(); return; }
   state.probeSeq += 1;
   state.probeWanted = { col: hit.col, row: hit.row, seq: state.probeSeq };
   if (state.probeInFlight) return;
@@ -720,7 +768,7 @@ async function runMatrixProbes() {
     while (state.probeWanted) {
       const want = state.probeWanted;
       state.probeWanted = null;
-      const matrixId = state.matrixId;
+      const matrixId = state.shownMatrixId;
       try {
         const body = await probeMatrix(matrixId, want.row, want.col);
         if (want.seq !== state.probeSeq) continue;   // the pointer has moved on
@@ -993,6 +1041,12 @@ function requireRgbHasThreeChannels(kind, channels, where) {
 // new one.
 async function reload(req = beginRequest()) {
   if (!state.matrixId || !state.spec) return;
+  // Captured once, so the id this request fetched from is the id published
+  // with its payload. Re-reading `state.matrixId` after the await would let a
+  // newer load's id be attached to this transfer's pixels.
+  // 発行時に控える。await のあとに読み直すと、この転送の画素に新しい行列のIDが
+  // 付きうる。
+  const matrixId = state.matrixId;
   // Checked from the registry first, so a view that cannot be drawn is refused
   // before the transfer rather than after it.
   // まず登録内容で判定し、描けないビューは転送前に断る。
@@ -1011,7 +1065,7 @@ async function reload(req = beginRequest()) {
   status(`ビュー取得中… (${state.spec.key} ${JSON.stringify(params)})`);
 
   const t0 = performance.now();
-  const payload = await fetchView(state.matrixId, state.spec.key, params);
+  const payload = await fetchView(matrixId, state.spec.key, params);
   const t1 = performance.now();
   if (isStale(req)) return;   // a newer request owns the screen now
   // Backstop: the registry and the response could disagree. `traitsFor` is the
@@ -1024,6 +1078,10 @@ async function reload(req = beginRequest()) {
   const traits = traitsFor(payload.kind, "サーバの応答");
   requireRgbHasThreeChannels(payload.kind, payload.channels, "サーバの応答");
   state.payload = payload;
+  // The pixels and the matrix they came from, published together. The readout
+  // asks this id, so it can never describe a matrix other than the one drawn.
+  // 画素と、その出所の行列IDを同時に確定する。読み取り欄はこのIDに問い合わせる。
+  state.shownMatrixId = matrixId;
   // The heading over #view-values, set with the payload it describes.
   //
   // Two panels of numbers now sit side by side and only one of them is the

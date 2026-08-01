@@ -18,8 +18,12 @@
   `json.dumps(allow_nan=False)` を使うため不正な `NaN` リテラルではなく **500** に
   なる（`JSON.parse` が壊れた本文を受け取ることはない）。しかしどちらもこの
   エンドポイント自身の契約ではなく、戻り値注釈を外す・`Response` を直接返す等の
-  変更で消える。変換を怠ると、有効領域外の画素をホバーしただけで 500 になり
-  読み取り欄が空白になる（実機行列では全画素の75%が対象）。明示的に変換して
+  変更で消える。変換を怠ると、NaNを持つ行列の該当画素をホバーしただけで 500 に
+  なり読み取り欄が空白になる。**この計画が当初「実機行列では全画素の75%が対象」
+  と書いていたのは誤り**で、`data/linear_pipeline_1080/matrices_linear_gamma.npy`
+  の非有限値は0個である（有効領域の外は全画素の74.86%あるが、そのすべてが有限。
+  NaNは `views/coef_tiles.py` が描画時に書いている）。変換はNaNを持ちうる行列の
+  ための契約であって、この行列の説明ではない。明示的に変換して
   `null` をこのエンドポイントの契約にする。
 - `yoshidacomp.compensation.color_mixing_matrix` を web 層から import しない
   （module scope で torch と psutil を引く）。
@@ -42,6 +46,18 @@
 | `tests/test_web_matrix_probe.py` | 点クエリのテスト（新規） |
 | `tests/js/frontend_harness.mjs` | 合流・スタール・描画のチェック追加 |
 | `tests/test_web_frontend_js.py` | 変異エントリ追加 |
+
+レビュー対応で以下も触った（当初この表に無かったもの）。ビュー値パネルを
+「描いているものが行列でないときだけ出す」に変えるため、判断をビュー仕様の
+宣言 `values_are_matrix` としてサーバから運ぶことにしたためである。
+
+| ファイル | 責任 |
+| --- | --- |
+| `packages/web/yoshidacomp_web/views/base.py` | `ViewSpec.values_are_matrix`（既定は「出す」側の `False`） |
+| `packages/web/yoshidacomp_web/views/coef_tiles.py` | 自分の12枚は行列そのものだと宣言する |
+| `packages/web/yoshidacomp_web/routers/view.py` | `/api/views` でその宣言を運ぶ |
+| `tests/test_web_views.py` | `coef_tiles` の宣言を固定 |
+| `tests/test_web_surface_view.py` | `surface` の宣言を固定 |
 
 ---
 
@@ -469,7 +485,13 @@ Expected: FAIL
 
 `index.html` の `<section class="readout">` を差し替え、サイドバーの
 `.readouts` ブロックを削除する。`style.css` に `.rd-panel` / `.rd-title` /
-`.view-values` を足し、`.probe-grid` の列を固定幅にする。
+`.view-values` を足す。
+
+**実装時に1点変更した**: `.probe-grid` の列幅は `style.css` ではなく
+`main.js`（`PROBE_HEAD_PX` / `PROBE_CELL_PX`）に置いた。`buildProbeGrid` が
+テンプレートをインラインで書き、インラインはシートに勝つので、両方に書けば
+シート側は「生きているように見える死んだ記述」になる。シートからは列指定を
+削除し、その理由をコメントで残してある。
 
 - [ ] **Step 4: 通ることを確認**
 

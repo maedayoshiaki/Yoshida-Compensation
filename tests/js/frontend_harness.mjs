@@ -1562,7 +1562,7 @@ if (SCENARIO === "probe") {
   // と `#probe-grid` と `#view-values` はサイドバーへ戻せてしまい、しかもその
   // 2つこそが読み取り欄である。
   const DASHBOARD_IDS = [
-    "probe-pos", "probe-grid", "view-values",
+    "probe-pos", "probe-pin", "probe-grid", "view-title", "view-values",
     "range-info", "perf-fetch", "perf-ranges", "perf-upload", "perf-heap",
   ];
   check("the readout's panels all sit in the dashboard, not the sidebar",
@@ -1616,6 +1616,40 @@ if (SCENARIO === "probe") {
     `sheet: ${readoutRule.trim().replace(/\s+/g, " ")} | `
       + `inline: ${readoutBox ? readoutBox.style.display ?? "(none)" : "no .readout ancestor"}`);
 
+  // --- and every band is placed in a row *by name*, so a hidden one collapses
+  //     its own row and nothing else's
+  //
+  // `body` is a 5-row grid and `#space-note` is `hidden` for a projector-space
+  // matrix -- which is the ordinary case. `display: none` removes it as a grid
+  // item entirely, so under a positional template every band after it slid up
+  // one row and the `1fr` landed on the *readout* instead of on the tiles: the
+  // strip grew a blank band under its panels (measured ~116px), and the tile
+  // height came out equal to the sidebar's content height, i.e. determined by
+  // how many controls the current view happens to declare. `surface` declares
+  // three and `coef_tiles` one, so switching view resized the pictures.
+  //
+  // Asserted the same way and for the same reason as `.readout`'s row: it is a
+  // stylesheet declaration with no error, no wrong number and no other check
+  // behind it -- deleting the five lines restored the defect with the whole JS
+  // gate green.
+  //
+  // 各段を*名指し*で行に置く。`body` は5行のグリッドで、`#space-note` は投影
+  // 座標の行列（＝通常の場合）では `hidden` になり、`display: none` はグリッド
+  // 項目そのものを消す。位置で決まるテンプレートでは以降の段が1行ずつ繰り上がり、
+  // `1fr` がタイルではなく読み取り欄に載っていた——帯の下に約116pxの空白が生じ、
+  // タイルの高さは「そのビューが宣言しているコントロールの数」で決まっていた
+  // （`surface` は3つ、`coef_tiles` は1つ）。5行を消しても他に落ちるものが無い
+  // ので、`.readout` の行と同じやり方で固定する。
+  const GRID_ROWS = [[".toolbar", 1], ["#space-note", 2], ["main", 3],
+    [".readout", 4], ["footer#status", 5]];
+  const rowMisses = GRID_ROWS.filter(
+    ([sel, n]) => !new RegExp(`grid-row:\\s*${n}\\b`).test(cssDeclarations(sel)));
+  check("each band of the page is placed in a named grid row, not by document order",
+    rowMisses.length === 0,
+    rowMisses.length
+      ? `not placed: ${rowMisses.map(([sel, n]) => `${sel} (want row ${n})`).join(", ")}`
+      : GRID_ROWS.map(([sel, n]) => `${sel}=${n}`).join(" "));
+
   // --- nothing loaded yet: there is no matrix to ask about
   //
   // The 12 empty tiles exist from startup, so onHover is reachable long before
@@ -1654,6 +1688,40 @@ if (SCENARIO === "probe") {
   // switch below; the assertion needs both views and is made once, after it.
   // 係数ビューでの2枚目の板の状態。切替の前に控え、両方そろってから見る。
   const panelOnCoefTiles = el("view-panel").hidden;
+
+  // --- a view that declares nothing keeps its panel
+  //
+  // The default is the *showing* direction. `views/base.py` argues that at
+  // length, `routers/view.py` says the answer is "not derivable from `kind`",
+  // and `main.js` repeats both -- and none of it was asserted anywhere. The
+  // two views the panel state was read on are `coef_tiles` (scalar, declares
+  // `true`) and `surface` (rgb, declares `false`), so `kind === "scalar"` --
+  // the implementation all three comments forbid -- is indistinguishable from
+  // reading the declaration, and so is `values_are_matrix !== false`, which
+  // inverts the default the docstring spends a paragraph on. Both passed every
+  // check in every scenario.
+  //
+  // `tri_scalar` is what separates them: scalar, three channels, and no
+  // declaration -- the shape of a residual-error view, whose three numbers are
+  // *not* the matrix and are the only ones it produces. Under either wrong
+  // implementation they vanish from the screen entirely.
+  //
+  // 既定は「出す」側である。`views/base.py` はそれを長々と論じ、
+  // `routers/view.py` は「`kind` からは導けない」と書き、`main.js` は両方を
+  // 繰り返している——そしてどれも検証されていなかった。板の状態を読んでいた
+  // ビューは `coef_tiles`（scalar・`true`）と `surface`（rgb・`false`）だけで、
+  // この2つでは 3つのコメントが禁じている `kind === "scalar"` が宣言を読むのと
+  // 区別できず、既定を反転させる `!== false` も同様である（どちらも全シナリオ
+  // 通過）。`tri_scalar` がそれを分ける: scalar・3チャンネル・宣言なし——
+  // 残差ビューの形であり、その3つの数値は行列ではなく、かつそのビューが出す
+  // 唯一の数値である。誤った実装ではそれが画面から丸ごと消える。
+  el("view-select").value = "tri_scalar";
+  el("view-select").__fire("change");
+  await settled();
+  check("a view that declares nothing about its values keeps its panel",
+    state.spec.key === "tri_scalar" && el("view-panel").hidden === false,
+    `spec=${state.spec.key} hidden=${el("view-panel").hidden} `
+      + `declared=${JSON.stringify(state.spec.values_are_matrix)}`);
 
   el("view-select").value = "surface";
   el("view-select").__fire("change");
@@ -1748,16 +1816,19 @@ if (SCENARIO === "probe") {
 
   // --- a null coefficient is a masked value, not a missing one
   //
-  // `null` is what routers/session.py sends for every non-finite coefficient,
-  // and on the real matrix roughly three quarters of the frame is outside the
-  // active projection region and holds NaN. So this is the ordinary answer for
-  // most of the image, not an error path: it has to read as "masked", in the
-  // same colour the tiles already paint those pixels, rather than as the "—"
-  // that means "nothing has been read yet".
-  // 非有限係数は `null` で届き、実機の行列では投影領域外＝全画素の約75%が該当
-  // する。つまりこれは例外ではなく大半の画素の通常の答えであり、「まだ何も
-  // 読んでいない」を意味する「—」ではなく、タイルと同じマスク色で出なければ
-  // ならない。
+  // `null` is what routers/session.py sends for every non-finite coefficient.
+  // It is uncommon rather than ordinary -- the matrices this viewer is pointed
+  // at are finite everywhere, out-of-region pixels included, and the NaN on
+  // screen is painted by the views at render time (which is why the readout
+  // needs the separate marker checked below). But nothing forbids a matrix
+  // from holding NaN, and when one does the cell has to read as "masked", in
+  // the same colour the tiles paint those pixels, rather than as the "—" that
+  // means "nothing has been read yet".
+  // 非有限係数は `null` で届く。これは通常の答えではなく稀な答えである——
+  // このビューアが読む行列は領域外も含めて全て有限で、画面上のNaNはビューが
+  // 描画時に塗っている（だから下の「領域外」の印が別に要る）。とはいえNaNを
+  // 持つ行列がありえないわけではなく、その場合セルは「まだ何も読んでいない」
+  // を意味する「—」ではなく、タイルと同じマスク色で出なければならない。
   //
   // Pinned at (row 1, col 3) rather than on the diagonal: a fixture whose two
   // coordinates are interchangeable is the defect this repository keeps
@@ -1814,6 +1885,59 @@ if (SCENARIO === "probe") {
     `outside=${outsideSaid} flagged=${outsideFlagged} `
       + `cells=${JSON.stringify(outsideCells)} `
       + `inside=${insideSaid} flagged=${insideFlagged}`);
+
+  // --- and the marker only leaves when the numbers it disclaims do
+  //
+  // The heading is written synchronously on hover; the twelve cells are not
+  // touched until the point query answers. So between the two there is a state
+  // where the cells still hold the *previous* pixel, and whatever the marker
+  // says during it is a statement about those numbers -- not about the pixel
+  // named above them. Clearing it there (`setProbePos(col, row, false)`, which
+  // is what shipped) put the out-of-region values on screen unmarked, in the
+  // same type, colour and precision as real coefficients: the exact state the
+  // marker exists to make impossible, for one round trip, every time the
+  // pointer left a masked pixel -- which on the real matrix is most pixels.
+  //
+  // Held open so the intermediate state is a place the client can be put,
+  // rather than a microsecond nobody can observe. Both halves are asserted:
+  // the marker survives *while* the outside pixel's numbers are shown, and it
+  // goes away once the inside pixel's numbers arrive -- an implementation that
+  // simply never clears it would fail the second.
+  //
+  // 見出しは同期的に、12個のセルは応答が来てから書かれる。その間セルには前の
+  // 画素の値が残っており、その間の印は「その数値についての主張」であって、
+  // 上に出ている画素名についてのものではない。ここで印を消す実装（出荷されて
+  // いたもの）は、領域外の値を本物と同じ字体・色・桁数のまま印なしで見せる
+  // ——マスクされた画素からポインタを動かすたびに、1往復ぶん。実機ではそれが
+  // 大半の画素である。応答を保留して中間状態を作り、両方向を見る（外れた値が
+  // 出ている間は印が残ること、内側の値が届いたら消えること）。
+  holdProbes = true;
+  views[0].onHover({ col: 2, row: 0 });                    // outside, answered
+  await waitForHeld(0, 2);
+  releaseProbe(0, 2);
+  await waitFor(() => el("probe-pos").classList.contains("outside"));
+  views[0].onHover({ col: 2, row: 1 });                    // inside, held open
+  await waitForHeld(1, 2);
+  await sleep(40);
+  const duringFlight = {
+    said: el("probe-pos").textContent,
+    flagged: el("probe-pos").classList.contains("outside"),
+    cells: matrixTexts(),
+  };
+  releaseProbe(1, 2);
+  await waitFor(() => matrixTexts()[0] === expectedMatrixTexts(1, 2)[0]);
+  holdProbes = false;
+  releaseHeldProbes();
+  await sleep(40);
+  check("the marker stays with the numbers it disclaims until they are replaced",
+    JSON.stringify(duringFlight.cells) === JSON.stringify(expectedMatrixTexts(0, 2))
+      && duringFlight.flagged && /有効投影領域の外/.test(duringFlight.said)
+      && !el("probe-pos").classList.contains("outside")
+      && JSON.stringify(matrixTexts()) === JSON.stringify(expectedMatrixTexts(1, 2)),
+    `in flight: said=${duringFlight.said} flagged=${duringFlight.flagged} `
+      + `cells=${JSON.stringify(duringFlight.cells)} | after: `
+      + `flagged=${el("probe-pos").classList.contains("outside")} `
+      + `cells=${JSON.stringify(matrixTexts())}`);
 
   // --- and the view-value panel marks a masked channel the same way
   //
@@ -1993,15 +2117,96 @@ if (SCENARIO === "probe") {
   // タイルは前の行列のまま、ステータス行は「ビュー取得中…」のまま、理由は
   // どこにも出ない。実機では転送に数秒かかり、その間ポインタは画像の上にある。
   viewDelayMs.B = 200;
+  const probesBeforeTransfer = probeLog.length;
   clickLoad("B");
   await sleep(25);
   check("the view transfer was still in flight when the hover happened",
     !resolved.has("view:B"), `resolvedB=${resolved.has("view:B")}`);
+  const tagDuringTransfer = payloadTag();
   for (let col = 0; col < 4; col++) views[0].onHover({ col, row: 2 });
+  await sleep(40);
+  const probedDuringTransfer = probeLog.slice(probesBeforeTransfer);
   await settled();
   check("hovering during a view transfer does not stall the tiles",
     payloadTag() === 2 && /表示中/.test(statusText()),
     `payload tag=${payloadTag()} (A=1, B=2) status=${statusText()}`);
+
+  // --- and it asks the matrix the tiles are drawn from, not the one arriving
+  //
+  // `state.matrixId` becomes B the moment `POST /session/matrix` answers --
+  // seconds before B's pixels arrive on the 1080p matrix, with the pointer over
+  // the image the whole time (the comment above argues that is every load, not
+  // an unlucky one). A readout keyed on it answers about B while the tiles
+  // still show A. That is not merely early: `inside_active_region` is a
+  // property of a particular matrix, and two matrices captured either side of
+  // a `config.toml` edit have different active regions -- routine here, where
+  // the config is an experiment log. The tile under the cursor would be grey
+  // (masked in A, the picture) while the readout showed finite numbers and no
+  // marker (inside B, the arrival), or the reverse, for the whole transfer.
+  //
+  // Asserted on the *issued* URLs rather than on the cells, because the answer
+  // is discarded by the staleness guard anyway -- the request itself is where
+  // the wrong matrix is chosen.
+  //
+  // `state.matrixId` は `POST /session/matrix` が返った瞬間に B になる——1080p
+  // では B の画素が届く数秒前であり、その間ポインタは画像の上にある（上の
+  // コメントが言うとおり、それは「たまたま」ではなく毎回である）。それを見る
+  // 読み取り欄はタイルが A を映している間 B について答える。単に早いのではない。
+  // `inside_active_region` は行列ごとの性質であり、`config.toml` を挟んで撮った
+  // 2つの行列は有効領域が違う（設定が実験ログであるこのリポジトリでは日常）。
+  // カーソルの下のタイルは灰色（Aではマスク）なのに読み取り欄は有限値を印なしで
+  // 出す、あるいはその逆が、転送のあいだずっと続く。応答はスタール判定で捨てら
+  // れるので、検証するのは発行されたURLのほうである（誤った行列が選ばれるのは
+  // 要求の時点だからである）。
+  check("a hover during a load asks the matrix on screen, not the one still arriving",
+    tagDuringTransfer === 1 && probedDuringTransfer.length > 0
+      && probedDuringTransfer.every((u) => u.startsWith("/api/matrix/matrix_A/probe?")),
+    `payload tag during transfer=${tagDuringTransfer} `
+      + `probes=${JSON.stringify(probedDuringTransfer)}`);
+
+  // --- and a load clears the readout, rather than leaving the old matrix in it
+  //
+  // `clearReadout()` at the end of `reload()` is what makes the readout stop
+  // describing a matrix that is no longer on screen. Deleting the call is
+  // invisible to every other check here, and the result is that after loading
+  // matrix B the strip still shows *matrix A's* twelve coefficients -- and, if
+  // that pixel was outside A's active region, A's red marker -- until the
+  // pointer happens to move. A readout stating the wrong matrix's numbers
+  // under the picture of another is the failure class this whole branch exists
+  // to remove.
+  //
+  // Run last, and with an out-of-region pixel, so both the cells and the
+  // marker have something to fail with.
+  //
+  // `reload()` 末尾の `clearReadout()` が、画面から消えた行列を読み取り欄が
+  // 説明し続けないようにしている。この呼び出しを消しても他のチェックは一切
+  // 落ちず、結果として行列Bを読み込んだあとも帯には*行列A*の12個の係数が——
+  // その画素がAの有効領域の外だったならAの赤い印ごと——ポインタが動くまで
+  // 残る。別の絵の下に別の行列の数値を出す読み取り欄は、このブランチが
+  // 取り除こうとしてきた失敗そのものである。セルと印の両方が落ちうるよう、
+  // 領域外の画素で、最後に確認する。
+  views[0].onHover({ col: 2, row: 0 });                    // outside -> marked
+  await waitFor(() => el("probe-pos").classList.contains("outside"));
+  const beforeReload = matrixTexts();
+  const markedBeforeReload = el("probe-pos").classList.contains("outside");
+  viewDelayMs.B = 0;
+  clickLoad("B");
+  await settled();
+  // The marker's state before the load is reported but not required: this
+  // check is about `clearReadout()`, and demanding a *marked* starting state
+  // would make it fail for every mutation that breaks the marker instead --
+  // which those mutations' own checks already cover.
+  // 直前に印が付いていたかは報告するだけで条件にしない。このチェックの対象は
+  // `clearReadout()` であり、印が付いていることを要求すると、印を壊す変異の
+  // すべてでここも落ちる（それは印側のチェックの仕事である）。
+  check("a load clears the readout instead of leaving the previous matrix's numbers in it",
+    JSON.stringify(beforeReload) !== dashes
+      && JSON.stringify(matrixTexts()) === dashes
+      && el("probe-pos").textContent === "—"
+      && !el("probe-pos").classList.contains("outside"),
+    `before=${JSON.stringify(beforeReload)} marked=${markedBeforeReload} | `
+      + `after=${JSON.stringify(matrixTexts())} pos=${el("probe-pos").textContent} `
+      + `marked=${el("probe-pos").classList.contains("outside")}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

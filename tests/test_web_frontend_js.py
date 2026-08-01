@@ -579,6 +579,11 @@ _MUTATIONS = [
             # 領域内なので、印は付いたままにならず消える（対角線上に置かない
             # 理由がこれである）。
             "outside the active region is marked as such",
+            # And the check that watches *when* the marker moves needs a marked
+            # pixel to watch; with the coordinates swapped there is not one.
+            # 印がいつ動くかを見るチェックは、印の付く画素が要る。転置すると
+            # そのような画素が無くなる。
+            "the marker stays with the numbers it disclaims",
         ),
         id="hover_probe_transposes_row_and_col",
     ),
@@ -669,10 +674,15 @@ _MUTATIONS = [
     ),
     # Relocated rather than deleted: removing the elements would make
     # ``$("range-info")`` null and throw on the first render, which is a loud
-    # failure and not the one this pins. The sidebar is where they used to be,
-    # so this reproduces the layout exactly as it shipped.
+    # failure and not the one this pins. The sidebar block it writes is where
+    # these lines used to live -- not a byte-exact restoration of the pre-branch
+    # page, since ``#perf-ranges`` did not exist before this branch and is
+    # carried along here so the id survives the move.
     # 消すのではなく戻す。要素ごと消すと ``$("range-info")`` が null になって
     # 描画時に例外になり、それは派手な失敗であってここで見たいものではない。
+    # 書き戻す先はこれらの行が元々あった場所だが、ブランチ以前のページの
+    # 完全な復元ではない（``#perf-ranges`` はこのブランチで増えた id であり、
+    # 移動先で消えないよう一緒に運んでいる）。
     pytest.param(
         "probe",
         [
@@ -777,6 +787,121 @@ _MUTATIONS = [
         )],
         ("the view-value panel is dropped where it repeats the matrix",),
         id="the_duplicate_view_value_panel_is_always_shown",
+    ),
+    # ---- and the two ways to ignore the declaration while still passing
+    #
+    # `views/base.py` argues the default must be the showing direction,
+    # `routers/view.py` says the answer is "not derivable from ``kind``", and
+    # `main.js` repeats both -- and until `tri_scalar`'s panel was checked, all
+    # three sentences were unasserted prose. `coef_tiles` (scalar, declares
+    # true) and `surface` (rgb, declares false) cannot tell any of these
+    # implementations apart. A view that is `scalar` and declares nothing --
+    # a residual-error view, say -- loses its only numbers under both.
+    # 宣言を無視したまま通ってしまう2つの実装。`coef_tiles`（scalar・真）と
+    # `surface`（rgb・偽）だけでは、宣言を読む実装と区別が付かない。
+    # scalar で無宣言のビュー（残差ビューなど）は、どちらでも唯一の数値を失う。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  $(\"view-panel\").hidden = state.spec.values_are_matrix === true;",
+            "  $(\"view-panel\").hidden = state.spec.kind === \"scalar\";",
+        )],
+        ("a view that declares nothing about its values keeps its panel",),
+        id="view_value_panel_hidden_by_kind_instead_of_the_declaration",
+    ),
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  $(\"view-panel\").hidden = state.spec.values_are_matrix === true;",
+            "  $(\"view-panel\").hidden = state.spec.values_are_matrix !== false;",
+        )],
+        ("a view that declares nothing about its values keeps its panel",),
+        id="an_undeclared_view_defaults_to_hiding_its_own_values",
+    ),
+    # ---- the readout left describing a matrix that is no longer on screen
+    #
+    # `clearReadout()` at the end of `reload()`. Deleting it broke no check at
+    # all: after loading matrix B the strip kept matrix A's twelve coefficients
+    # and A's out-of-region marker, under the picture of B, until the pointer
+    # moved.
+    # `reload()` 末尾の `clearReadout()`。消しても何も落ちなかった——行列Bを
+    # 読み込んだあとも、帯にはAの12個とAの「領域外」の印が、Bの絵の下に、
+    # ポインタが動くまで残る。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  clearReadout();\n\n  const bytes = payload.data.byteLength;",
+            "\n  const bytes = payload.data.byteLength;",
+        )],
+        ("a load clears the readout instead of leaving the previous matrix's numbers",),
+        id="a_load_leaves_the_previous_matrix_in_the_readout",
+    ),
+    # ---- the marker cleared while the numbers it disclaims were still shown
+    #
+    # `showProbe` writes the heading synchronously and the twelve cells are not
+    # touched until the answer lands, so writing `false` here cleared the marker
+    # over the previous pixel's out-of-region values -- printed in the same
+    # type, colour and precision as real coefficients, for one round trip,
+    # every time the pointer left a masked pixel.
+    # 見出しは同期的に書かれ、セルは応答が来るまで変わらない。ここで `false`
+    # を書くと、前の画素の領域外の値が本物と同じ見た目で残ったまま印だけが
+    # 消える——マスク画素からポインタを動かすたび、1往復ぶん。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  setProbePos(hit.col, hit.row, $(\"probe-pos\").classList.contains(\"outside\"));",
+            "  setProbePos(hit.col, hit.row, false);",
+        )],
+        ("the marker stays with the numbers it disclaims",),
+        id="the_marker_is_cleared_before_the_numbers_it_describes",
+    ),
+    # ---- the readout bound to the newest matrix instead of the drawn one
+    #
+    # `state.matrixId` changes when `POST /session/matrix` answers, seconds
+    # before that matrix's pixels arrive. Reading it here answers hovers about
+    # the matrix still in transfer while the tiles show the previous one --
+    # and `inside_active_region` differs between matrices, so the marker and
+    # the picture disagree for the whole transfer.
+    # `state.matrixId` は POST が返った時点で変わり、その行列の画素が届くのは
+    # 数秒後である。ここでそれを読むと、タイルが前の行列を映している間の
+    # ホバーに転送中の行列が答える。有効領域は行列ごとに違うので、印と絵が
+    # 転送のあいだずっと食い違う。
+    pytest.param(
+        "probe",
+        [("js/main.js", "      const matrixId = state.shownMatrixId;",
+          "      const matrixId = state.matrixId;")],
+        ("a hover during a load asks the matrix on screen",),
+        id="the_readout_probes_the_arriving_matrix_not_the_drawn_one",
+    ),
+    # ---- the named grid rows, whose absence is invisible everywhere else
+    #
+    # `body`'s template is positional and `#space-note` is `hidden` for a
+    # projector-space matrix, so without these five lines every band after it
+    # moves up one row and the `1fr` lands on the readout: a blank band under
+    # the strip, and a tile height equal to the sidebar's content -- i.e.
+    # decided by how many controls the current view declares. Deleting them
+    # passed every check in every scenario.
+    # `body` のテンプレートは位置で決まり、`#space-note` は投影座標の行列では
+    # `hidden` になるため、この5行が無いと以降の段が1行ずつ繰り上がり `1fr` が
+    # 読み取り欄に載る（帯の下の空白と、サイドバーの内容で決まるタイル高）。
+    # 消しても全シナリオが通っていた。
+    pytest.param(
+        "probe",
+        [(
+            "style.css",
+            ".toolbar { grid-row: 1; }\n"
+            "#space-note { grid-row: 2; }\n"
+            "main { grid-row: 3; }\n"
+            ".readout { grid-row: 4; }\n"
+            "footer#status { grid-row: 5; }\n",
+            "",
+        )],
+        ("each band of the page is placed in a named grid row",),
+        id="the_page_bands_fall_back_to_document_order",
     ),
     # ---- the status line printing what is already on screen
     #
@@ -895,7 +1020,14 @@ _MUTATIONS = [
             "        setProbePos(want.col, want.row, body.inside_active_region === false);\n",
             "",
         )],
-        ("outside the active region is marked as such",),
+        (
+            "outside the active region is marked as such",
+            # The marker never comes on at all, so the check that watches it
+            # survive a pending answer has nothing to watch either.
+            # 印がそもそも一度も付かないので、応答待ちのあいだ印が残ることを
+            # 見るチェックにも見るものが無くなる。
+            "the marker stays with the numbers it disclaims",
+        ),
         id="readout_never_says_a_pixel_is_outside_the_active_region",
     ),
 ]

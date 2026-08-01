@@ -86,13 +86,20 @@ export async function listViews() {
 // One pixel's 4x3 coefficients. The matrix itself never crosses the wire --
 // see routers/session.py::probe_matrix for why this is a point query.
 //
-// Non-finite coefficients arrive as `null`, deliberately: the matrix carries
-// NaN everywhere outside the active projection region, which on the real one
-// is about three quarters of the frame, so `null` is the ordinary answer for
-// most pixels rather than a failure.
+// Non-finite coefficients arrive as `null`, deliberately -- see
+// routers/session.py::_finite_or_none. That is a contract for matrices that
+// carry NaN, not a description of the ones loaded here: the stored array is
+// finite everywhere, including outside the active projection region (measured
+// on data/linear_pipeline_1080/matrices_linear_gamma.npy: zero non-finite
+// values against 74.86% of pixels outside the region). The NaN on screen is
+// written by the views at render time, which is why the readout has its own
+// out-of-region marker rather than letting a `null` stand for it.
 //
 // 1画素分の4x3係数だけを取る。行列本体は線に乗せない。非有限係数は `null` で
-// 届く（有効投影領域の外はNaNであり、実機では全画素の約75%がそれに当たる）。
+// 届くが、それはNaNを持ちうる行列のための契約であって、ここで読んでいる行列の
+// 説明ではない。保存された配列は有効投影領域の外も含めて全て有限である
+// （実測: 非有限値0個、領域外は全画素の74.86%）。画面上のNaNはビューが描画時に
+// 書いているものであり、読み取り欄が独自の「領域外」の印を持つ理由がこれである。
 export async function probeMatrix(matrixId, row, col) {
   const res = await fetch(
     `/api/matrix/${encodeURIComponent(matrixId)}/probe?row=${row}&col=${col}`,

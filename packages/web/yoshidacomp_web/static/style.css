@@ -100,11 +100,21 @@ main {
 .tilepane { background: var(--bg); display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .sidebar { background: var(--panel); padding: 12px; overflow-y: auto; }
 
-/* Tile grid: a header row of output labels, then 4 rows of input labels. */
+/* Tile grid: a header row of output labels, then one row per input label.
+   The two `grid-template-*` are deliberately absent, for the same reason as
+   `.probe-grid` below: js/main.js's buildGrid() writes both inline on every
+   build, including the one at startup, and an inline style wins -- so a value
+   here would be dead text that reads like the live one. It also cannot be
+   written correctly here: the shape follows whatever view is on screen (12
+   coefficient tiles, or one RGB tile), and a 4x3 in the sheet is right for one
+   of them.
+   `grid-template-*` はここに書かない（`.probe-grid` と同じ理由）。
+   js/main.js の buildGrid() が起動時を含む毎回インラインで設定し、インライン
+   が優先されるため、ここに書けば「生きているように見える死んだ記述」になる。
+   そもそも正しく書けない——並びは表示中のビューで変わる（12枚の係数タイルか、
+   1枚のRGBタイルか）ので、4x3 の直値はそのうち片方でしか正しくない。 */
 .tile-grid {
   flex: 1; min-height: 0; display: grid; gap: 3px; padding: 6px;
-  grid-template-columns: var(--rowhead) repeat(3, minmax(0, 1fr));
-  grid-template-rows: auto repeat(4, minmax(0, 1fr));
 }
 .corner { font-size: 10.5px; color: var(--muted); align-self: end; padding-bottom: 3px; }
 .col-head {
