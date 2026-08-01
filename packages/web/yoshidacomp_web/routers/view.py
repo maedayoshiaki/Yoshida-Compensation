@@ -10,7 +10,7 @@ import numpy as np
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from ..deps import require_matrix
-from ..views import REGISTRY
+from ..views import REGISTRY, ViewNotApplicable
 
 router = APIRouter()
 
@@ -100,7 +100,32 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
         else:
             params[p.name] = raw
 
-    result = spec.render(context, params)
+    # A view may refuse the matrix it was handed. ``surface`` does, for a
+    # camera-space one: the work is one 3x3 solve per pixel and camera space is
+    # ~16x the pixels of the projector frame, so it would be tens of seconds and
+    # gigabytes for an answer whose active-region mask cannot even run (see
+    # ``views/surface.py``). Refusing with a message beats both a bare 500 and a
+    # thrashing machine -- ``static/js/api.js::fetchView`` reads the ``detail``
+    # out of this body and shows it as the status line, so the user is told
+    # which matrix to load instead.
+    #
+    # ``ViewNotApplicable`` only, deliberately not ``ValueError``. Views are
+    # numpy code and numpy raises ``ValueError`` for a broadcast or reshape
+    # mismatch, which is a server bug; mapping that to 400 would blame the
+    # request and hand over a raw numpy message as the reason. A bug stays a
+    # 500. See ``views/base.py::ViewNotApplicable``.
+    #
+    # ビューが行列そのものを断ることがある（``surface`` はカメラ座標を断る）。
+    # 理由付きで断るほうが、素の500よりも、実行して機械を殴るよりもよい。
+    # ``static/js/api.js::fetchView`` はこの本文から ``detail`` を取り出して
+    # ステータス行に出すので、利用者は「どの行列を読めばよいか」を知れる。
+    # ``ValueError`` ではなく ``ViewNotApplicable`` だけを写すのは、numpy が
+    # 形状の不整合（＝サーバのバグ）にも ``ValueError`` を使うためである。
+    # バグは500のままにする。
+    try:
+        result = spec.render(context, params)
+    except ViewNotApplicable as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     height, width = result.data.shape[0], result.data.shape[1]
     channels = result.data.shape[2] if result.data.ndim == 3 else 1
 
@@ -124,11 +149,44 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
             ),
         )
 
-    body = np.ascontiguousarray(result.data, dtype="<f4").tobytes()
+    # Serialise as planar (C, H, W). The client uploads one channel per texture,
+    # so a planar body lets it take a zero-copy subarray instead of walking the
+    # array with a stride. Measured: the strided de-interleave was 93% of the
+    # client's "GPU upload" time for a 95 MB payload.
+    # planar (C, H, W) で直列化する。クライアントはチャンネルごとにテクスチャを
+    # 作るので、planar ならストライド走査ではなく subarray のゼロコピーで済む。
+    # 実測では 95MB のペイロードでストライド走査がアップロード時間の93%を占めた。
+    #
+    # ``np.moveaxis`` returns a view; ``ascontiguousarray`` performs the single
+    # copy. The reorder happens once here rather than as twelve strided walks on
+    # the client.
+    # ``np.moveaxis`` は view を返し、実際の複製は ``ascontiguousarray`` が行う。
+    #
+    # This line is not free, and is in fact the most expensive operation in the
+    # request: the transpose is ~130 ms of a ~590 ms 1080p load, against ~25 ms
+    # for the old contiguous copy. Measured A/B (1920x1080x12 float32, 94.9 MB,
+    # RTX 3060 Ti / D3D11, median of 4 warm runs):
+    #
+    #   uploadMs  165 -> 13 ms      fetchMs  480 -> 577 ms
+    #   totalMs   651 -> 590 ms     jsHeap   381 -> 191 MB
+    #
+    # So the de-interleave did not disappear, it moved here; wall clock improved
+    # by only 9%. What justifies it is the heap: the client no longer allocates
+    # twelve scratch planes, which is 95 MB at 1080p and ~1.5 GB for the
+    # camera-space matrix a later plan warps -- and that one already used 71% of
+    # the JS heap before this change. Do not "optimise" this back to interleaved
+    # on the strength of fetchMs alone.
+    # この行はリクエスト中で最も高い（転置に約130ms、従来の連続コピーは約25ms）。
+    # 実測は上記の通りで、総時間の改善は9%にとどまる。正当化しているのは
+    # ヒープ側で、クライアントが12枚の作業用平面を確保しなくなる。1080pで95MB、
+    # 後続計画が扱うカメラ座標行列では約1.5GBに相当する（同行列は本変更前で
+    # JSヒープの71%を使っていた）。fetchMs だけを見て戻してはならない。
+    body = np.ascontiguousarray(np.moveaxis(result.data, 2, 0), dtype="<f4").tobytes()
     headers = {
         "X-Height": str(height),
         "X-Width": str(width),
         "X-Channels": str(channels),
+        "X-Layout": "planar",
         "X-Kind": spec.kind,
         "X-Vmin": repr(float(result.vmin)),
         "X-Vmax": repr(float(result.vmax)),

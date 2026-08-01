@@ -9,12 +9,15 @@
 //    soft -- that single line is the reason this project is not PyQt6.
 //  - laggy zoom : pan/zoom are just uniform (scale/translate) changes on one
 //    textured quad; nothing re-rasterizes on the CPU.
-//  - banding    : the texture holds float32 (R32F); colour mapping, sRGB
-//    encoding and dithering happen in the shader from full precision.
+//  - banding    : the texture holds float32 (R32F, or RGB32F for an rgb view);
+//    colour mapping, sRGB encoding and dithering happen in the shader from
+//    full precision.
 //
-// Differences from the reference: no ROI machinery, single-channel extraction
-// from an interleaved (H, W, C) array, and u_vmin/u_vmax/u_colormap in place of
-// u_bandLo/u_bandHi/u_mode/u_bright.
+// Differences from the reference: no ROI machinery, channel extraction from a
+// planar (C, H, W) -- or, still supported, interleaved (H, W, C) -- array, and
+// u_vmin/u_vmax/u_colormap in place of u_bandLo/u_bandHi/u_bright. This
+// shader's u_mode is its own thing (scalar vs rgb), unrelated to the
+// reference's u_mode.
 //
 // この設計が「なぜこの形か」は、うっかり元に戻しやすいので日本語でも残す。
 //  - HiDPIのぼやけ: キャンバスのバッキングストアは *デバイス* ピクセル
@@ -27,6 +30,7 @@
 //    ディザはすべてシェーダ内でフル精度から行う。
 
 import { VERT_SRC, FRAG_SRC } from "./shaders.js";
+import { LAYOUT_PLANAR, traitsFor } from "./contract.js";
 
 // The single source of truth for the NaN mask colour (linear 0..1 RGB, as the
 // shader's u_nanColor wants it). It had three copies -- this default, main.js's
@@ -48,6 +52,50 @@ export const NAN_COLOR = Object.freeze([0.85, 0.1, 0.75]);
 export function nanColorCss(color = NAN_COLOR) {
   const to8 = (v) => Math.round(Math.min(Math.max(v, 0), 1) * 255);
   return `rgb(${to8(color[0])}, ${to8(color[1])}, ${to8(color[2])})`;
+}
+
+// Planar (C, H, W) -> interleaved (H, W, 3), for the rgb texture.
+//
+// This copy is unavoidable and it is the only one on this path: WebGL textures
+// are interleaved, the wire format is planar, so somebody has to transpose.
+// Three channels make it a quarter of the twelve-channel de-interleave that
+// moving the wire format to planar removed, and it happens once per upload --
+// it must never migrate into draw(), which the display controls call on every
+// slider tick. An already-interleaved body with exactly three channels is the
+// texture's own order and is uploaded with no copy at all.
+//
+// planar (C, H, W) を (H, W, 3) へ詰め替える。WebGLのテクスチャはインタリーブ
+// しか受け付けないので、この1回だけは避けられない。3チャンネルなので12chの
+// デインターリーブの1/4で済む。setImage の中だけで行い、draw() へ持ち込まない
+// こと（表示コントロールは毎回 draw() を呼ぶ）。既にインタリーブで3チャンネル
+// なら並びはそのままなので複製しない。
+function packRgb(data, width, height, channels, layout) {
+  const n = width * height;
+  if (layout !== LAYOUT_PLANAR) {
+    // An interleaved body with anything other than three channels used to be
+    // handled here by taking channels 0/1/2 and dropping the rest. That branch
+    // was unreachable -- requireRgbHasThreeChannels refuses a non-3-channel rgb
+    // view from the registry, before the transfer -- and if it ever *did* run,
+    // silently picking three of N channels and calling the result "the
+    // projection surface's colour" is the worst available answer. Say so.
+    // インタリーブかつ3チャンネル以外を、0/1/2番だけ取って処理する分岐が
+    // ここにあったが到達不能であり（requireRgbHasThreeChannels が転送前に
+    // 断る）、仮に走ったとしてもN個から3個を黙って選んで「投影面の色」と
+    // 称するのは最悪の答えである。明示的に失敗させる。
+    if (channels !== 3) {
+      throw new Error(
+        `rgb ビューにチャンネル数 ${channels} のインタリーブ本体が届きました` +
+        "（rgb は R/G/B の3チャンネルのみ描画できます）。"
+      );
+    }
+    return data;
+  }
+  const out = new Float32Array(n * 3);
+  for (let c = 0; c < 3; c++) {
+    const base = c * n;
+    for (let i = 0, o = c; i < n; i++, o += 3) out[o] = data[base + i];
+  }
+  return out;
 }
 
 function compile(gl, type, src) {
@@ -80,7 +128,8 @@ export class GLView {
     this.prog = prog;
     this.u = {};
     for (const n of ["u_imageSize", "u_scale", "u_translate", "u_resolution", "u_tex",
-      "u_vmin", "u_vmax", "u_colormap", "u_exposure", "u_gamma", "u_dither", "u_nanColor"]) {
+      "u_vmin", "u_vmax", "u_mode", "u_colormap", "u_exposure", "u_gamma", "u_dither",
+      "u_nanColor"]) {
       this.u[n] = gl.getUniformLocation(prog, n);
     }
 
@@ -140,37 +189,85 @@ export class GLView {
     this._dprMq.addEventListener("change", this._onDpr);
   }
 
-  // img: { data, width, height, channels, channel }
+  // img: { data, width, height, channels, channel, layout, kind }
   //
-  // `data` is the whole interleaved (H, W, channels) array as fetched. We slice
-  // one plane out of it and upload that as R32F. The caller keeps `data` alive
-  // on the CPU so pixel probing never needs a server round-trip.
-  // data は (H, W, channels) のインターリーブ配列そのもの。1面だけ切り出して
-  // R32F で載せる。data は呼び出し側が保持し、画素読み取りはサーバに行かない。
+  // `data` is the whole multi-channel array as fetched, in either layout. The
+  // caller keeps it alive on the CPU so pixel probing never needs a server
+  // round-trip.
+  //
+  // `kind` decides what comes out of it, through contract.js's trait table
+  // rather than through a test here. "scalar" slices one plane and uploads it
+  // as R32F, one tile per channel. "rgb" takes three channels as a single
+  // colour and uploads them as one RGB32F texture; the shader is told which via
+  // u_mode, which is another entry in the same row so the two cannot disagree.
+  // RGB32F is texture-only in WebGL2 (not colour-renderable), which is all this
+  // needs -- and it is never filtered, see the NEAREST note below.
+  //
+  // An unknown `kind` throws here rather than being normalised to scalar. The
+  // old `img.mode === "rgb" ? "rgb" : "scalar"` was one of the five places that
+  // silently answered "scalar" for anything it did not recognise.
+  //
+  // data は取得した多チャンネル配列そのもの（layout はどちらでもよい）。
+  // 何をするかは contract.js の特性表が決める。scalar なら1面を切り出して
+  // R32F、rgb なら3チャンネルを1枚の RGB32F に詰める。シェーダへ伝える
+  // u_mode も同じ行にあるので食い違いようがない。未知の kind は scalar へ
+  // 丸めず投げる（以前の三項演算子は、知らない値を黙って scalar と答える
+  // 5か所のうちの1つだった）。
   setImage(img) {
     const gl = this.gl;
     const width = img.width, height = img.height;
     const channels = img.channels ?? 1;
     const channel = img.channel ?? 0;
+    const traits = traitsFor(img.kind, "GLView.setImage");
     const previous = this.image;
 
     let plane;
-    if (channels === 1) {
+    if (traits.packed) {
+      // One transpose, here, never in draw(). See packRgb.
+      plane = packRgb(img.data, width, height, channels, img.layout);
+    } else if (channels === 1) {
       plane = img.data;
+    } else if (img.layout === LAYOUT_PLANAR) {
+      // Planar (C, H, W): the channel is already contiguous. subarray shares
+      // the buffer, so this costs nothing.
+      // planar (C, H, W) ならチャンネルは既に連続しており、subarray は
+      // バッファを共有するのでコストがかからない。
+      const n = width * height;
+      plane = img.data.subarray(channel * n, (channel + 1) * n);
     } else {
+      // Interleaved (H, W, C): one strided walk per channel. Reached only when
+      // the response *declares* `X-Layout: interleaved`; api.js no longer
+      // infers this layout from a missing header, so nothing lands here by
+      // accident. Note the `channels === 1` case never reaches either branch:
+      // a single-channel body is already the plane and is uploaded without a
+      // copy.
+      // インタリーブ (H, W, C) はチャンネルごとのストライド走査になる。ここへ
+      // 来るのは応答が明示的に `X-Layout: interleaved` を申告した場合だけで、
+      // api.js はヘッダの欠落からこの配置を推測しない（事故で落ちてこない）。
+      // なお `channels === 1` はどちらの分岐にも入らず、複製なしでそのまま載る。
       const n = width * height;
       plane = new Float32Array(n);
       for (let i = 0, k = channel; i < n; i++, k += channels) plane[i] = img.data[k];
     }
 
-    this.image = { width, height, channel };
+    this.image = { width, height, channel, kind: img.kind, traits };
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+    // NEAREST, in both modes. LINEAR would interpolate across the mask
+    // boundary and smear a NaN into its finite neighbours -- the mask exists
+    // precisely so those pixels are never given a plausible value.
+    // 両モードとも NEAREST。LINEAR にすると NaN が隣接画素へにじみ、
+    // マスク境界が汚染される。
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, plane);
+    // The texture format comes from the same trait row as `packed` above, so
+    // "packed three channels" and "uploaded as RGB32F" cannot come apart.
+    // テクスチャ形式は上の `packed` と同じ行から来るので、詰め方と形式が
+    // 食い違うことはない。
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl[traits.texture.internal], width, height, 0,
+      gl[traits.texture.format], gl.FLOAT, plane);
 
     // Only reframe when there is nothing sensible to keep. Re-fetching the
     // same matrix with a different server-side parameter replaces the pixels
@@ -270,6 +367,12 @@ export class GLView {
     const p = this.params;
     gl.uniform1f(this.u.u_vmin, p.vmin);
     gl.uniform1f(this.u.u_vmax, p.vmax);
+    // Not a display parameter: the mode follows the texture that was uploaded,
+    // so it comes from this.image's own traits rather than from params. Putting
+    // it in params would let a control set it and read an R32F texture as RGB.
+    // モードはアップロード済みテクスチャに従うので params ではなく image の
+    // 特性から取る。params に置くとコントロールから切り替えられてしまう。
+    gl.uniform1i(this.u.u_mode, this.image.traits.uMode);
     gl.uniform1i(this.u.u_colormap, p.colormap | 0);
     gl.uniform1f(this.u.u_exposure, p.exposure);
     gl.uniform1f(this.u.u_gamma, p.gamma);
