@@ -545,19 +545,87 @@ _MUTATIONS = [
         (
             # Listed in full rather than narrowed: this one guard is upstream of
             # every value the table ever shows, so the breadth is the finding.
-            # The three checks that survive are the ones that do not depend on
-            # *which* pixel was asked for -- the null render (its fixture sits
-            # at (0, 0), where the two orderings coincide) and the view-value
-            # panel (which never leaves the client).
+            # What survives is what does not depend on *which* pixel was asked
+            # for -- the view-value panel (which never leaves the client), the
+            # refusal path (out of range either way round) and the view
+            # transfer. The null fixture is deliberately at (row 1, col 3)
+            # rather than on the diagonal, so it fails here too instead of
+            # being indifferent to the swap.
             # 1つのガードが表に出る全ての値の上流にあるため、この広さ自体が事実。
-            # 生き残る3件は「どの画素を訊いたか」に依存しないもの——(0,0) に置いた
-            # null の描画と、そもそもサーバへ行かないビュー値パネルである。
+            # 生き残るのは「どの画素を訊いたか」に依存しないもの。null の
+            # フィクスチャは対角線上ではなく (row 1, col 3) に置いてあるので、
+            # 入れ替えに無関心ではなくここでも落ちる。
             "a point query for the hovered pixel",
             "the readout fills all twelve cells from the point query, row-major",
+            "a null coefficient renders as a masked NaN cell",
             "a fast drag costs one point query in flight",
             "answered after its claim was retired",
         ),
         id="hover_probe_transposes_row_and_col",
+    ),
+    # ---- the hover series merged back into the view series
+    #
+    # The one property Task 2's brief states in bold, and the one nothing
+    # asserted until this entry existed: replacing every live use of
+    # ``probeSeq`` with ``state.reqId`` passed all 76 checks in all five
+    # scenarios, because every other hover in the harness follows a
+    # ``settled()`` and so never overlaps a transfer.
+    #
+    # The damage is silent and it is not a corner case. ``reload()`` drops its
+    # payload when ``isStale(req)``, so one mousemove during a transfer retires
+    # the transfer that is still arriving: the tiles stay on the previous
+    # matrix and the status line stays on 「ビュー取得中…」 for good. On the
+    # 1080p matrix the transfer takes seconds with the pointer over the image
+    # the whole time, so this is every load, not an unlucky one.
+    #
+    # 読み取り側の系列をビュー側の ``reqId`` に統合する変異。ブリーフが太字で
+    # 述べていた唯一の性質でありながら、この項目ができるまで5シナリオ76件の
+    # どれも検出しなかった（他のホバーはすべて ``settled()`` のあとで転送と
+    # 重ならないため）。転送中の mousemove 1回でその転送が失効し、タイルは前の
+    # 行列のまま、ステータス行は「ビュー取得中…」のまま固まる。
+    pytest.param(
+        "probe",
+        [
+            (
+                "main.js",
+                "  state.probeSeq += 1;\n"
+                "  state.probeWanted = { col: hit.col, row: hit.row, seq: state.probeSeq };",
+                "  state.reqId += 1;\n"
+                "  state.probeWanted = { col: hit.col, row: hit.row, seq: state.reqId };",
+            ),
+            (
+                "main.js",
+                "        if (want.seq !== state.probeSeq) continue;   // the pointer has moved on",
+                "        if (want.seq !== state.reqId) continue;   // the pointer has moved on",
+            ),
+            (
+                "main.js",
+                "        if (want.seq !== state.probeSeq) continue;\n        clearMatrixCells();",
+                "        if (want.seq !== state.reqId) continue;\n        clearMatrixCells();",
+            ),
+            (
+                "main.js",
+                "  clearMatrixCells();\n  state.probeSeq += 1;\n  state.probeWanted = null;",
+                "  clearMatrixCells();\n  state.reqId += 1;\n  state.probeWanted = null;",
+            ),
+        ],
+        ("hovering during a view transfer does not stall the tiles",),
+        id="hover_series_shares_the_view_request_counter",
+    ),
+    # ---- the view-value panel's layout branch, forced the other way
+    #
+    # ``probe_assumes_every_body_is_planar`` pins one direction; this pins the
+    # other, matching how ``percentileAbsPerChannel``'s two walks each have
+    # their own entry. Both directions are needed for the same reason there:
+    # forcing the branch either way still prints twelve plausible numbers, and
+    # only the correspondence between a label and its channel is lost.
+    # もう一方の向きを固定する（``percentileAbsPerChannel`` と同じ扱い）。
+    # どちらへ倒してももっともらしい数値は出て、ラベルと中身の対応だけが失われる。
+    pytest.param(
+        "views",
+        [("main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = false;")],
+        ("planar body: the hover readout",),
+        id="view_values_read_a_planar_body_as_interleaved",
     ),
 ]
 

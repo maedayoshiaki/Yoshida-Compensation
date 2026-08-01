@@ -570,16 +570,41 @@ function showMatrixValues(values) {
 
 // The status line is shared with the loader and a hover fires dozens of times
 // a second, so repeating one failure would strobe it. Only a message that
-// differs from the last one is worth writing; a success just disarms it,
-// without clobbering whatever the loader put there.
+// differs from the last one is worth writing.
+//
+// A success has to put the line back, not merely stop writing to it: leaving
+// it would mark the bar as an error over a readout that is working again, for
+// as long as nothing else happens to write there -- which, once a matrix is
+// loaded and the user is only hovering, is indefinitely. So the sentence the
+// line held before the readout claimed it is restored. Only if it is still the
+// sentence *this* wrote, though; if the loader has since taken the line, that
+// is the newer truth and it stays.
+//
 // ステータス行は読み込みと共用で、ホバーは毎秒何十回も起きるため、同じ失敗を
-// 連投すると点滅する。前回と違うときだけ書き、成功時は解除するだけにする。
-let lastProbeError = null;
+// 連投すると点滅する。書くのは前回と違うときだけ。復旧時は「書かない」では
+// 足りず、行を元に戻す必要がある——放置すると、既に直っている読み取りについて
+// 行が赤いまま残り、他の誰かが書くまで（行列を読み込んだあとホバーしている
+// だけなら永久に）そのままになる。ただし戻すのは、行の内容がまだこちらの
+// 書いた文である場合に限る。読み込み側が既に書いていればそちらが新しい。
+let lastProbeError = null;      // the failure the readout currently claims the line for
+let probeErrorText = null;      // exactly what was written, to tell whether it is still ours
+let statusBeforeProbe = null;   // what the line said before the readout took it
 
 function reportProbeError(message) {
   if (message === lastProbeError) return;
-  lastProbeError = message;
-  if (message) status(`読み取りに失敗: ${message}`, true);
+  if (message) {
+    if (lastProbeError === null) statusBeforeProbe = $("status").textContent;
+    lastProbeError = message;
+    probeErrorText = `読み取りに失敗: ${message}`;
+    status(probeErrorText, true);
+    return;
+  }
+  lastProbeError = null;
+  if (probeErrorText !== null && $("status").textContent === probeErrorText) {
+    status(statusBeforeProbe ?? "");
+  }
+  probeErrorText = null;
+  statusBeforeProbe = null;
 }
 
 // Claim the readout for this pixel, and fetch unless something is already in

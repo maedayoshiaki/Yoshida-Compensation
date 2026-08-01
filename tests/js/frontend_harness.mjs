@@ -123,7 +123,28 @@ function makeEl(tag = "div") {
     width: 0, height: 0, clientWidth: 480, clientHeight: 240,
     children: [],
     style: { setProperty(k, v) { el.style[k] = v; } },
-    classList: { toggle() {}, add() {}, remove() {} },
+    // Backed by `className`, the way the DOM backs it, rather than swallowed.
+    //
+    // It used to be three empty functions, which made one thing invisible from
+    // out here: `status(msg, true)` marks the line by toggling `error`, and
+    // with the calls dropped a status bar left red over a failure that has
+    // since been recovered from was indistinguishable from a clean one. The
+    // stub must not be the reason a behaviour cannot be checked.
+    // `className` を裏付けにする（DOMと同じ）。空関数のままだと
+    // `status(msg, true)` の付ける `error` が外から見えず、「復旧済みなのに
+    // 赤いままのステータス行」を検出できない。検証できない理由がスタブ側に
+    // あってはならない。
+    classList: {
+      _tokens: () => String(el.className).split(/\s+/).filter(Boolean),
+      _set(tokens) { el.className = [...new Set(tokens)].join(" "); },
+      contains(name) { return this._tokens().includes(name); },
+      add(...names) { this._set([...this._tokens(), ...names]); },
+      remove(...names) { this._set(this._tokens().filter((t) => !names.includes(t))); },
+      toggle(name, force) {
+        const on = force === undefined ? !this.contains(name) : !!force;
+        if (on) this.add(name); else this.remove(name);
+      },
+    },
     appendChild(child) { el.children.push(child); return child; },
     addEventListener(name, fn) { (listeners[name] ||= []).push(fn); },
     removeEventListener() {},
@@ -520,6 +541,23 @@ globalThis.fetch = async (url, options) => {
         data.fill((c + 1) * tag, c * H * W, (c + 1) * H * W);
       }
     }
+    // One masked sample: `surface`'s green channel at (row 3, col 0).
+    //
+    // Every other value in every fixture is finite, so the view-value panel's
+    // own mask class had no execution anywhere and could have been deleted
+    // with nothing failing. Masked pixels are not exotic in this viewer --
+    // coef_tiles and surface both write NaN outside the active projection
+    // region, which on the real matrix is most of the frame -- so the panel
+    // has to render one, and be seen to.
+    //
+    // Placed where nothing else looks: the rgb upload assertions read the
+    // first six elements, the first and the last, and this is none of them.
+    // 1つだけ非有限の標本を置く（`surface` の緑チャンネル、row 3 / col 0）。
+    // 他のフィクスチャは全て有限なので、ビュー値パネルのマスク用クラスは
+    // どこからも実行されず、消しても何も落ちない状態だった。有効投影領域の
+    // 外は coef_tiles も surface も NaN を書くため、マスクされた画素は珍しく
+    // ない。rgbの転送検査が見る先頭6要素・先頭・末尾のいずれでもない位置に置く。
+    if (key === "surface") data[1 * H * W + 3 * W + 0] = NaN;
     const headers = {
       "X-Height": String(H), "X-Width": String(W),
       "X-Channels": String(spec.channels), "X-Kind": spec.kind,
@@ -604,6 +642,7 @@ const expectedPackedRgb = (tag) => [{
 const viewValueItems = () => el("view-values").children;
 const viewValueLabels = () => viewValueItems().map((item) => item.children[0].textContent);
 const viewValueNumbers = () => viewValueItems().map((item) => item.children[1].textContent);
+const viewValueClasses = () => viewValueItems().map((item) => item.children[1].className);
 
 // Hover one pixel and read the view-value panel back off the DOM.
 const probeTexts = (col = 2, row = 1) => {
@@ -1303,14 +1342,45 @@ if (SCENARIO === "probe") {
   // する。つまりこれは例外ではなく大半の画素の通常の答えであり、「まだ何も
   // 読んでいない」を意味する「—」ではなく、タイルと同じマスク色で出なければ
   // ならない。
-  PROBE_OVERRIDES.set(probeKey(0, 0), [[null, 1, 2], [3, null, 4], [5, 6, null], [7, 8, 9]]);
-  views[0].onHover({ col: 0, row: 0 });
+  //
+  // Pinned at (row 1, col 3) rather than on the diagonal: a fixture whose two
+  // coordinates are interchangeable is the defect this repository keeps
+  // shipping, and (0, 0) would have made this check indifferent to a
+  // transposed request.
+  // (0,0) ではなく (row 1, col 3) に置く。2つの座標を入れ替えても同じになる
+  // フィクスチャこそ、このリポジトリが繰り返してきた欠陥である。
+  PROBE_OVERRIDES.set(probeKey(1, 3), [[null, 1, 2], [3, null, 4], [5, 6, null], [7, 8, 9]]);
+  views[0].onHover({ col: 3, row: 1 });
   await waitFor(() => matrixTexts()[1] === "1.0000");
   check("a null coefficient renders as a masked NaN cell, not as an empty one",
-    JSON.stringify(matrixTexts()) === JSON.stringify(expectedMatrixTexts(0, 0))
+    JSON.stringify(matrixTexts()) === JSON.stringify(expectedMatrixTexts(1, 3))
       && JSON.stringify(matrixClasses()) === JSON.stringify(
         [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0].map((n) => (n ? "probe-cell nan" : "probe-cell"))),
     `${JSON.stringify(matrixTexts())} ${JSON.stringify(matrixClasses())}`);
+
+  // --- and the view-value panel marks a masked channel the same way
+  //
+  // `surface`'s green channel is NaN at (row 3, col 0); see the fake server.
+  // Without this the panel's mask class has no execution anywhere and could be
+  // deleted with every check still green, leaving a masked channel rendered as
+  // an ordinary number in the one panel that reads the payload directly.
+  // ビュー値パネル側のマスクも見る。これが無いとパネルのマスク用クラスは
+  // どこからも実行されず、消しても全チェックが緑のまま——マスクされた
+  // チャンネルが普通の数値として出るようになる。
+  views[0].onHover({ col: 0, row: 3 });
+  check("the view-value panel marks a masked channel instead of printing it as a number",
+    JSON.stringify(viewValueNumbers()) === JSON.stringify(["1.0000", "NaN", "3.0000"])
+      && JSON.stringify(viewValueClasses())
+        === JSON.stringify(["vv-num", "vv-num nan", "vv-num"]),
+    `${JSON.stringify(viewValueNumbers())} ${JSON.stringify(viewValueClasses())}`);
+  // That hover also issued a point query, and the coalescing means anything
+  // still in flight owns the next request. Let it land before the drag below
+  // starts counting, or the request it counts is the one this hover's answer
+  // fired -- which is a real property of the client, just not the one being
+  // measured there.
+  // 直前のホバーも点クエリを出しており、合流の性質上それが着地するまで次の
+  // 要求はそれが握る。ドラッグの計測を始める前に着地させる。
+  await waitFor(() => matrixTexts()[0] === expectedMatrixTexts(3, 0)[0]);
 
   // --- a fast drag costs two round trips, not one per mousemove
   //
@@ -1400,6 +1470,81 @@ if (SCENARIO === "probe") {
     `before=${JSON.stringify(beforeStale)} mid=${JSON.stringify(midStale)} `
       + `after=${JSON.stringify(afterStale)} pos=${clearedPos} `
       + `cleared=${JSON.stringify(cleared)} afterLeave=${JSON.stringify(afterLeave)}`);
+
+  // --- a refused point query blanks the cells, says why, and hands the line back
+  //
+  // The endpoint refuses an out-of-range pixel with a 400 and an unknown id
+  // with a 404. Neither is reachable by dragging a mouse today -- GLView's
+  // screenToImage rejects coordinates outside the image, and both registered
+  // views render at the matrix's own size -- which is exactly why the path
+  // needs a test rather than exempts it: it is new code that nothing else
+  // executes, and "the table wedged on the last good values" looks identical
+  // to "the table is working" from any screenshot.
+  //
+  // The recovery half matters as much as the failure half. The status bar is
+  // shared with the loader, so a readout that stops writing to it but never
+  // puts it back leaves the whole viewer marked as failed over a hover that
+  // has since succeeded -- and once a matrix is loaded and the user is only
+  // hovering, nothing else ever writes there.
+  //
+  // 範囲外の画素は400、未知のIDは404で断られる。今日どちらもマウス操作では
+  // 到達できない（screenToImage が画像外を弾き、両ビューとも行列と同じ寸法で
+  // 描かれる）——だからこそ検証が要る。誰も実行しない新しい経路であり、しかも
+  // 「直前の値のまま固まった表」は画面写真では「動いている表」と見分けが付かない。
+  // 復旧側も同じくらい重要で、ステータス行は読み込みと共用のため、書くのを
+  // やめるだけで戻さないと、既に成功しているホバーについてビューア全体が
+  // 失敗表示のまま残る（ホバーしているだけなら他に誰も書かない）。
+  views[0].onHover({ col: 3, row: 2 });
+  await waitFor(() => matrixTexts()[0] !== "—");
+  const beforeRefusal = matrixTexts();
+  views[0].onHover({ col: 99, row: 99 });         // outside the matrix -> 400
+  await waitFor(() => /読み取りに失敗/.test(statusText()));
+  const refusedTexts = matrixTexts();
+  const refusedFlagged = el("status").classList.contains("error");
+  const refusedSaid = statusText();
+  views[0].onHover({ col: 3, row: 2 });
+  await waitFor(() => matrixTexts()[0] !== "—");
+  check("a refused point query blanks the cells, says why, and gives the line back on recovery",
+    JSON.stringify(beforeRefusal) !== dashes
+      && JSON.stringify(refusedTexts) === dashes
+      && refusedFlagged && /outside the matrix/.test(refusedSaid)
+      && !/読み取りに失敗/.test(statusText())
+      && !el("status").classList.contains("error"),
+    `before=${JSON.stringify(beforeRefusal)} refused=${JSON.stringify(refusedTexts)} `
+      + `flagged=${refusedFlagged} said=${refusedSaid} `
+      + `recovered=${statusText()} class=${el("status").className}`);
+
+  // --- the hover series must not be the view series
+  //
+  // This is the one property the brief states in bold, and until this check
+  // existed nothing asserted it: merging `probeSeq` into `state.reqId` passed
+  // all 76 checks in all five scenarios, because every other hover in this
+  // harness happens after `settled()` and therefore never overlaps a transfer.
+  //
+  // The damage is silent and total. `reload()` drops its payload when
+  // `isStale(req)`, so one mousemove during a transfer retires the transfer
+  // that is still arriving: the tiles stay on the previous matrix, the status
+  // line stays on 「ビュー取得中…」 forever, and nothing on screen says why.
+  // On the real matrix that transfer takes seconds and the pointer is over
+  // the image the whole time, so this is not a corner -- it is every load.
+  //
+  // ブリーフが太字で述べている唯一の性質であり、このチェックができるまで誰も
+  // 検証していなかった。`probeSeq` を `state.reqId` に統合しても5シナリオ76件が
+  // すべて通ってしまう（他のホバーはすべて `settled()` のあとで、転送と重ならない
+  // ため）。壊れ方は静かで、しかも致命的である。`reload()` は `isStale(req)` で
+  // ペイロードを捨てるので、転送中の mousemove 1回がその転送を失効させる——
+  // タイルは前の行列のまま、ステータス行は「ビュー取得中…」のまま、理由は
+  // どこにも出ない。実機では転送に数秒かかり、その間ポインタは画像の上にある。
+  viewDelayMs.B = 200;
+  clickLoad("B");
+  await sleep(25);
+  check("the view transfer was still in flight when the hover happened",
+    !resolved.has("view:B"), `resolvedB=${resolved.has("view:B")}`);
+  for (let col = 0; col < 4; col++) views[0].onHover({ col, row: 2 });
+  await settled();
+  check("hovering during a view transfer does not stall the tiles",
+    payloadTag() === 2 && /表示中/.test(statusText()),
+    `payload tag=${payloadTag()} (A=1, B=2) status=${statusText()}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);
