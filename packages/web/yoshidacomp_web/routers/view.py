@@ -136,6 +136,26 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
     # copy. The reorder happens once here rather than as twelve strided walks on
     # the client.
     # ``np.moveaxis`` は view を返し、実際の複製は ``ascontiguousarray`` が行う。
+    #
+    # This line is not free, and is in fact the most expensive operation in the
+    # request: the transpose is ~130 ms of a ~590 ms 1080p load, against ~25 ms
+    # for the old contiguous copy. Measured A/B (1920x1080x12 float32, 94.9 MB,
+    # RTX 3060 Ti / D3D11, median of 4 warm runs):
+    #
+    #   uploadMs  165 -> 13 ms      fetchMs  480 -> 577 ms
+    #   totalMs   651 -> 590 ms     jsHeap   381 -> 191 MB
+    #
+    # So the de-interleave did not disappear, it moved here; wall clock improved
+    # by only 9%. What justifies it is the heap: the client no longer allocates
+    # twelve scratch planes, which is 95 MB at 1080p and ~1.5 GB for the
+    # camera-space matrix a later plan warps -- and that one already used 71% of
+    # the JS heap before this change. Do not "optimise" this back to interleaved
+    # on the strength of fetchMs alone.
+    # この行はリクエスト中で最も高い（転置に約130ms、従来の連続コピーは約25ms）。
+    # 実測は上記の通りで、総時間の改善は9%にとどまる。正当化しているのは
+    # ヒープ側で、クライアントが12枚の作業用平面を確保しなくなる。1080pで95MB、
+    # 後続計画が扱うカメラ座標行列では約1.5GBに相当する（同行列は本変更前で
+    # JSヒープの71%を使っていた）。fetchMs だけを見て戻してはならない。
     body = np.ascontiguousarray(np.moveaxis(result.data, 2, 0), dtype="<f4").tobytes()
     headers = {
         "X-Height": str(height),
