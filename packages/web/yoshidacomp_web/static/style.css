@@ -55,6 +55,13 @@ button {
 button:hover { border-color: var(--accent); }
 button.primary { background: var(--accent); color: #fff; border-color: var(--accent); }
 button.primary:hover { filter: brightness(1.08); }
+/* Server-side parameters are staged, not applied, until 適用 is pressed; the
+   ring says the control values on screen are not the ones being displayed.
+   サーバ側パラメータは 適用 まで反映されない。画面上の値と表示中の値が
+   食い違っていることを縁で示す。 */
+button.primary.pending {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 35%, transparent);
+}
 
 .note {
   padding: 7px 14px; font-size: 12.5px; line-height: 1.5;

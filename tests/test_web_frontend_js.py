@@ -115,15 +115,21 @@ def test_out_of_order_responses_cannot_cross_metadata_and_payload() -> None:
 
 
 def test_view_selector_reaches_a_second_view_and_refuses_unknown_kinds() -> None:
-    """A registered view must be reachable, and an unknown kind must fail (F4).
+    """A registered view must be reachable; unknown kinds and layouts must fail.
 
     ``REGISTRY`` is insertion-ordered with ``coef_tiles`` first, so before the
     selector existed a newly registered view could not be selected at all and
     the spec's "register in Python, no JavaScript change" promise was false on
-    its first use. The ``kind`` half matters differently: this frontend
-    implements ``scalar`` only, and drawing ``rgb`` or ``categorical`` data
-    with the scalar colormap would produce plausible pixels for a view it does
-    not understand.
+    its first use.
+
+    The two contract guards matter differently. This frontend implements
+    ``scalar`` and ``rgb``; drawing ``categorical`` data with the scalar
+    colormap would produce plausible pixels for a view it does not understand.
+    And ``X-Layout`` decides four separate index calculations, so a value
+    outside ``{planar, interleaved}`` -- a header a proxy rewrote, or "Planar"
+    with a capital P -- would send all four to the interleaved walk at once and
+    have the tiles, the hover readout and the per-tile ranges corroborate one
+    another about the wrong channels.
     """
     _assert_all_passed(_run_harness(_STATIC_DIR, "views"))
 
@@ -203,7 +209,7 @@ _MUTATIONS = [
     ),
     pytest.param(
         "views",
-        [("main.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
+        [("contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
         ("unsupported kind is refused", "leaves state.payload identity unchanged"),
         id="unsupported_kind_renders_as_scalar",
     ),
@@ -225,6 +231,7 @@ _MUTATIONS = [
             "its ranges are shared, not per-tile",
             "a response without X-Layout falls back to interleaved",
             "interleaved body: per-tile ranges follow each channel",
+            "an unknown X-Layout is refused with a message naming it",
         ),
         id="view_selector_removed",
     ),
@@ -235,7 +242,7 @@ _MUTATIONS = [
     # rgbビューの2つの要素を1つずつ外す。どちらも描画自体は成功してしまう。
     pytest.param(
         "rgb",
-        [("main.js", '  if (payload.kind === "rgb" && payload.channels === 3) {', "  if (false) {")],
+        [("main.js", "  if (traits.singleTile && payload.channels === 3) {", "  if (false) {")],
         (
             "draws one tile",
             # The three tiles share one range object, so applyDisplay reads
@@ -250,7 +257,7 @@ _MUTATIONS = [
     ),
     pytest.param(
         "rgb",
-        [("main.js", '        mode: payload.kind === "rgb" ? "rgb" : "scalar",', '        mode: "scalar",')],
+        [("main.js", "        kind: payload.kind,", '        kind: "scalar",')],
         ("packed interleaved RGB texture", "told it is in rgb mode", "u_mode = 1 for the rgb tile"),
         id="rgb_view_uploads_only_its_first_channel",
     ),
@@ -280,13 +287,13 @@ _MUTATIONS = [
     ),
     pytest.param(
         "views",
-        [("main.js", "  const planar = p.layout === \"planar\";", "  const planar = true;")],
+        [("main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = true;")],
         ("interleaved body: the hover readout",),
         id="probe_assumes_every_body_is_planar",
     ),
     pytest.param(
         "views",
-        [("main.js", "  const planar = layout === \"planar\";", "  const planar = false;")],
+        [("main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = false;")],
         ("planar body: per-tile ranges follow each channel",),
         id="per_tile_ranges_read_a_planar_body_as_interleaved",
     ),
@@ -300,7 +307,7 @@ _MUTATIONS = [
     # 走査はどこからも実行されておらず、planar 側に置き換えても何も落ちなかった。
     pytest.param(
         "views",
-        [("main.js", "  const planar = layout === \"planar\";", "  const planar = true;")],
+        [("main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = true;")],
         ("interleaved body: per-tile ranges follow each channel",),
         id="per_tile_ranges_read_an_interleaved_body_as_planar",
     ),
@@ -309,7 +316,7 @@ _MUTATIONS = [
         "rgb",
         [(
             "main.js",
-            '  if (payload.kind === "rgb" && payload.channels === 3) {',
+            "  if (traits.singleTile && payload.channels === 3) {",
             "  if (payload.channels === 3) {",
         )],
         ("kind is scalar still draws one tile per channel",),
@@ -324,6 +331,81 @@ _MUTATIONS = [
         )],
         ("refused before the transfer",),
         id="rgb_channel_count_checked_only_after_the_transfer",
+    ),
+    # ---- the X-Layout contract, which used to fail open
+    #
+    # ``api.js`` defaulted an absent header to "interleaved" and four consumers
+    # then compared against a bare ``"planar"`` literal with no validation
+    # anywhere. A header that is present but says something else -- "Planar",
+    # or whatever a proxy rewrote it to -- failed all four comparisons at once
+    # and routed every one of them to the interleaved walk. Nothing throws:
+    # every channel is attributed to the wrong tile, the hover readout agrees
+    # with the wrong tiles, and the per-tile ranges agree with both. Three
+    # independent readings corroborating a single mistake.
+    #
+    # ヘッダが無い場合の既定が "interleaved" で、4つの読み手が素の文字列比較を
+    # していた。値が有って未知（"Planar" など）だと4つとも一斉にインタリーブ側
+    # へ落ちる。例外は出ず、タイル・読み取り値・レンジが同じ間違い方で一致する。
+    pytest.param(
+        "views",
+        [("contract.js", "  if (!LAYOUTS.includes(layout)) {", "  if (false) {")],
+        (
+            "an unknown X-Layout is refused with a message naming it",
+            "an unknown X-Layout leaves state.payload identity unchanged",
+        ),
+        id="unknown_layout_silently_read_as_interleaved",
+    ),
+    # ---- the colormap control, which was tested nowhere at all
+    #
+    # ``$("cmap-select").disabled`` was one of the five independent places that
+    # dispatched on ``kind``, and the only one with no test and no mutation
+    # entry: ``grep -n "cmap" tests/js/frontend_harness.mjs`` returned nothing.
+    # Leaving it enabled for an rgb view offers a dropdown that does nothing --
+    # the shader's rgb branch never reaches a colormap -- and implies the
+    # picture is a false-colour render of a number rather than a colour.
+    # kind で分岐する5か所のうち、これだけテストも変異項目も無かった。rgb で
+    # 有効のままだと、何も起きないドロップダウンを見せることになる。
+    pytest.param(
+        "rgb",
+        [("main.js", "  $(\"cmap-select\").disabled = !traits.colormap;",
+          "  $(\"cmap-select\").disabled = false;")],
+        ("the colormap control is disabled for an rgb view",),
+        id="colormap_stays_enabled_for_an_rgb_view",
+    ),
+    # ---- the layout fallback that could inherit another kind's axes
+    pytest.param(
+        "rgb",
+        [(
+            "main.js",
+            "  const inheritable = current.corner === MATRIX_CORNER\n"
+            "    && current.rows.length * current.cols.length === payload.channels;",
+            "  const inheritable ="
+            " current.rows.length * current.cols.length === payload.channels;",
+        )],
+        ("does not inherit the rgb view's column label",),
+        id="layout_fallback_inherits_axes_from_any_grid_of_the_right_size",
+    ),
+    # ---- one render per gesture, not one per control
+    #
+    # Each server-side control used to fetch on its own ``change``, so moving
+    # the projection command from (1,1,1) to (0,0,0) cost three full renders --
+    # ~740 ms and ~390 MB peak each on the 1080p matrix, two thirds discarded by
+    # ``reqId`` after the fact, and computed concurrently because
+    # ``render_view`` is a sync ``def`` whose NumPy kernels release the GIL.
+    # Nothing about that is visible from the screen: the right picture appears,
+    # eventually, having cost three times what it needed to.
+    # コントロールごとに change で取得していたため、投影コマンドを3つ動かすと
+    # フルレンダが3回走っていた（1080pで各約740ms・ピーク約390MB、うち2回分は
+    # reqId が事後に捨てる）。画面からは見えない——正しい絵は最後には出る。
+    pytest.param(
+        "rgb",
+        [("main.js", "    el.addEventListener(\"change\", () => { markParamsPending(); });",
+          "    el.addEventListener(\"change\", () => { applyServerParams(); });")],
+        (
+            "changing three server params issues no fetch on its own",
+            "適用 submits the whole group as exactly one fetch",
+        ),
+        id="each_server_param_control_fetches_on_its_own",
     ),
 ]
 

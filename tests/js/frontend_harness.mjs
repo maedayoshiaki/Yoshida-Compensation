@@ -71,6 +71,18 @@ function emit() {
 // `uniform1i` も飲み込まない。RGB32F を載せておきながら u_mode を0のままに
 // すると、赤成分だけを読んだグレースケールが「動いているビュー」の顔で出る。
 // 値をどの uniform のものか判別できるよう、ロケーションは名前そのものを返す。
+//
+// Both maps are threaded through *every* nested proxy, including the ones the
+// fallback and `apply` hand back. They used to be dropped there, so anything
+// reached one level deeper -- `gl.getExtension(...).uniform1i(...)`, say --
+// carried `uniforms === undefined` and would have thrown on assignment instead
+// of recording. Nothing in glview.js does that today; the point is that the
+// stub must not be the reason a future call is untestable.
+// どちらの記録先も、フォールバックと `apply` が返す入れ子のプロキシまで
+// 引き回す。以前はここで落ちており、1段深い呼び出しは `uniforms` が
+// undefined のまま——記録ではなく例外になる状態だった。現時点の glview.js に
+// そうした呼び出しは無いが、将来の呼び出しが検証できない理由がスタブ側に
+// あってはならない。
 function glStub(uploads, uniforms) {
   const fn = function () { return glStub(uploads, uniforms); };
   return new Proxy(fn, {
@@ -92,9 +104,9 @@ function glStub(uploads, uniforms) {
         };
       }
       if (typeof prop === "string" && /^[A-Z0-9_]+$/.test(prop)) return 1;
-      return glStub(uploads);
+      return glStub(uploads, uniforms);
     },
-    apply() { return glStub(uploads); },
+    apply() { return glStub(uploads, uniforms); },
   });
 }
 
@@ -250,6 +262,28 @@ const VIEWS = [
   // どこからも検証されず、外した場合は packRgb が終端を越えて読み、タイル全面
   // がマスク色になる（派手に壊れるが原因が分からない）。
   { key: "bad_rgb", label: "4chのrgb", kind: "rgb", channels: 4, params: [] },
+  // Served with `X-Layout: "Planar"` -- present, capitalised, and therefore in
+  // neither of the two layouts the client knows. It has to be refused loudly.
+  // Without the guard nothing throws: every `=== "planar"` test fails, all four
+  // consumers fall to the interleaved walk together, and the tiles, the hover
+  // readout and the per-tile ranges then agree with each other about the wrong
+  // channels. Three independent readings corroborating one mistake is the most
+  // convincing wrong answer this viewer can produce.
+  // `X-Layout: "Planar"`（存在するが大文字違いで既知のどちらでもない）で返す。
+  // ガードが無いと例外は出ず、`=== "planar"` が全て外れて4つの読み手が一斉に
+  // インタリーブ側へ落ちる。タイル・読み取り値・タイル別レンジが「同じ
+  // 間違い方」で一致するため、このビューアが出しうる最も説得力のある誤答になる。
+  { key: "mangled_layout", label: "配置名が壊れたタイル", kind: "scalar", channels: 12, params: [] },
+  // One channel, scalar. Exists for layoutFor's "keep the current axes"
+  // fallback: an rgb layout is 1 row x 1 col, so the channel count alone
+  // (`1 * 1 === 1`) is enough to inherit it, and this view arriving straight
+  // after `surface` would caption its single greyscale tile "RGB". The
+  // corner marker is what distinguishes axes that came from a matrix.
+  // 1チャンネルの scalar。layoutFor の「現在の軸を引き継ぐ」フォールバック
+  // のために置く。rgb の配置は1行1列なので枚数だけなら一致してしまい、
+  // `surface` の直後にこれが来ると1枚のグレースケールに「RGB」という見出しが
+  // 付く。行列由来の軸かどうかを区別しているのが corner である。
+  { key: "mono_scalar", label: "1chスカラー", kind: "scalar", channels: 1, params: [] },
 ];
 
 // Keyed by view rather than by channel count: `surface` has 3 channels and
@@ -269,6 +303,12 @@ const LABELS_BY_KEY = {
   // Only reached if the channel-count guard is removed; served so that the
   // mutation's failure is "it rendered", not "the fake server threw".
   bad_rgb: ["R", "G", "B", "A"],
+  mangled_layout: TILE_LABELS,
+  // Deliberately not "a -> b": `mono_scalar` must reach a 1x1 grid through
+  // fallbackAxes, which is the path the corner gate protects.
+  // 意図的に "a -> b" 形式にしない。fallbackAxes 経由で1行1列に至る経路が
+  // corner のガードが守っているものだからである。
+  mono_scalar: ["only"],
 };
 
 const viewLabels = (spec) => LABELS_BY_KEY[spec.key];
@@ -377,7 +417,8 @@ globalThis.fetch = async (url, options) => {
     // Omitted, not set to "interleaved": the client must reach that layout via
     // api.js's default, which is what a pre-planar endpoint actually looks like.
     // "interleaved" と明示せず省く。旧エンドポイントの実際の見え方を再現する。
-    if (!interleaved) headers["X-Layout"] = "planar";
+    if (key === "mangled_layout") headers["X-Layout"] = "Planar";
+    else if (!interleaved) headers["X-Layout"] = "planar";
     return new Response(data.buffer, { headers });
   }
   throw new Error(`unexpected url ${url}`);
@@ -464,6 +505,30 @@ const expectedProbe = (tag, channels) =>
 const expectedRanges = (tag, channels) => Array.from({ length: channels }, (_, c) => ({
   vmin: -(c + 1) * tag, vmax: (c + 1) * tag,
 }));
+
+// The tile grid's column headers, which is where an inherited axis label shows.
+// タイルグリッドの列見出し。継承された軸ラベルが表に出るのはここである。
+const colHeads = () => el("tile-grid").children
+  .filter((e) => e.className === "col-head mono")
+  .map((e) => e.textContent);
+
+// How many binary view fetches have been *issued* so far. Server-side params
+// are staged and submitted as a group, so "did changing a control fetch?" is a
+// question about this counter, not about what eventually rendered.
+// これまでに発行されたビュー取得の回数。サーバ側パラメータはまとめて送るので
+// 「コントロールを変えたらフェッチしたか」はこの数で見る。
+const viewRequestCount = () => requestLog.filter((u) => u.includes("/view/")).length;
+
+// Set a staged server parameter without submitting it.
+const stageParam = (name, value) => {
+  const control = el(`sp-${name}`);
+  if (!control) return false;
+  control.value = value;
+  control.__fire("change");
+  return true;
+};
+
+const applyParams = () => el("sp-apply").__fire("click");
 
 const statusText = () => el("status").textContent;
 const settled = () => waitFor(() => !el("btn-load").disabled && !/取得中|読み込み中/.test(statusText()));
@@ -552,7 +617,8 @@ if (SCENARIO === "ordering") {
 if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
-    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,surface,tri_scalar,bad_rgb",
+    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,surface,"
+      + "tri_scalar,bad_rgb,mangled_layout,mono_scalar",
     options.join(","));
   check("a second registered view is reachable from the selector",
     options.includes("plain_tiles"), options.join(","));
@@ -590,12 +656,16 @@ if (SCENARIO === "views") {
   // per_tile は percentileAbsPerChannel への唯一の入口で、ボタンのシナリオが
   // 通ってはいたが結果を誰も見ていなかった。例外を投げれば気付けるが、動いて
   // しまう場合は「もっともらしい12個のレンジ」が出るだけで誰も気付かない。
-  const normalizeSelect = el("sp-normalize");
-  check("the 正規化 control exists on the coefficient view", normalizeSelect !== null);
-  if (normalizeSelect) {
-    normalizeSelect.value = "per_tile";
-    normalizeSelect.__fire("change");
-  }
+  check("the 正規化 control exists on the coefficient view", el("sp-normalize") !== null);
+  // Staged, then submitted. Changing a server-side control must not fetch on
+  // its own -- see the 適用 checks in the rgb scenario for why.
+  // 値を置いてから送る。コントロールの変更単体ではフェッチしない。
+  const beforeStage = viewRequestCount();
+  stageParam("normalize", "per_tile");
+  await sleep(60);
+  check("changing 正規化 stages the value without fetching",
+    viewRequestCount() === beforeStage, `${beforeStage} -> ${viewRequestCount()}`);
+  applyParams();
   await afterViewFetches({ "A:coef_tiles": 2 });
   await settled();
   check("planar body: per-tile ranges follow each channel's own values",
@@ -661,12 +731,9 @@ if (SCENARIO === "views") {
   el("view-select").value = "legacy_tiles";
   el("view-select").__fire("change");
   await settled();
-  const legacyNormalize = el("sp-normalize");
-  check("the 正規化 control exists on the legacy view", legacyNormalize !== null);
-  if (legacyNormalize) {
-    legacyNormalize.value = "per_tile";
-    legacyNormalize.__fire("change");
-  }
+  check("the 正規化 control exists on the legacy view", el("sp-normalize") !== null);
+  stageParam("normalize", "per_tile");
+  applyParams();
   await afterViewFetches({ "A:legacy_tiles": 2 });
   await settled();
   check("interleaved body: per-tile ranges follow each channel's own values",
@@ -674,6 +741,27 @@ if (SCENARIO === "views") {
       && JSON.stringify(state.ranges) === JSON.stringify(expectedRanges(1, 12)),
     `layout=${state.payload.layout} `
       + JSON.stringify(state.ranges && state.ranges.map((r) => r.vmax)));
+
+  // --- an X-Layout the client does not know must fail loudly
+  //
+  // `mangled_layout` is served with `X-Layout: "Planar"`: present, capitalised,
+  // and in neither known layout. The header is not decoration -- four separate
+  // index calculations branch on it -- so an unrecognised value has to be an
+  // error rather than a silent vote for interleaved. Asserted the same way the
+  // unsupported `kind` is: a message that names the offending value, and
+  // `state.payload` untouched.
+  // 既知でない X-Layout は黙って通してはならない。ヘッダは飾りではなく4つの
+  // 添字計算が分岐する対象であり、未知の値は「インタリーブに一票」ではなく
+  // 誤りである。未対応 kind と同じく、値を名指しするメッセージと
+  // state.payload が変わらないことで確認する。
+  const beforeMangled = state.payload;
+  el("view-select").value = "mangled_layout";
+  el("view-select").__fire("change");
+  await sleep(300);
+  check("an unknown X-Layout is refused with a message naming it",
+    /X-Layout/.test(statusText()) && /Planar/.test(statusText()), statusText());
+  check("an unknown X-Layout leaves state.payload identity unchanged",
+    state.payload === beforeMangled, `same object: ${state.payload === beforeMangled}`);
 }
 
 if (SCENARIO === "button") {
@@ -696,12 +784,9 @@ if (SCENARIO === "button") {
   check("the load was still in flight when 正規化 was changed",
     !resolved.has("view:A"), `resolvedA=${resolved.has("view:A")}`);
 
-  const normalizeSelect = el("sp-normalize");
-  check("the 正規化 control exists to be changed", normalizeSelect !== null);
-  if (normalizeSelect) {
-    normalizeSelect.value = "per_tile";
-    normalizeSelect.__fire("change");
-  }
+  check("the 正規化 control exists to be changed", el("sp-normalize") !== null);
+  stageParam("normalize", "per_tile");
+  applyParams();
 
   // Both the load's own fetch and the one the 正規化 change issued have to
   // have landed before the button state means anything -- they are the same
@@ -745,6 +830,13 @@ if (SCENARIO === "rgb") {
   await settled();
   check("baseline scalar load drew one tile per channel",
     views.length === 12, `tiles=${views.length}`);
+  // The colormap turns a *number* into a colour, so it belongs to scalar views
+  // and to no other kind. Checked on both sides of the switch below, because
+  // "always enabled" and "always disabled" each pass one half.
+  // カラーマップは数値を色にする仕組みなので scalar 専用である。切替の前後
+  // 両方で見る（常時有効・常時無効のどちらも片側だけなら通ってしまう）。
+  check("the colormap control is enabled for a scalar view",
+    el("cmap-select").disabled === false, `disabled=${el("cmap-select").disabled}`);
 
   // Registering an rgb view in Python has to be enough to reach it from the
   // GUI -- the same promise the selector was added for, restated for the kind
@@ -767,8 +859,8 @@ if (SCENARIO === "rgb") {
     JSON.stringify(uploadedPlanes()) === JSON.stringify(expectedPackedRgb(1)),
     JSON.stringify(uploadedPlanes()));
   check("the single tile is told it is in rgb mode",
-    views[0].image && views[0].image.mode === "rgb",
-    `mode=${views[0].image && views[0].image.mode}`);
+    views[0].image && views[0].image.kind === "rgb",
+    `kind=${views[0].image && views[0].image.kind}`);
   // And so is the shader. Uploading RGB32F while leaving u_mode at 0 draws the
   // red component alone through the scalar colormap -- a picture, of one third
   // of the data, with nothing to say so.
@@ -782,6 +874,69 @@ if (SCENARIO === "rgb") {
   check("the hover readout still reports all three channels",
     JSON.stringify(probeTexts()) === JSON.stringify(expectedProbe(1, 3)),
     JSON.stringify(probeTexts()));
+  // rgb data is already a colour and the shader's rgb branch never reaches the
+  // colormap. Leaving the dropdown live would offer a control that silently
+  // does nothing -- and, worse, suggests the picture is a false-colour render
+  // of something rather than the surface's own colour.
+  // rgb は既に色であり、シェーダの rgb 経路はカラーマップを通らない。有効の
+  // まま残すと何も起きないコントロールを見せることになり、しかも「この絵は
+  // 何かの疑似カラーだ」という誤った印象まで与える。
+  check("the colormap control is disabled for an rgb view",
+    el("cmap-select").disabled === true, `disabled=${el("cmap-select").disabled}`);
+
+  // --- the whole parameter group is one submit, not one fetch per control
+  //
+  // Moving the projection command from (1,1,1) to (0,0,0) touches three
+  // controls. Fetching on each `change` made that three full server renders --
+  // measured at ~740 ms and ~390 MB peak *each* on the 1080p matrix, two thirds
+  // of it discarded by reqId after the fact, and computed concurrently because
+  // render_view is a sync def whose NumPy kernels release the GIL. The staging
+  // half is asserted separately from the submit half: a build that fetched
+  // eagerly *and* on 適用 would pass a "one fetch happened" check on its own.
+  // 投影コマンドを (1,1,1) から (0,0,0) にするとコントロールは3つ動く。
+  // change ごとに取得すると 1080p で約740ms・ピーク約390MB のレンダが3回走り、
+  // うち2回分は reqId が捨てる（しかも render_view は同期関数なので3回は並行に
+  // 走る）。「置くだけ」と「送る」を別々に検証するのは、両方やる実装でも
+  // 「1回取得された」だけなら通ってしまうためである。
+  const beforeStaging = viewRequestCount();
+  check("the rgb view's three command controls exist",
+    ["p_r", "p_g", "p_b"].every((n) => el(`sp-${n}`) !== null));
+  for (const name of ["p_r", "p_g", "p_b"]) stageParam(name, "0");
+  await sleep(80);
+  check("changing three server params issues no fetch on its own",
+    viewRequestCount() === beforeStaging,
+    `${beforeStaging} -> ${viewRequestCount()}`);
+
+  applyParams();
+  await settled();
+  check("適用 submits the whole group as exactly one fetch",
+    viewRequestCount() === beforeStaging + 1,
+    `${beforeStaging} -> ${viewRequestCount()}`);
+  const applied = requestLog[requestLog.length - 1];
+  check("適用 sends every staged value, not just the last one edited",
+    /p_r=0/.test(applied) && /p_g=0/.test(applied) && /p_b=0/.test(applied), applied);
+
+  // --- a 1-channel scalar view must not inherit the rgb view's axis label
+  //
+  // Run here, directly after `surface`, because that is the only state in which
+  // the bug exists: layoutFor may keep the current axes when their count
+  // matches, and an rgb layout is 1 row x 1 col, so `1 * 1 === 1` lets a
+  // 1-channel scalar view walk off with `cols = ["RGB"]` and caption a
+  // greyscale tile as a colour. It renders either way; only the heading is
+  // wrong, which is exactly why nothing else would catch it.
+  // `surface` の直後でしか起きないので、ここで確認する。layoutFor は枚数が
+  // 一致すれば現在の軸を引き継ぐが、rgb の配置は1行1列なので 1*1===1 が
+  // 通ってしまい、1チャンネルの scalar が cols=["RGB"] を持ち去って
+  // グレースケール1枚に色の見出しを付ける。どちらでも描けてしまい、
+  // 違うのは見出しだけなので、他のどのチェックにも引っかからない。
+  el("view-select").value = "mono_scalar";
+  el("view-select").__fire("change");
+  await settled();
+  check("a 1-channel scalar view after an rgb one draws its own tile",
+    views.length === 1, `tiles=${views.length}`);
+  check("a 1-channel scalar view does not inherit the rgb view's column label",
+    JSON.stringify(colHeads()) === JSON.stringify(["only"]),
+    JSON.stringify(colHeads()));
 
   // Going back has to rebuild the 12-tile grid. A one-way trip into rgb would
   // leave a single tile drawing coefficient 0 and eleven channels invisible.

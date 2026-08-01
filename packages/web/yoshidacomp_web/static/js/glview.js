@@ -30,6 +30,7 @@
 //    ディザはすべてシェーダ内でフル精度から行う。
 
 import { VERT_SRC, FRAG_SRC } from "./shaders.js";
+import { LAYOUT_PLANAR, traitsFor } from "./contract.js";
 
 // The single source of truth for the NaN mask colour (linear 0..1 RGB, as the
 // shader's u_nanColor wants it). It had three copies -- this default, main.js's
@@ -70,15 +71,24 @@ export function nanColorCss(color = NAN_COLOR) {
 // なら並びはそのままなので複製しない。
 function packRgb(data, width, height, channels, layout) {
   const n = width * height;
-  if (layout !== "planar") {
-    if (channels === 3) return data;
-    const out = new Float32Array(n * 3);
-    for (let i = 0, k = 0; i < n; i++, k += channels) {
-      out[3 * i] = data[k];
-      out[3 * i + 1] = data[k + 1];
-      out[3 * i + 2] = data[k + 2];
+  if (layout !== LAYOUT_PLANAR) {
+    // An interleaved body with anything other than three channels used to be
+    // handled here by taking channels 0/1/2 and dropping the rest. That branch
+    // was unreachable -- requireRgbHasThreeChannels refuses a non-3-channel rgb
+    // view from the registry, before the transfer -- and if it ever *did* run,
+    // silently picking three of N channels and calling the result "the
+    // projection surface's colour" is the worst available answer. Say so.
+    // インタリーブかつ3チャンネル以外を、0/1/2番だけ取って処理する分岐が
+    // ここにあったが到達不能であり（requireRgbHasThreeChannels が転送前に
+    // 断る）、仮に走ったとしてもN個から3個を黙って選んで「投影面の色」と
+    // 称するのは最悪の答えである。明示的に失敗させる。
+    if (channels !== 3) {
+      throw new Error(
+        `rgb ビューにチャンネル数 ${channels} のインタリーブ本体が届きました` +
+        "（rgb は R/G/B の3チャンネルのみ描画できます）。"
+      );
     }
-    return out;
+    return data;
   }
   const out = new Float32Array(n * 3);
   for (let c = 0; c < 3; c++) {
@@ -179,37 +189,45 @@ export class GLView {
     this._dprMq.addEventListener("change", this._onDpr);
   }
 
-  // img: { data, width, height, channels, channel, layout, mode }
+  // img: { data, width, height, channels, channel, layout, kind }
   //
   // `data` is the whole multi-channel array as fetched, in either layout. The
   // caller keeps it alive on the CPU so pixel probing never needs a server
   // round-trip.
   //
-  // `mode` decides what comes out of it. "scalar" (the default) slices one
-  // plane and uploads it as R32F, one tile per channel. "rgb" takes three
-  // channels as a single colour and uploads them as one RGB32F texture; the
-  // shader is told which via u_mode. RGB32F is texture-only in WebGL2 (not
-  // colour-renderable), which is all this needs -- and it is never filtered,
-  // see the NEAREST note below.
+  // `kind` decides what comes out of it, through contract.js's trait table
+  // rather than through a test here. "scalar" slices one plane and uploads it
+  // as R32F, one tile per channel. "rgb" takes three channels as a single
+  // colour and uploads them as one RGB32F texture; the shader is told which via
+  // u_mode, which is another entry in the same row so the two cannot disagree.
+  // RGB32F is texture-only in WebGL2 (not colour-renderable), which is all this
+  // needs -- and it is never filtered, see the NEAREST note below.
+  //
+  // An unknown `kind` throws here rather than being normalised to scalar. The
+  // old `img.mode === "rgb" ? "rgb" : "scalar"` was one of the five places that
+  // silently answered "scalar" for anything it did not recognise.
   //
   // data は取得した多チャンネル配列そのもの（layout はどちらでもよい）。
-  // mode が "scalar" なら1面を切り出して R32F、"rgb" なら3チャンネルを1枚の
-  // RGB32F に詰めて載せる。どちらかはシェーダへ u_mode で伝える。
+  // 何をするかは contract.js の特性表が決める。scalar なら1面を切り出して
+  // R32F、rgb なら3チャンネルを1枚の RGB32F に詰める。シェーダへ伝える
+  // u_mode も同じ行にあるので食い違いようがない。未知の kind は scalar へ
+  // 丸めず投げる（以前の三項演算子は、知らない値を黙って scalar と答える
+  // 5か所のうちの1つだった）。
   setImage(img) {
     const gl = this.gl;
     const width = img.width, height = img.height;
     const channels = img.channels ?? 1;
     const channel = img.channel ?? 0;
-    const mode = img.mode === "rgb" ? "rgb" : "scalar";
+    const traits = traitsFor(img.kind, "GLView.setImage");
     const previous = this.image;
 
     let plane;
-    if (mode === "rgb") {
+    if (traits.packed) {
       // One transpose, here, never in draw(). See packRgb.
       plane = packRgb(img.data, width, height, channels, img.layout);
     } else if (channels === 1) {
       plane = img.data;
-    } else if (img.layout === "planar") {
+    } else if (img.layout === LAYOUT_PLANAR) {
       // Planar (C, H, W): the channel is already contiguous. subarray shares
       // the buffer, so this costs nothing.
       // planar (C, H, W) ならチャンネルは既に連続しており、subarray は
@@ -232,7 +250,7 @@ export class GLView {
       for (let i = 0, k = channel; i < n; i++, k += channels) plane[i] = img.data[k];
     }
 
-    this.image = { width, height, channel, mode };
+    this.image = { width, height, channel, kind: img.kind, traits };
     gl.bindTexture(gl.TEXTURE_2D, this.tex);
     gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
     // NEAREST, in both modes. LINEAR would interpolate across the mask
@@ -244,11 +262,12 @@ export class GLView {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-    if (mode === "rgb") {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGB32F, width, height, 0, gl.RGB, gl.FLOAT, plane);
-    } else {
-      gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, width, height, 0, gl.RED, gl.FLOAT, plane);
-    }
+    // The texture format comes from the same trait row as `packed` above, so
+    // "packed three channels" and "uploaded as RGB32F" cannot come apart.
+    // テクスチャ形式は上の `packed` と同じ行から来るので、詰め方と形式が
+    // 食い違うことはない。
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl[traits.texture.internal], width, height, 0,
+      gl[traits.texture.format], gl.FLOAT, plane);
 
     // Only reframe when there is nothing sensible to keep. Re-fetching the
     // same matrix with a different server-side parameter replaces the pixels
@@ -349,11 +368,11 @@ export class GLView {
     gl.uniform1f(this.u.u_vmin, p.vmin);
     gl.uniform1f(this.u.u_vmax, p.vmax);
     // Not a display parameter: the mode follows the texture that was uploaded,
-    // so it comes from this.image rather than from params. Putting it in
-    // params would let a control set it and read an R32F texture as RGB.
-    // モードはアップロード済みテクスチャに従うので params ではなく image から
-    // 取る。params に置くとコントロールから切り替えられてしまう。
-    gl.uniform1i(this.u.u_mode, this.image.mode === "rgb" ? 1 : 0);
+    // so it comes from this.image's own traits rather than from params. Putting
+    // it in params would let a control set it and read an R32F texture as RGB.
+    // モードはアップロード済みテクスチャに従うので params ではなく image の
+    // 特性から取る。params に置くとコントロールから切り替えられてしまう。
+    gl.uniform1i(this.u.u_mode, this.image.traits.uMode);
     gl.uniform1i(this.u.u_colormap, p.colormap | 0);
     gl.uniform1f(this.u.u_exposure, p.exposure);
     gl.uniform1f(this.u.u_gamma, p.gamma);

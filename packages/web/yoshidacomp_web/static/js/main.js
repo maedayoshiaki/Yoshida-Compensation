@@ -2,15 +2,20 @@
 //
 // Two shapes of view are drawn: a scalar one, one tile per channel (the 12
 // coefficients), and an rgb one, three channels on a single colour tile (the
-// projection surface). `kind` from the registry decides which; see layoutFor.
+// projection surface). Everything that differs between them is one row of
+// contract.js's KIND_TRAITS, read here rather than re-decided per site.
+// 両者の違いは contract.js の KIND_TRAITS の1行にまとまっており、各所で
+// 判断し直さずそこを読む。
 //
 // The load-bearing rule here is the separation between *display* and
 // *recompute*. Exposure, gamma, colormap and dither only push uniforms into the
 // GLViews; they must never touch the network. Only a server-side view
 // parameter (`normalize` for the coefficient tiles, the projection command for
-// the surface) re-issues the binary fetch.
+// the surface) re-issues the binary fetch -- and those are staged and submitted
+// as a group by 適用, one render per gesture rather than one per control.
 // 露出・γ・カラーマップ・ディザは uniform を更新するだけでサーバへ行かない。
-// サーバ側ビューパラメータの変更だけが再フェッチを起こす。
+// サーバ側ビューパラメータだけが再フェッチを起こし、それも 適用 でまとめて
+// 送る（コントロールごとではなく操作ごとに1回のレンダ）。
 //
 // The fetched Float32Array stays on the CPU for the whole session so pixel
 // probing reads it locally. The body is planar (C, H, W) -- channel c of pixel
@@ -21,13 +26,9 @@
 
 import { loadMatrix, listViews, fetchView } from "./api.js";
 import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
+import { LAYOUT_PLANAR, requireSupportedKind, traitsFor } from "./contract.js";
 
 const $ = (id) => document.getElementById(id);
-
-// The views this frontend can draw. `categorical` is declared in the Python
-// ViewKind but has no implementation here; see requireSupportedKind.
-// 描けるのはこの2つ。categorical は未実装。
-const SUPPORTED_KINDS = ["scalar", "rgb"];
 
 // Startup fallback only -- the real axis labels always arrive from the server
 // (axesFromLabels over the X-Labels-B64 header). These mirror
@@ -42,11 +43,18 @@ const DEFAULT_COLS = ["out_R", "out_G", "out_B"];
 
 // The corner cell of a coefficient grid, where the row and column axes meet.
 // An rgb view has no such axes, so it gets an empty corner rather than a
-// caption that describes a matrix it is not.
+// caption that describes a matrix it is not. It doubles as the marker for
+// "this layout's axes came from a matrix", which is what layoutFor's
+// keep-current-axes fallback is allowed to inherit from.
+// 係数グリッドの左上、行と列の軸が交わるセル。rgbビューにはその軸が無いので
+// 空にする。同時に「この配置の軸は行列由来である」という目印でもあり、
+// layoutFor が軸を引き継いでよいのはこれが付いている場合だけである。
 const MATRIX_CORNER = "in \\ out";
 
 // rows x cols is the *tile* grid; probeCols is the readout grid, which for an
 // rgb view is not the same thing. See layoutFor.
+// rows x cols はタイルの並び、probeCols は読み取りの並び。rgbビューでは
+// この2つは一致しない。
 const DEFAULT_LAYOUT = {
   rows: DEFAULT_ROWS,
   cols: DEFAULT_COLS,
@@ -144,7 +152,7 @@ function nextFrame() {
 // 例外にはならず、12枚のレンジが静かに入れ替わるだけなので分岐を明示する。
 function percentileAbsPerChannel(data, channels, pct, layout) {
   const BINS = 2048;
-  const planar = layout === "planar";
+  const planar = layout === LAYOUT_PLANAR;
   // Pixels per channel (planar only). Math.floor rather than `| 0`: the
   // camera-space payload this is headed for is ~390M elements and `| 0` is a
   // 32-bit trap waiting for the next size increase.
@@ -270,17 +278,17 @@ function fallbackAxes(labels, channels) {
 // 絵が何枚あるかを知っているのは kind だけなので、それで決める。
 // 読み取りグリッドだけは別で、ホバー1画素につき数値は3つあるためチャンネル数
 // で組む。両者が食い違うのはここだけ。
-function layoutFor(payload, current) {
-  // `channels === 3` as well as the kind: an rgb view is one colour per pixel,
+function layoutFor(payload, current, traits) {
+  // `channels === 3` as well as the trait: an rgb view is one colour per pixel,
   // so three channels is what "rgb" means here. requireRgbHasThreeChannels has
   // already refused anything else by the time this runs -- this condition is
   // defence in depth, not the active guard -- but a single-tile layout is only
   // correct for a payload the rgb upload path can actually pack, and the two
   // must not be able to disagree.
-  // kind だけでなく channels も見る。rgb は1画素1色＝3チャンネルのこと。
+  // 特性だけでなく channels も見る。rgb は1画素1色＝3チャンネルのこと。
   // 実際に弾いているのは requireRgbHasThreeChannels 側で、ここは多重防御だが、
   // 1枚タイルが正しいのは rgb 経路が詰められるペイロードに限られる。
-  if (payload.kind === "rgb" && payload.channels === 3) {
+  if (traits.singleTile && payload.channels === 3) {
     return {
       rows: [""],
       cols: ["RGB"],
@@ -288,8 +296,27 @@ function layoutFor(payload, current) {
       corner: "",
     };
   }
+  // Keeping the current axes is only sound when they *are* axes -- that is,
+  // when the layout on screen came from a matrix-shaped set of labels. The
+  // corner marker is what records that.
+  //
+  // Without the gate, the counting condition alone is enough: an rgb layout is
+  // 1 row x 1 col, so a hypothetical 1-channel scalar view arriving straight
+  // after `surface` would satisfy `1 * 1 === 1` and inherit `cols = ["RGB"]`,
+  // captioning its single greyscale tile as a colour. The fallback exists to
+  // stop the grid churning through WebGL contexts on a re-fetch of the *same*
+  // shape, not to hand one view another view's vocabulary.
+  // 現在の軸を引き継いでよいのは、それが本当に軸であるとき——つまり画面上の
+  // 配置が行列形式のラベルから来ているときだけで、それを記録しているのが
+  // corner である。この条件が無いと枚数の一致だけで通ってしまい、rgb の
+  // 1行1列の直後に来た1チャンネルの scalar ビューが cols=["RGB"] を継承して、
+  // グレースケール1枚に「RGB」という見出しを付ける。このフォールバックは
+  // 同じ形の再取得でグリッドを組み直さないためのものであって、あるビューに
+  // 別のビューの語彙を渡すためのものではない。
+  const inheritable = current.corner === MATRIX_CORNER
+    && current.rows.length * current.cols.length === payload.channels;
   const axes = axesFromLabels(payload.labels, payload.channels)
-    || (current.rows.length * current.cols.length === payload.channels
+    || (inheritable
       ? { rows: current.rows, cols: current.cols }
       : fallbackAxes(payload.labels, payload.channels));
   return {
@@ -419,7 +446,7 @@ function showProbe(hit) {
   // while the tiles themselves still look right -- nothing would flag it.
   // planar は channel が最外、インタリーブは最内。取り違えても絵は正しいまま
   // 読み取り値だけが狂うので、どこも失敗しない。
-  const planar = p.layout === "planar";
+  const planar = p.layout === LAYOUT_PLANAR;
   const stride = p.width * p.height;
   const offset = hit.row * p.width + hit.col;
   for (let c = 0; c < probeCells.length && c < p.channels; c++) {
@@ -442,6 +469,58 @@ function serverParams() {
     out[p.name] = el ? el.value : p.default;
   }
   return out;
+}
+
+// The whole server-side parameter group is submitted at once, by 適用.
+//
+// Each control used to fetch on its own `change`, so moving the projection
+// command from (1,1,1) to (0,0,0) cost three full renders -- about 8 s and 2 GB
+// transient on the 1080p matrix, two thirds of it thrown away. `reqId` already
+// discarded the stale *results*, but the server still computed all three, and
+// concurrently: `render_view` is a sync `def`, so FastAPI runs it in a
+// threadpool, and NumPy's heavy kernels release the GIL. The waste was real
+// work on real cores, not a queue.
+//
+// Applied to every view uniformly rather than only to the expensive ones. A
+// "cheap views stay instant" rule would need a second source of truth for which
+// renders are cheap, kept in the frontend, agreeing with the backend by
+// convention -- and it would be wrong the first time a view's cost changed
+// without the frontend hearing about it. One rule, no exceptions: a control
+// stages a value, 適用 sends the group.
+//
+// サーバ側パラメータは1つずつではなく、グループごとに 適用 で送る。以前は
+// コントロールの change ごとにフェッチしていたため、投影コマンドを
+// (1,1,1) から (0,0,0) へ動かすだけで3回のフルレンダになっていた（1080pで
+// 約8秒・一時的に約2GB、うち2/3は捨てられる）。reqId が捨てるのは結果だけで、
+// サーバは3回とも計算する。しかも render_view は同期関数なので FastAPI は
+// スレッドプールで走らせ、NumPy の重い処理は GIL を離すため、3回は並行に
+// 走って実際にコアを食う。
+//
+// 安いビューだけ即時にする、という区別は付けない。それには「どのレンダが
+// 安いか」という第二の情報源をフロント側に持ち、規約でバックエンドと
+// 一致させ続ける必要があり、ビューのコストが変わった瞬間に嘘になる。
+// 規則は1つ——コントロールは値を置くだけ、送るのは 適用。
+function markParamsPending() {
+  const apply = $("sp-apply");
+  if (apply) apply.className = "primary pending";
+  status("パラメータ変更あり — 適用 を押すと再取得します");
+}
+
+// Cleared by reload(), not by the 適用 handler: every path into reload() reads
+// the controls through serverParams(), so 読み込み and a view switch apply the
+// staged values too. Clearing only in the handler would leave the ring on after
+// those, saying "not applied" about values that just were.
+// 解除は 適用 のハンドラではなく reload() 側で行う。reload() へ入る経路は
+// どれも serverParams() でコントロールを読むため、読み込みやビュー切替でも
+// 置いた値は反映される。ハンドラだけで消すと、反映済みの値に対して
+// 「未適用」の表示が残る。
+function clearParamsPending() {
+  const apply = $("sp-apply");
+  if (apply) apply.className = "primary";
+}
+
+function applyServerParams() {
+  reload().catch((e) => status(errorText(e), true));
 }
 
 function buildServerParams(spec) {
@@ -473,10 +552,25 @@ function buildServerParams(spec) {
     }
     el.id = `sp-${p.name}`;
     el.value = p.default;
-    // Server-side parameters are the only controls allowed to hit the network.
-    el.addEventListener("change", () => { reload().catch((e) => status(String(e), true)); });
+    // Stages the value; it does not fetch. See markParamsPending above.
+    // 値を置くだけでフェッチはしない。
+    el.addEventListener("change", () => { markParamsPending(); });
+    // Enter in a typed field is "I am done with this value", so it submits the
+    // group -- otherwise a keyboard user has to reach for the mouse.
+    // 入力欄での Enter は「この値でよい」の意なのでグループを送る。
+    el.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") applyServerParams();
+    });
     host.appendChild(el);
   }
+  // The one control allowed to hit the network.
+  // ネットワークへ行ってよい唯一のコントロール。
+  const apply = document.createElement("button");
+  apply.id = "sp-apply";
+  apply.className = "primary";
+  apply.textContent = "適用";
+  apply.addEventListener("click", () => { applyServerParams(); });
+  host.appendChild(apply);
 }
 
 // ------------------------------------------------------------- rendering
@@ -499,7 +593,7 @@ function specDeclares(name) {
   return !!state.spec && state.spec.params.some((p) => p.name === name);
 }
 
-function computeRanges() {
+function computeRanges(traits) {
   const p = state.payload;
 
   // An rgb view has one tile and therefore one range, and the three components
@@ -513,7 +607,7 @@ function computeRanges() {
   // チャンネルごとに正規化すると、データに無いホワイトバランスを勝手に掛けた
   // 「もっともらしいが違う色」になる。レンジは対称でないので ± ではなく
   // [vmin, vmax] で出す。
-  if (p.kind === "rgb") {
+  if (traits.sharedRange) {
     state.ranges = [{ vmin: p.vmin, vmax: p.vmax }];
     const text = `[${fmt(p.vmin)}, ${fmt(p.vmax)}]`;
     if (captions.length) captions[0].textContent = `${p.labels.join(" ")}  ${text}`;
@@ -569,21 +663,6 @@ function renderMeta() {
   }
 }
 
-// Falling through for an unimplemented kind would paint `categorical` data
-// with the diverging scalar colormap: plausible pixels for a view this
-// frontend does not understand, which is the same class of silent misreading
-// the NaN mask exists to prevent.
-// 未対応の kind をそのまま描くと、理解していないデータを「それらしい」色で
-// 表示してしまう。黙って通さず、はっきり失敗させる。
-function requireSupportedKind(kind, where) {
-  if (!SUPPORTED_KINDS.includes(kind)) {
-    throw new Error(
-      `${where} の kind="${kind}" はこのビューアでは未対応です` +
-      `（対応しているのは kind="${SUPPORTED_KINDS.join('" / kind="')}" のみ）。`
-    );
-  }
-}
-
 // An rgb view is three channels by definition -- one per colour.
 //
 // Without this the failure is loud but undiagnostic. A shorter payload reaches
@@ -616,18 +695,25 @@ async function reload(req = beginRequest()) {
   requireSupportedKind(state.spec.kind, specName);
   requireRgbHasThreeChannels(state.spec.kind, state.spec.channels, specName);
   const params = serverParams();
+  clearParamsPending();
   status(`ビュー取得中… (${state.spec.key} ${JSON.stringify(params)})`);
 
   const t0 = performance.now();
   const payload = await fetchView(state.matrixId, state.spec.key, params);
   const t1 = performance.now();
   if (isStale(req)) return;   // a newer request owns the screen now
-  // Backstop: the registry and the response could disagree.
-  requireSupportedKind(payload.kind, "サーバの応答");
+  // Backstop: the registry and the response could disagree. `traitsFor` is the
+  // supported-kind check *and* the single source for everything decided by
+  // kind below -- the tile layout, the range calculation, the colormap control
+  // and the texture upload all read this one object.
+  // レジストリと応答が食い違いうるための保険。`traitsFor` は対応kindの検査を
+  // 兼ねており、以下で kind によって決まるもの（タイル配置・レンジ・
+  // カラーマップ・テクスチャ）はすべてこの1つのオブジェクトを読む。
+  const traits = traitsFor(payload.kind, "サーバの応答");
   requireRgbHasThreeChannels(payload.kind, payload.channels, "サーバの応答");
   state.payload = payload;
 
-  const layout = layoutFor(payload, state.layout);
+  const layout = layoutFor(payload, state.layout, traits);
   // Compared by value, and only then rebuilt: buildGrid disposes and recreates
   // one WebGL context per tile, and the browser caps how many can be live at
   // once (~16 in Chrome, against 12 tiles).
@@ -636,6 +722,7 @@ async function reload(req = beginRequest()) {
   const layoutChanged = JSON.stringify(layout) !== JSON.stringify(state.layout);
   state.layout = layout;
   // Tiles, not channels: an rgb view puts three channels on one tile.
+  // チャンネル数ではなくタイル数。rgbは3チャンネルを1枚に載せる。
   const tiles = layout.rows.length * layout.cols.length;
   const gridRebuilt = views.length !== tiles || layoutChanged;
   if (gridRebuilt) {
@@ -645,7 +732,7 @@ async function reload(req = beginRequest()) {
   }
 
   const t2 = performance.now();
-  computeRanges();
+  computeRanges(traits);
   const t3 = performance.now();
 
   // The colormap gives a *number* a colour; rgb data is already a colour and
@@ -653,7 +740,7 @@ async function reload(req = beginRequest()) {
   // rather than leave a dropdown that silently does nothing.
   // カラーマップは数値に色を与える仕組みで、rgb経路はそもそも通さない。
   // 何も起きないドロップダウンを残さず無効化する。
-  $("cmap-select").disabled = payload.kind === "rgb";
+  $("cmap-select").disabled = !traits.colormap;
 
   // Decide before the upload, while the old image is still around: a reframe
   // is warranted only when there is no view worth keeping -- a rebuilt grid, a
@@ -673,9 +760,12 @@ async function reload(req = beginRequest()) {
   try {
     // Iterating tiles rather than channels: the two are the same count for a
     // scalar view, but an rgb view is one tile that consumes all three
-    // channels, and `mode` is what tells GLView which of those it is.
+    // channels. GLView is handed the `kind` itself and reads the same trait
+    // row this function did, so the two cannot reach different conclusions
+    // about the same payload.
     // チャンネルではなくタイルを回す。scalar では同数だが、rgb は3チャンネルを
-    // 1枚が受け取る。どちらかは `mode` で伝える。
+    // 1枚が受け取る。GLView には kind をそのまま渡し、向こうもこの関数と同じ
+    // 特性表の行を読む（同じペイロードについて別々の結論に至りようがない）。
     for (let t = 0; t < views.length; t++) {
       views[t].setImage({
         data: payload.data,
@@ -684,7 +774,7 @@ async function reload(req = beginRequest()) {
         channels: payload.channels,
         channel: t,
         layout: payload.layout,
-        mode: payload.kind === "rgb" ? "rgb" : "scalar",
+        kind: payload.kind,
       });
     }
   } finally {

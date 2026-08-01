@@ -18,6 +18,8 @@
 // ラベルは UTF-8 JSON の base64 で届く。ヘッダ値はlatin-1なので日本語ラベルは
 // 500になり、カンマ連結はラベル内のカンマで壊れる。routers/view.py の
 // encode_labels と対になっている。
+import { LAYOUT_INTERLEAVED, requireKnownLayout } from "./contract.js";
+
 function decodeLabels(header) {
   if (!header) return [];
   const binary = atob(header);
@@ -63,16 +65,25 @@ export async function fetchView(matrixId, key, params) {
   const res = await fetch(`/api/matrix/${matrixId}/view/${key}?${qs}`);
   if (!res.ok) throw new Error(await res.text());
   const buf = await res.arrayBuffer();
+  // "planar" = (C, H, W); "interleaved" = (H, W, C). A *missing* header means
+  // interleaved, because that is what a pre-planar endpoint looks like and it
+  // still has to render. A header that is present but says something else is
+  // refused here, at the one place the wire format is parsed, rather than at
+  // the four places that index into `data` -- each of which would otherwise
+  // read it as interleaved and agree with the other three about the wrong
+  // answer. See contract.js::requireKnownLayout.
+  // ヘッダが無い場合はインタリーブ（planar 化前のエンドポイントの見え方であり、
+  // それでも描けなければならない）。値が有って未知の場合は、`data` に添字を
+  // 立てる4か所ではなくワイヤを解釈するここで断る。4か所に任せるとどこもが
+  // インタリーブとして読み、互いに同じ間違いで一致してしまう。
+  const layout = res.headers.get("X-Layout") || LAYOUT_INTERLEAVED;
+  requireKnownLayout(layout, "サーバの応答");
   return {
     data: new Float32Array(buf),
     height: Number(res.headers.get("X-Height")),
     width: Number(res.headers.get("X-Width")),
     channels: Number(res.headers.get("X-Channels")),
-    // "planar" = (C, H, W); anything else (or a missing header) is the old
-    // interleaved (H, W, C). Every consumer that indexes into `data` has to
-    // branch on this, so it travels with the payload rather than being assumed.
-    // "planar" は (C, H, W)。ヘッダが無ければ従来の (H, W, C) とみなす。
-    layout: res.headers.get("X-Layout") || "interleaved",
+    layout,
     kind: res.headers.get("X-Kind"),
     vmin: Number(res.headers.get("X-Vmin")),
     vmax: Number(res.headers.get("X-Vmax")),
