@@ -210,7 +210,20 @@ globalThis.fetch = async (url, options) => {
     const counted = `${matrixPath}:${key}`;
     viewFetchCount.set(counted, (viewFetchCount.get(counted) ?? 0) + 1);
     const spec = VIEWS.find((v) => v.key === key);
-    const data = new Float32Array(H * W * spec.channels).fill(tagForPath[matrixPath] ?? 0);
+    // Channel c carries (c + 1) * tag, not one constant for the whole array.
+    //
+    // The tag still identifies the matrix -- channel 0 is 1 * tag, so
+    // state.payload.data[0] reads it straight off. But the channels now differ
+    // from each other, which is what lets a per-channel range be told apart
+    // from the shared one. Filled with a single constant, every channel's 99th
+    // percentile came out at the header's own vmax and "shared vs per-tile" was
+    // unobservable: the histogram path ran and the assertion could not fail.
+    // チャンネルcの値を (c+1)*tag にする。チャンネル0は 1*tag なので行列の
+    // 識別子はそのまま読める。全体を同一定数で埋めるとチャンネル別分位点が
+    // ヘッダのvmaxと一致してしまい、shared と per_tile を区別できなかった。
+    const tag = tagForPath[matrixPath] ?? 0;
+    const data = new Float32Array(H * W * spec.channels);
+    for (let i = 0; i < data.length; i++) data[i] = ((i % spec.channels) + 1) * tag;
     return new Response(data.buffer, {
       headers: {
         "X-Height": String(H), "X-Width": String(W),
@@ -287,6 +300,15 @@ if (SCENARIO === "ordering") {
   clickLoad("A");
   await sleep(25);
   clickLoad("B");
+  // The race has to actually stage, or the rest of this scenario is theatre.
+  // Counting issued requests is not enough: if A's response had already landed
+  // by now there would be no out-of-order arrival left to guard against, and
+  // every assertion below would pass for the wrong reason. Fail loudly instead
+  // -- a test that quietly stops testing is worse than an intermittent one.
+  // ここで A が既に着地していたら追い越しは起きず、以下の検証は別の理由で
+  // 通ってしまう。発行数を数えるだけでは検出できないので明示的に落とす。
+  check("the race actually staged (A had not landed when B was issued)",
+    !resolved.has("view:A"), `resolvedA=${resolved.has("view:A")}`);
   await afterResponses("view:A", "view:B");
 
   let metaPath = state.meta ? state.meta.path : null;
@@ -313,6 +335,8 @@ if (SCENARIO === "ordering") {
   clickLoad("C");
   await sleep(25);
   clickLoad("D");
+  check("the race actually staged (C's registration had not landed when D was issued)",
+    !resolved.has("session:C"), `resolvedC=${resolved.has("session:C")}`);
   await afterResponses("session:C", "session:D", "view:D");
 
   metaPath = state.meta ? state.meta.path : null;
@@ -374,6 +398,13 @@ if (SCENARIO === "button") {
   check("button is disabled while the load runs", el("btn-load").disabled === true);
 
   await sleep(25);
+  // The load must still be transferring, or the reload below is not "during"
+  // anything and the lockout it reproduces cannot occur.
+  // ここで読み込みが終わっていれば「読み込み中の reload()」ではなくなり、
+  // 再現しようとしているロックアウト自体が起きない。
+  check("the load was still in flight when 正規化 was changed",
+    !resolved.has("view:A"), `resolvedA=${resolved.has("view:A")}`);
+
   const normalizeSelect = el("sp-normalize");
   check("the 正規化 control exists to be changed", normalizeSelect !== null);
   if (normalizeSelect) {
@@ -396,6 +427,8 @@ if (SCENARIO === "button") {
   viewDelayMs.B = 150;
   clickLoad("B");
   await sleep(25);
+  check("the load was still in flight when the view was switched",
+    !resolved.has("view:B"), `resolvedB=${resolved.has("view:B")}`);
   el("view-select").value = "plain_tiles";
   el("view-select").__fire("change");
   await afterViewFetches({ "B:coef_tiles": 1, "B:plain_tiles": 1 });
