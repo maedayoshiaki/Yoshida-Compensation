@@ -208,6 +208,27 @@ const VIEWS = [
       { name: "p_b", label: "投影 B", type: "number", default: 1.0, choices: [] },
     ],
   },
+  // Three channels that are three unrelated pictures. This differs from
+  // `surface` in `kind` and in nothing else, which is the whole reason it is
+  // here: layoutFor decides the tile count from `kind` *and* `channels`, and
+  // with only `surface` registered a layout keyed on the channel count alone
+  // would be indistinguishable from the correct one. Then any 3-channel scalar
+  // view collapses onto a single colour tile -- two of its three pictures
+  // simply gone, with the remaining one drawn as a colour it is not.
+  // `surface` と kind だけが違うビュー。タイル数は kind と channels の両方で
+  // 決まるが、`surface` しか無いとチャンネル数だけを見る実装と区別が付かない。
+  // その状態では3チャンネルのスカラービューが1枚の色タイルに潰れ、3枚のうち
+  // 2枚が消える。
+  { key: "tri_scalar", label: "3chスカラー", kind: "scalar", channels: 3, params: [] },
+  // kind="rgb" with a channel count "rgb" cannot mean. Registered so the guard
+  // that refuses it has something to refuse: without this the channel-count
+  // half of the rgb contract is asserted nowhere, and dropping it lets a short
+  // payload into packRgb, which reads past the end of the array and paints the
+  // whole tile in the NaN mask colour -- a loud failure with no diagnosis in it.
+  // rgb を名乗る非3チャンネルのビュー。これが無いとチャンネル数の検査は
+  // どこからも検証されず、外した場合は packRgb が終端を越えて読み、タイル全面
+  // がマスク色になる（派手に壊れるが原因が分からない）。
+  { key: "bad_rgb", label: "4chのrgb", kind: "rgb", channels: 4, params: [] },
 ];
 
 // Keyed by view rather than by channel count: `surface` has 3 channels and
@@ -220,6 +241,12 @@ const LABELS_BY_KEY = {
   plain_tiles: TILE_LABELS,
   gamut: ["色域外", "1超クリップ", "両方", "範囲内, 補正可"],
   surface: ["R", "G", "B"],
+  // Deliberately *not* ["R","G","B"]: `tri_scalar` must reach its 1x3 grid
+  // through fallbackAxes on its own merits, not by borrowing `surface`'s.
+  tri_scalar: ["ch0", "ch1", "ch2"],
+  // Only reached if the channel-count guard is removed; served so that the
+  // mutation's failure is "it rendered", not "the fake server threw".
+  bad_rgb: ["R", "G", "B", "A"],
 };
 
 const viewLabels = (spec) => LABELS_BY_KEY[spec.key];
@@ -401,6 +428,21 @@ const probeTexts = (col = 2, row = 1) => {
 const expectedProbe = (tag, channels) =>
   Array.from({ length: channels }, (_, c) => ((c + 1) * tag).toFixed(4));
 
+// Expected per-tile ranges under `normalize=per_tile`.
+//
+// Channel c holds one value, (c + 1) * tag, so its 99th percentile of |value|
+// is that value exactly -- the histogram puts every sample in the top bin and
+// the result is clamped back to the channel's own maximum. Reading the planar
+// body with the interleaved walk (or the reverse) mixes all twelve channels
+// into each bucket and every range comes out the same, which is the failure
+// this pins: twelve plausible numbers that describe the wrong channels.
+// チャンネルcの値は (c+1)*tag ただ一種なので、|値| の99パーセンタイルはその
+// 値そのものになる。layout を取り違えると全チャンネルが混ざり、12枚とも同じ
+// レンジになる（「もっともらしいが違う」12個の数値）。
+const expectedRanges = (tag, channels) => Array.from({ length: channels }, (_, c) => ({
+  vmin: -(c + 1) * tag, vmax: (c + 1) * tag,
+}));
+
 const statusText = () => el("status").textContent;
 const settled = () => waitFor(() => !el("btn-load").disabled && !/取得中|読み込み中/.test(statusText()));
 
@@ -488,7 +530,8 @@ if (SCENARIO === "ordering") {
 if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
-    options.join(",") === "coef_tiles,plain_tiles,gamut,surface", options.join(","));
+    options.join(",") === "coef_tiles,plain_tiles,gamut,surface,tri_scalar,bad_rgb",
+    options.join(","));
   check("a second registered view is reachable from the selector",
     options.includes("plain_tiles"), options.join(","));
 
@@ -512,6 +555,30 @@ if (SCENARIO === "views") {
   check("planar body: the hover readout reads channel c for cell c",
     JSON.stringify(probeTexts()) === JSON.stringify(expectedProbe(1, 12)),
     JSON.stringify(probeTexts()));
+
+  // --- per-tile ranges, the third consumer of the layout
+  //
+  // `normalize=per_tile` is the only route into percentileAbsPerChannel, and
+  // its planar branch was reached by the button scenario but never looked at.
+  // A branch that *throws* wedges the reload and gets noticed; one that runs
+  // and attributes every sample to the wrong channel does not. It returns
+  // twelve finite, plausible display ranges -- of the wrong channels -- and
+  // the only visible consequence is that the tiles are scaled by each other's
+  // extremes. Nothing anywhere would have said so.
+  // per_tile は percentileAbsPerChannel への唯一の入口で、ボタンのシナリオが
+  // 通ってはいたが結果を誰も見ていなかった。例外を投げれば気付けるが、動いて
+  // しまう場合は「もっともらしい12個のレンジ」が出るだけで誰も気付かない。
+  const normalizeSelect = el("sp-normalize");
+  check("the 正規化 control exists on the coefficient view", normalizeSelect !== null);
+  if (normalizeSelect) {
+    normalizeSelect.value = "per_tile";
+    normalizeSelect.__fire("change");
+  }
+  await afterViewFetches({ "A:coef_tiles": 2 });
+  await settled();
+  check("planar body: per-tile ranges follow each channel's own values",
+    JSON.stringify(state.ranges) === JSON.stringify(expectedRanges(1, 12)),
+    JSON.stringify(state.ranges && state.ranges.map((r) => r.vmax)));
 
   // --- an unsupported kind must fail loudly, not render as if it were scalar
   const before = state.payload;
@@ -626,6 +693,15 @@ if (SCENARIO === "rgb") {
   check("baseline scalar load drew one tile per channel",
     views.length === 12, `tiles=${views.length}`);
 
+  // Registering an rgb view in Python has to be enough to reach it from the
+  // GUI -- the same promise the selector was added for, restated for the kind
+  // that arrived after it.
+  // Pythonで登録するだけでGUIから選べること。セレクタ導入時の約束を、後から
+  // 増えた kind についても言い直している。
+  const options = el("view-select").children.map((o) => o.value);
+  check("the rgb view is reachable from the selector",
+    options.includes("surface"), options.join(","));
+
   el("view-select").value = "surface";
   el("view-select").__fire("change");
   await settled();
@@ -668,6 +744,36 @@ if (SCENARIO === "rgb") {
   check("switching back to a scalar view puts the shader back in u_mode = 0",
     views.every((v) => v.gl.__uniforms.u_mode === 0),
     JSON.stringify(views.map((v) => v.gl.__uniforms.u_mode)));
+
+  // The other half of layoutFor's decision: three channels that are *not* one
+  // colour. `tri_scalar` differs from `surface` only in `kind`, so a layout
+  // that keyed on the channel count alone would draw it as a single colour
+  // tile -- two of its three pictures gone, the third recoloured. That renders
+  // too, which is why the count is asserted rather than the absence of a throw.
+  // タイル数の判断のもう半分。`tri_scalar` は kind だけが `surface` と違う。
+  // チャンネル数だけで決める実装だと1枚の色タイルになり、3枚のうち2枚が消える
+  // ——これも描画自体は成功するので、例外の有無ではなく枚数を検証する。
+  el("view-select").value = "tri_scalar";
+  el("view-select").__fire("change");
+  await settled();
+  check("a 3-channel view whose kind is scalar still draws one tile per channel",
+    views.length === 3, `tiles=${views.length}`);
+
+  // An rgb view that is not three channels is not an rgb view. Refused from the
+  // registry, before the transfer: reaching packRgb with a short payload reads
+  // past the end of the array, and JavaScript answers `undefined` rather than
+  // throwing -- NaN in the texture, the whole tile in the mask colour, and no
+  // route from "everything is masked" back to "the view declared 4 channels".
+  // rgb を名乗る非3チャンネルは rgb ではない。転送前に登録内容の段階で断る。
+  // packRgb まで届くと終端越えの読み出しが undefined → NaN となり、タイル全面
+  // がマスク色になるが、そこから「4チャンネルで登録されている」へは辿れない。
+  el("view-select").value = "bad_rgb";
+  el("view-select").__fire("change");
+  await sleep(300);
+  const badRgbFetches = requestLog.filter((u) => u.includes("/view/bad_rgb"));
+  check("an rgb view that is not 3 channels is refused before the transfer, naming the count",
+    /チャンネル数が 4/.test(statusText()) && badRgbFetches.length === 0,
+    `${statusText()} | fetches=${badRgbFetches.length}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);
