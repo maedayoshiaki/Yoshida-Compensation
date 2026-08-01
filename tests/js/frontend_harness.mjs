@@ -197,6 +197,27 @@ const VIEWS = [
   },
   // A second registration, to check it is reachable at all (F4).
   { key: "plain_tiles", label: "パラメータなしタイル", kind: "scalar", channels: 12, params: [] },
+  // Interleaved *and* carrying `normalize`, which is the only combination that
+  // reaches percentileAbsPerChannel's interleaved branch. Nothing was both:
+  // `coef_tiles` has the parameter but is planar, `plain_tiles` is interleaved
+  // but deliberately has no parameters -- it is the fixture that proves a view
+  // which does not declare `normalize` is not handed one, so it cannot be given
+  // one here. Hence a fourth registration rather than a change to either.
+  // Without it that branch has no execution anywhere and could be replaced by
+  // the planar walk with nothing failing (verified).
+  // インタリーブかつ `normalize` を持つ唯一の組み合わせ。これが
+  // percentileAbsPerChannel のインタリーブ側分岐への唯一の入口である。
+  // `coef_tiles` は planar、`plain_tiles` は「パラメータを宣言しないビューに
+  // `normalize` を渡さない」ことを示すためのフィクスチャなので付けられない。
+  // 無いとこの分岐はどこからも実行されず、planar 側の走査に置き換えても
+  // 何も落ちない（実際に確認済み）。
+  {
+    key: "legacy_tiles", label: "旧形式タイル", kind: "scalar", channels: 12,
+    params: [{
+      name: "normalize", label: "正規化", type: "select",
+      default: "shared", choices: ["shared", "per_tile"],
+    }],
+  },
   // Declared in the Python ViewKind but unimplemented in the frontend (F4).
   { key: "gamut", label: "色域外判定", kind: "categorical", channels: 4, params: [] },
   // Three channels that are one colour, not three pictures -- the rgb scenario.
@@ -239,6 +260,7 @@ const VIEWS = [
 const LABELS_BY_KEY = {
   coef_tiles: TILE_LABELS,
   plain_tiles: TILE_LABELS,
+  legacy_tiles: TILE_LABELS,
   gamut: ["色域外", "1超クリップ", "両方", "範囲内, 補正可"],
   surface: ["R", "G", "B"],
   // Deliberately *not* ["R","G","B"]: `tri_scalar` must reach its 1x3 grid
@@ -251,8 +273,8 @@ const LABELS_BY_KEY = {
 
 const viewLabels = (spec) => LABELS_BY_KEY[spec.key];
 
-// `plain_tiles` is served the *old* way: interleaved (H, W, C) and with no
-// X-Layout header at all.
+// `plain_tiles` and `legacy_tiles` are served the *old* way: interleaved
+// (H, W, C) and with no X-Layout header at all.
 //
 // The shipped client keeps an interleaved path on purpose -- api.js defaults to
 // "interleaved" so an endpoint that has not been converted still renders. Once
@@ -264,7 +286,7 @@ const viewLabels = (spec) => LABELS_BY_KEY[spec.key];
 // 経路を残しているが、全フィクスチャを planar にした時点でその経路はどこから
 // も実行されなくなった。1つだけ旧形式で返して経路と api.js の既定値の両方を
 // 実際に通す。
-const INTERLEAVED_VIEWS = new Set(["plain_tiles"]);
+const INTERLEAVED_VIEWS = new Set(["plain_tiles", "legacy_tiles"]);
 
 // Per-matrix delays, so responses can be made to resolve in a different order
 // from the one they were issued in. `session` delays POST /session/matrix
@@ -530,7 +552,7 @@ if (SCENARIO === "ordering") {
 if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
-    options.join(",") === "coef_tiles,plain_tiles,gamut,surface,tri_scalar,bad_rgb",
+    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,surface,tri_scalar,bad_rgb",
     options.join(","));
   check("a second registered view is reachable from the selector",
     options.includes("plain_tiles"), options.join(","));
@@ -621,6 +643,37 @@ if (SCENARIO === "views") {
   check("interleaved body: the hover readout reads channel c for cell c",
     JSON.stringify(probeTexts()) === JSON.stringify(expectedProbe(1, 12)),
     JSON.stringify(probeTexts()));
+
+  // --- per-tile ranges over an interleaved body: the branch nothing reached
+  //
+  // percentileAbsPerChannel has two walks and, until this fixture existed, only
+  // the planar one was ever executed -- reaching the other needs a body that is
+  // interleaved *and* a view that declares `normalize`, and no registration was
+  // both. Replacing the interleaved walk with the planar one broke no check at
+  // all (verified before adding this). See `legacy_tiles` in VIEWS.
+  //
+  // The layout is asserted alongside the ranges on purpose: if the view switch
+  // silently did not happen, the ranges left over from the planar step would
+  // still match and this would pass without having tested anything.
+  // 分岐の片方はどこからも実行されていなかった。到達にはインタリーブかつ
+  // `normalize` を持つビューが要る。layout も一緒に検証しているのは、ビュー
+  // 切替が起きなかった場合に planar 側の結果が残って通ってしまうため。
+  el("view-select").value = "legacy_tiles";
+  el("view-select").__fire("change");
+  await settled();
+  const legacyNormalize = el("sp-normalize");
+  check("the 正規化 control exists on the legacy view", legacyNormalize !== null);
+  if (legacyNormalize) {
+    legacyNormalize.value = "per_tile";
+    legacyNormalize.__fire("change");
+  }
+  await afterViewFetches({ "A:legacy_tiles": 2 });
+  await settled();
+  check("interleaved body: per-tile ranges follow each channel's own values",
+    state.payload.layout === "interleaved"
+      && JSON.stringify(state.ranges) === JSON.stringify(expectedRanges(1, 12)),
+    `layout=${state.payload.layout} `
+      + JSON.stringify(state.ranges && state.ranges.map((r) => r.vmax)));
 }
 
 if (SCENARIO === "button") {

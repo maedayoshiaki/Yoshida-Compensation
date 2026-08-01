@@ -224,6 +224,7 @@ _MUTATIONS = [
             "its per-tile control is gone from the DOM",
             "its ranges are shared, not per-tile",
             "a response without X-Layout falls back to interleaved",
+            "interleaved body: per-tile ranges follow each channel",
         ),
         id="view_selector_removed",
     ),
@@ -286,8 +287,22 @@ _MUTATIONS = [
     pytest.param(
         "views",
         [("main.js", "  const planar = layout === \"planar\";", "  const planar = false;")],
-        ("per-tile ranges follow each channel",),
+        ("planar body: per-tile ranges follow each channel",),
         id="per_tile_ranges_read_a_planar_body_as_interleaved",
+    ),
+    # The same line forced the other way. Both walks of percentileAbsPerChannel
+    # need their own entry, and until `legacy_tiles` was registered the
+    # interleaved one had no execution anywhere: forcing it to the planar walk
+    # broke nothing at all. A branch no test reaches is a branch free to rot,
+    # and this one is the fallback kept for endpoints that were never converted
+    # -- exactly the code least likely to be noticed when it stops working.
+    # 同じ行を逆向きに固定する。`legacy_tiles` を足すまで、インタリーブ側の
+    # 走査はどこからも実行されておらず、planar 側に置き換えても何も落ちなかった。
+    pytest.param(
+        "views",
+        [("main.js", "  const planar = layout === \"planar\";", "  const planar = true;")],
+        ("interleaved body: per-tile ranges follow each channel",),
+        id="per_tile_ranges_read_an_interleaved_body_as_planar",
     ),
     # ---- the two halves of "how many tiles", and the rgb channel contract
     pytest.param(
