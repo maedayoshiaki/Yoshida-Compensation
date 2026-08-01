@@ -356,18 +356,28 @@ function applyDisplay() {
 
 // Does the *active* view declare this server-side parameter?
 //
-// `normalize` belongs to coef_tiles, not to views in general. Reading it
-// unconditionally meant every future view inherited another view's control
-// name, which is exactly the kind of leak that breaks the "register in Python,
-// no JavaScript change" promise.
+// `normalize` belongs to coef_tiles, not to views in general, and a view that
+// does not declare it must not inherit it -- that leak is what breaks the
+// "register in Python, no JavaScript change" promise.
 // `normalize` は coef_tiles 固有のパラメータであり、全ビュー共通ではない。
-// 有効なビューが宣言している場合だけ見る。
+// 宣言していないビューがそれを引き継いではならない。
 function specDeclares(name) {
   return !!state.spec && state.spec.params.some((p) => p.name === name);
 }
 
 function computeRanges() {
   const p = state.payload;
+  // Defence in depth, not the active guard. What actually keeps `normalize`
+  // out of a view that does not declare it is serverParams(), which iterates
+  // state.spec.params -- so today this condition is unreachable and no test
+  // covers it (removing it changes nothing observable; verified). It is here
+  // so that a future serverParams() which reads controls out of the DOM, or
+  // carries values across a view switch, cannot silently re-open the leak.
+  // Do not read it as tested behaviour.
+  // これは多重防御であり現に効いているガードではない。実際に守っているのは
+  // state.spec.params を走査する serverParams() の側で、この条件は今日
+  // 到達不能であり、対応するテストも無い（外しても観測可能な差は出ない）。
+  // 将来 serverParams() がDOMを直接読むようになった場合の保険である。
   const mode = specDeclares("normalize") ? serverParams().normalize : "shared";
   if (mode === "per_tile") {
     // The wire format carries a single (vmin, vmax) pair, so 12 independent
