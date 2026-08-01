@@ -55,6 +55,11 @@ SPEC = register(
         label="12係数タイル",
         kind="scalar",
         channels=12,
+        # The twelve tiles *are* the twelve coefficients the readout table
+        # shows, so the readout's second panel would print them again.
+        # 12枚のタイルは読み取り表の12個そのものなので、2枚目の板は同じ数値の
+        # 繰り返しになる。
+        values_are_matrix=True,
         params=[
             ParamSpec(
                 name="normalize",

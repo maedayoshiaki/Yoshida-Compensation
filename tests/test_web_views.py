@@ -166,6 +166,15 @@ def test_views_endpoint_lists_coef_tiles() -> None:
     spec = next(v for v in body["views"] if v["key"] == "coef_tiles")
     assert spec["kind"] == "scalar"
     assert spec["channels"] == 12
+    # The twelve tiles are the twelve coefficients the hover readout already
+    # shows, so the frontend drops its second panel here rather than printing
+    # them again beside the table. Shipped as a declaration because the client
+    # cannot tell from ``kind``: a residual-error view would be ``scalar`` too
+    # and is not the matrix.
+    # 12枚のタイルは読み取り欄が出す12個そのものなので、フロントは2枚目の板を
+    # 落とす。``kind`` からは判別できない（残差ビューも ``scalar`` である）ため
+    # 宣言として運ぶ。
+    assert spec["values_are_matrix"] is True
 
 
 def test_coef_tiles_returns_float32_binary(tmp_path, stand_in_projector_config) -> None:

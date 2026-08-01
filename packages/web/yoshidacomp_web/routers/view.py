@@ -48,6 +48,16 @@ def list_views() -> dict[str, Any]:
                 "label": spec.label,
                 "kind": spec.kind,
                 "channels": spec.channels,
+                # Whether the picture is the matrix itself. The frontend drops
+                # its second readout panel where this is true, because there the
+                # panel repeats the 4x3 table beside it. Not derivable from
+                # ``kind``: ``coef_tiles`` and ``plain_tiles`` are both
+                # ``scalar`` and so would be a residual-error view, which is not
+                # the matrix at all.
+                # 描いているものが行列そのものかどうか。真なら読み取り欄の
+                # 2枚目の板は隣の表の繰り返しになるのでフロントが落とす。
+                # ``kind`` からは導けない（残差ビューも ``scalar`` である）。
+                "values_are_matrix": spec.values_are_matrix,
                 "params": [
                     {
                         "name": p.name,

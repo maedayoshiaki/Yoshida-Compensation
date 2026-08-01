@@ -153,6 +153,30 @@ def test_an_rgb_view_draws_one_colour_tile_and_keeps_a_three_channel_readout() -
     _assert_all_passed(_run_harness(_STATIC_DIR, "rgb"))
 
 
+def test_the_hover_readout_reads_the_matrix_through_the_point_query() -> None:
+    """The readout must show the matrix on every view, one pixel at a time.
+
+    It used to read ``state.payload``, which is the *displayed view* -- so
+    hovering ``surface`` printed three projection-surface colours under
+    headings that said ``in_R -> out_R``. The matrix itself never crosses the
+    wire (a second 99 MB copy would undo the heap the planar transfer bought),
+    so the table is filled from ``GET /api/matrix/{id}/probe``.
+
+    Two of the checks are about timing rather than arithmetic and neither can
+    be observed against a fetch stub that settles immediately: the coalescing
+    (a mousemove fires dozens of times a second, and every one of them would
+    otherwise be a round trip) and the staleness guard (a response that comes
+    back for a pixel the pointer has already left must not be painted under
+    the newer position's heading). The harness holds point-query responses
+    open so both states are reachable.
+
+    読み取り欄は表示中のビューではなく行列を出す。行列本体は線に乗せないので、
+    1画素ずつの点クエリで取る。合流とスタール判定は応答を保留できないと
+    観測できないため、ハーネス側で点クエリの応答を止められるようにしてある。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "probe"))
+
+
 def test_load_button_is_released_after_a_reload_during_a_load() -> None:
     """Touching a server-side control mid-load must not wedge 読み込み.
 
@@ -168,7 +192,7 @@ def test_load_button_is_released_after_a_reload_during_a_load() -> None:
 
 # ------------------------------------------------------------- discrimination
 
-# (id, scenario, [(js file, find, replace), ...], the checks that must fail)
+# (id, scenario, [(file under static/, find, replace), ...], the checks that must fail)
 #
 # The last field is the *complete* set of failing check names, matched as
 # substrings. Anything else failing is itself a finding; see the assertion.
@@ -179,43 +203,46 @@ def test_load_button_is_released_after_a_reload_during_a_load() -> None:
 # before it existed. If any of these stops failing, the corresponding test above
 # has stopped testing anything.
 #
-# The file is named per edit because the guards do not all live in ``main.js``:
-# the planar upload is ``glview.js``'s ``setImage``, and a mutation table that
-# could only reach one file would have left that one permanently unguarded.
+# The file is named per edit, as a path relative to ``static/``, because the
+# guards do not all live in ``main.js``: the planar upload is ``glview.js``'s
+# ``setImage``, and *where an element sits* is ``index.html`` -- a table that
+# could only reach ``static/js/`` would have left the page's own structure
+# permanently unguarded, which is precisely where the readout's placement lives.
 # 各項目はガードを1つだけ外し、修正前の挙動を再現する。ここが落ちなくなったら
-# 対応するテストは何も検証していない。編集ごとにファイル名を持つのは、ガードが
-# ``main.js`` だけにあるわけではないため（planar のアップロードは ``glview.js``）。
+# 対応するテストは何も検証していない。編集ごとに ``static/`` からの相対パスを
+# 持つのは、ガードが ``main.js`` だけにあるわけではないため（planar の
+# アップロードは ``glview.js``、要素の置き場所は ``index.html``）。
 _MUTATIONS = [
     pytest.param(
         "ordering",
-        [("main.js", "  if (isStale(req)) return;   // a newer request owns the screen now\n", "")],
+        [("js/main.js", "  if (isStale(req)) return;   // a newer request owns the screen now\n", "")],
         ("slow view fetch", "state.payload is the newest matrix's data"),
         id="reload_drops_its_stale_check",
     ),
     pytest.param(
         "ordering",
-        [("main.js", "    if (isStale(req)) return;\n    state.matrixId = res.id;", "    state.matrixId = res.id;")],
+        [("js/main.js", "    if (isStale(req)) return;\n    state.matrixId = res.id;", "    state.matrixId = res.id;")],
         ("slow session POST", "displayed metadata describes the newest matrix (D)"),
         id="load_drops_its_stale_check",
     ),
     pytest.param(
         "button",
         [
-            ("main.js", "  setLoadBusy(true);", "  $(\"btn-load\").disabled = true;"),
-            ("main.js", "    setLoadBusy(false);", "    if (!isStale(req)) $(\"btn-load\").disabled = false;"),
+            ("js/main.js", "  setLoadBusy(true);", "  $(\"btn-load\").disabled = true;"),
+            ("js/main.js", "    setLoadBusy(false);", "    if (!isStale(req)) $(\"btn-load\").disabled = false;"),
         ],
         ("released after a reload", "released after a view switch"),
         id="button_borrows_the_request_counter",
     ),
     pytest.param(
         "views",
-        [("contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
+        [("js/contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
         ("unsupported kind is refused", "leaves state.payload identity unchanged"),
         id="unsupported_kind_renders_as_scalar",
     ),
     pytest.param(
         "views",
-        [("main.js", "    buildViewSelect(specs);\n", "")],
+        [("js/main.js", "    buildViewSelect(specs);\n", "")],
         (
             # Removing the selector removes the only route into every view
             # switch the scenario makes, so the blast radius really is this
@@ -231,6 +258,12 @@ _MUTATIONS = [
             "its ranges are shared, not per-tile",
             "a body declared interleaved is read as interleaved",
             "interleaved body: per-tile ranges follow each channel",
+            # The heading is correct throughout -- it is still naming the only
+            # view that ever rendered. It fails because the third view, the one
+            # this check reads the heading on, is now unreachable.
+            # 見出しは終始正しい（唯一描かれたビューを名乗り続ける）。落ちるのは
+            # このチェックが見る3つ目のビューへ到達できなくなるためである。
+            "the readout's heading names the view that rendered",
             "an unknown X-Layout is refused with a message naming it",
             "a missing X-Layout is refused rather than assumed to be interleaved",
             "a server refusal is shown as its detail message",
@@ -244,7 +277,7 @@ _MUTATIONS = [
     # rgbビューの2つの要素を1つずつ外す。どちらも描画自体は成功してしまう。
     pytest.param(
         "rgb",
-        [("main.js", "  if (traits.singleTile && payload.channels === 3) {", "  if (false) {")],
+        [("js/main.js", "  if (traits.singleTile && payload.channels === 3) {", "  if (false) {")],
         (
             "draws one tile",
             # The three tiles share one range object, so applyDisplay reads
@@ -259,7 +292,7 @@ _MUTATIONS = [
     ),
     pytest.param(
         "rgb",
-        [("main.js", "        kind: payload.kind,", '        kind: "scalar",')],
+        [("js/main.js", "        kind: payload.kind,", '        kind: "scalar",')],
         ("packed interleaved RGB texture", "told it is in rgb mode", "u_mode = 1 for the rgb tile"),
         id="rgb_view_uploads_only_its_first_channel",
     ),
@@ -279,7 +312,7 @@ _MUTATIONS = [
     pytest.param(
         "views",
         [(
-            "glview.js",
+            "js/glview.js",
             "      plane = img.data.subarray(channel * n, (channel + 1) * n);",
             "      plane = img.data.subarray(((channel + 1) % channels) * n,"
             " (((channel + 1) % channels) + 1) * n);",
@@ -289,13 +322,13 @@ _MUTATIONS = [
     ),
     pytest.param(
         "views",
-        [("main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = true;")],
+        [("js/main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = true;")],
         ("interleaved body: the hover readout",),
         id="probe_assumes_every_body_is_planar",
     ),
     pytest.param(
         "views",
-        [("main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = false;")],
+        [("js/main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = false;")],
         ("planar body: per-tile ranges follow each channel",),
         id="per_tile_ranges_read_a_planar_body_as_interleaved",
     ),
@@ -309,7 +342,7 @@ _MUTATIONS = [
     # 走査はどこからも実行されておらず、planar 側に置き換えても何も落ちなかった。
     pytest.param(
         "views",
-        [("main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = true;")],
+        [("js/main.js", "  const planar = layout === LAYOUT_PLANAR;", "  const planar = true;")],
         ("interleaved body: per-tile ranges follow each channel",),
         id="per_tile_ranges_read_an_interleaved_body_as_planar",
     ),
@@ -317,7 +350,7 @@ _MUTATIONS = [
     pytest.param(
         "rgb",
         [(
-            "main.js",
+            "js/main.js",
             "  if (traits.singleTile && payload.channels === 3) {",
             "  if (payload.channels === 3) {",
         )],
@@ -327,7 +360,7 @@ _MUTATIONS = [
     pytest.param(
         "rgb",
         [(
-            "main.js",
+            "js/main.js",
             "  requireRgbHasThreeChannels(state.spec.kind, state.spec.channels, specName);\n",
             "",
         )],
@@ -355,7 +388,7 @@ _MUTATIONS = [
     # 間違い方で一致する。両方が同じガードに来るので変異は1つで足りる。
     pytest.param(
         "views",
-        [("contract.js", "  if (!LAYOUTS.includes(layout)) {", "  if (false) {")],
+        [("js/contract.js", "  if (!LAYOUTS.includes(layout)) {", "  if (false) {")],
         (
             "an unknown X-Layout is refused with a message naming it",
             "an unknown X-Layout leaves state.payload identity unchanged",
@@ -376,7 +409,7 @@ _MUTATIONS = [
     # 有効のままだと、何も起きないドロップダウンを見せることになる。
     pytest.param(
         "rgb",
-        [("main.js", "  $(\"cmap-select\").disabled = !traits.colormap;",
+        [("js/main.js", "  $(\"cmap-select\").disabled = !traits.colormap;",
           "  $(\"cmap-select\").disabled = false;")],
         ("the colormap control is disabled for an rgb view",),
         id="colormap_stays_enabled_for_an_rgb_view",
@@ -385,7 +418,7 @@ _MUTATIONS = [
     pytest.param(
         "rgb",
         [(
-            "main.js",
+            "js/main.js",
             "  const inheritable = current.corner === MATRIX_CORNER\n"
             "    && current.rows.length * current.cols.length === payload.channels;",
             "  const inheritable ="
@@ -408,7 +441,7 @@ _MUTATIONS = [
     # reqId が事後に捨てる）。画面からは見えない——正しい絵は最後には出る。
     pytest.param(
         "rgb",
-        [("main.js", "    el.addEventListener(\"change\", () => { refreshParamsPending(); });",
+        [("js/main.js", "    el.addEventListener(\"change\", () => { refreshParamsPending(); });",
           "    el.addEventListener(\"change\", () => { applyServerParams(); });")],
         (
             "changing three server params issues no fetch on its own",
@@ -438,7 +471,7 @@ _MUTATIONS = [
     pytest.param(
         "rgb",
         [(
-            "main.js",
+            "js/main.js",
             "  const pending = !!state.matrixId\n"
             "    && JSON.stringify(serverParams()) !== JSON.stringify(state.sentParams);",
             "  const pending = !!state.matrixId;",
@@ -464,9 +497,538 @@ _MUTATIONS = [
     # この行列を読め」という用途にはほとんど役に立たない。
     pytest.param(
         "views",
-        [("api.js", '    if (parsed && typeof parsed.detail === "string") {', "    if (false) {")],
+        [("js/api.js", '    if (parsed && typeof parsed.detail === "string") {', "    if (false) {")],
         ("a server refusal is not shown as a raw JSON envelope",),
         id="server_refusal_shown_as_its_json_envelope",
+    ),
+    # ---- the hover point query's two timing guards
+    #
+    # Both are invisible from a screenshot and invisible from a stub that
+    # settles every fetch immediately, which is why the harness can hold a
+    # point-query response open. Without the coalescing a mousemove is a round
+    # trip: a drag across the image issues one request per event, and the
+    # server answers every one of them. Without the staleness comparison the
+    # answer for a pixel the pointer has already left is painted anyway --
+    # under a ``#probe-pos`` that was updated synchronously and now names a
+    # different pixel, so the readout states twelve coefficients that were
+    # never true of the position it is captioned with.
+    #
+    # ホバーの点クエリが持つ2つの時間的ガード。どちらも画面写真からは見えず、
+    # 即座に解決するスタブからも見えない（ゆえにハーネスは応答を保留できる）。
+    # 合流が無ければ mousemove ごとに往復が発生し、スタール判定が無ければ
+    # 「ポインタが去った画素の係数が、別の画素の見出しの下に」出る。
+    pytest.param(
+        "probe",
+        [("js/main.js", "  if (state.probeInFlight) return;", "  if (false) return;")],
+        ("a fast drag costs one point query in flight",),
+        id="hover_probe_fetches_once_per_mousemove",
+    ),
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "        if (want.seq !== state.probeSeq) continue;   // the pointer has moved on",
+            "        if (false) continue;   // the pointer has moved on",
+        )],
+        ("answered after its claim was retired",),
+        id="hover_probe_paints_a_superseded_response",
+    ),
+    # ---- and the point query's coordinates, which are not symmetric
+    #
+    # The failure this repository has now shipped twice is the fixture that
+    # cannot tell two arguments apart. ``probeMatrix(matrixId, row, col)``
+    # feeds a query string whose two parameters are both plain integers, and a
+    # square test matrix -- or a probe point where row happens to equal col --
+    # accepts them in either order. The harness's matrix is 5x4 and the pixel
+    # is (col 3, row 2), so a transposition stays in range and answers,
+    # silently, for a different pixel.
+    # 取り違えても範囲内に収まるため、黙って別の画素を答える。行と列を区別
+    # できないフィクスチャこそ、このリポジトリが繰り返してきた失敗である。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "        const body = await probeMatrix(matrixId, want.row, want.col);",
+            "        const body = await probeMatrix(matrixId, want.col, want.row);",
+        )],
+        (
+            # Listed in full rather than narrowed: this one guard is upstream of
+            # every value the table ever shows, so the breadth is the finding.
+            # What survives is what does not depend on *which* pixel was asked
+            # for -- the view-value panel (which never leaves the client), the
+            # refusal path (out of range either way round) and the view
+            # transfer. The null fixture is deliberately at (row 1, col 3)
+            # rather than on the diagonal, so it fails here too instead of
+            # being indifferent to the swap.
+            # 1つのガードが表に出る全ての値の上流にあるため、この広さ自体が事実。
+            # 生き残るのは「どの画素を訊いたか」に依存しないもの。null の
+            # フィクスチャは対角線上ではなく (row 1, col 3) に置いてあるので、
+            # 入れ替えに無関心ではなくここでも落ちる。
+            "a point query for the hovered pixel",
+            "the readout fills all twelve cells from the point query, row-major",
+            "a null coefficient renders as a masked NaN cell",
+            "a fast drag costs one point query in flight",
+            "answered after its claim was retired",
+            # Whether a pixel is inside the active region is per-pixel, so it
+            # transposes with everything else: the fixture's out-of-region pixel
+            # is at (row 0, col 2), whose transpose (row 2, col 0) is inside.
+            # The marker therefore goes missing rather than surviving the swap,
+            # which is the whole reason it is not on the diagonal.
+            # 領域の内外は画素ごとの性質なので、これも一緒に転置する。
+            # フィクスチャの領域外画素 (row 0, col 2) の転置 (row 2, col 0) は
+            # 領域内なので、印は付いたままにならず消える（対角線上に置かない
+            # 理由がこれである）。
+            "outside the active region is marked as such",
+            # And the check that watches *when* the marker moves needs a marked
+            # pixel to watch; with the coordinates swapped there is not one.
+            # 印がいつ動くかを見るチェックは、印の付く画素が要る。転置すると
+            # そのような画素が無くなる。
+            "the marker stays with the numbers it disclaims",
+        ),
+        id="hover_probe_transposes_row_and_col",
+    ),
+    # ---- the hover series merged back into the view series
+    #
+    # The one property Task 2's brief states in bold, and the one nothing
+    # asserted until this entry existed: replacing every live use of
+    # ``probeSeq`` with ``state.reqId`` passed all 76 checks in all five
+    # scenarios, because every other hover in the harness follows a
+    # ``settled()`` and so never overlaps a transfer.
+    #
+    # The damage is silent and it is not a corner case. ``reload()`` drops its
+    # payload when ``isStale(req)``, so one mousemove during a transfer retires
+    # the transfer that is still arriving: the tiles stay on the previous
+    # matrix and the status line stays on 「ビュー取得中…」 for good. On the
+    # 1080p matrix the transfer takes seconds with the pointer over the image
+    # the whole time, so this is every load, not an unlucky one.
+    #
+    # 読み取り側の系列をビュー側の ``reqId`` に統合する変異。ブリーフが太字で
+    # 述べていた唯一の性質でありながら、この項目ができるまで5シナリオ76件の
+    # どれも検出しなかった（他のホバーはすべて ``settled()`` のあとで転送と
+    # 重ならないため）。転送中の mousemove 1回でその転送が失効し、タイルは前の
+    # 行列のまま、ステータス行は「ビュー取得中…」のまま固まる。
+    pytest.param(
+        "probe",
+        [
+            (
+                "js/main.js",
+                "  state.probeSeq += 1;\n"
+                "  state.probeWanted = { col: hit.col, row: hit.row, seq: state.probeSeq };",
+                "  state.reqId += 1;\n"
+                "  state.probeWanted = { col: hit.col, row: hit.row, seq: state.reqId };",
+            ),
+            (
+                "js/main.js",
+                "        if (want.seq !== state.probeSeq) continue;   // the pointer has moved on",
+                "        if (want.seq !== state.reqId) continue;   // the pointer has moved on",
+            ),
+            (
+                "js/main.js",
+                "        if (want.seq !== state.probeSeq) continue;\n        clearMatrixCells();",
+                "        if (want.seq !== state.reqId) continue;\n        clearMatrixCells();",
+            ),
+            (
+                "js/main.js",
+                "  clearMatrixCells();\n  state.probeSeq += 1;\n  state.probeWanted = null;",
+                "  clearMatrixCells();\n  state.reqId += 1;\n  state.probeWanted = null;",
+            ),
+        ],
+        ("hovering during a view transfer does not stall the tiles",),
+        id="hover_series_shares_the_view_request_counter",
+    ),
+    # ---- the view-value panel's layout branch, forced the other way
+    #
+    # ``probe_assumes_every_body_is_planar`` pins one direction; this pins the
+    # other, matching how ``percentileAbsPerChannel``'s two walks each have
+    # their own entry. Both directions are needed for the same reason there:
+    # forcing the branch either way still prints twelve plausible numbers, and
+    # only the correspondence between a label and its channel is lost.
+    # もう一方の向きを固定する（``percentileAbsPerChannel`` と同じ扱い）。
+    # どちらへ倒してももっともらしい数値は出て、ラベルと中身の対応だけが失われる。
+    pytest.param(
+        "views",
+        [("js/main.js", "  const planar = p.layout === LAYOUT_PLANAR;", "  const planar = false;")],
+        ("planar body: the hover readout",),
+        id="view_values_read_a_planar_body_as_interleaved",
+    ),
+    # ---- the readout's own shape, which is a behaviour and not a decoration
+    #
+    # Both of these were the state that shipped, and neither produces an error
+    # of any kind: the viewer draws, the numbers are right, and the only thing
+    # wrong is that they cannot be read together. Twelve seven-character cells
+    # stretched across a 1600px window put one number per 500px column, and the
+    # display range and the three timings sat below the controls in a sidebar
+    # that has ``overflow-y: auto`` -- off the bottom of a short window, while
+    # the strip they belong in had room to spare.
+    # どちらも実際に出荷されていた状態であり、エラーは一切出ない。描画は
+    # 成功し、数値も正しく、ただ同時に読めないだけである。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "    `${PROBE_HEAD_PX}px repeat(${cols.length}, ${PROBE_CELL_PX}px)`;",
+            "    `var(--rowhead) repeat(${cols.length}, minmax(0, 1fr))`;",
+        )],
+        ("the readout table's columns are fixed width",),
+        id="readout_table_stretches_across_the_window",
+    ),
+    # Relocated rather than deleted: removing the elements would make
+    # ``$("range-info")`` null and throw on the first render, which is a loud
+    # failure and not the one this pins. The sidebar block it writes is where
+    # these lines used to live -- not a byte-exact restoration of the pre-branch
+    # page, since ``#perf-ranges`` did not exist before this branch and is
+    # carried along here so the id survives the move.
+    # 消すのではなく戻す。要素ごと消すと ``$("range-info")`` が null になって
+    # 描画時に例外になり、それは派手な失敗であってここで見たいものではない。
+    # 書き戻す先はこれらの行が元々あった場所だが、ブランチ以前のページの
+    # 完全な復元ではない（``#perf-ranges`` はこのブランチで増えた id であり、
+    # 移動先で消えないよう一緒に運んでいる）。
+    pytest.param(
+        "probe",
+        [
+            (
+                "index.html",
+                "\n    <div class=\"rd-panel\">\n"
+                "      <div class=\"rd-title mono\">表示レンジ</div>\n"
+                "      <div class=\"rd-rows mono\">\n"
+                "        <div><span id=\"range-info\" class=\"val\">—</span></div>\n"
+                "      </div>\n"
+                "    </div>\n"
+                "\n    <div class=\"rd-panel\">\n"
+                "      <div class=\"rd-title mono\">計測</div>\n"
+                "      <!-- In the order the work happens. レンジ came up from the status line,\n"
+                "           which was printing 転送 and GPU転送 again 20px below this panel.\n"
+                "           作業の順。レンジはステータス行から移した（同じ行がこの板の20px下で\n"
+                "           転送とGPU転送を繰り返していた）。 -->\n"
+                "      <div class=\"rd-rows mono\">\n"
+                "        <div>転送 <span id=\"perf-fetch\" class=\"val\">—</span></div>\n"
+                "        <div>レンジ <span id=\"perf-ranges\" class=\"val\">—</span></div>\n"
+                "        <div>GPU転送 <span id=\"perf-upload\" class=\"val\">—</span></div>\n"
+                "        <div>JSヒープ <span id=\"perf-heap\" class=\"val\">—</span></div>\n"
+                "      </div>\n"
+                "    </div>\n",
+                "",
+            ),
+            (
+                "index.html",
+                "      <div class=\"group legend\">",
+                "      <div class=\"group readouts mono\">\n"
+                "        <div>表示レンジ <span id=\"range-info\" class=\"val\">—</span></div>\n"
+                "        <div>転送 <span id=\"perf-fetch\" class=\"val\">—</span></div>\n"
+                "        <div>レンジ <span id=\"perf-ranges\" class=\"val\">—</span></div>\n"
+                "        <div>GPU転送 <span id=\"perf-upload\" class=\"val\">—</span></div>\n"
+                "        <div>JSヒープ <span id=\"perf-heap\" class=\"val\">—</span></div>\n"
+                "      </div>\n\n"
+                "      <div class=\"group legend\">",
+            ),
+        ],
+        ("the readout's panels all sit in the dashboard, not the sidebar",),
+        id="the_range_and_timings_go_back_into_the_sidebar",
+    ),
+    # ---- the readout table, fixed but no longer compact
+    #
+    # `fr` is not the only way to give twelve seven-character cells the whole
+    # window; a fixed 600px column does it too, and satisfies a check that only
+    # forbids fractions. The bound the check carries is what makes "fixed width"
+    # mean what the task meant by it.
+    # 全幅に伸ばす方法は `fr` だけではない。固定600pxでも同じことが起き、
+    # 分数だけを禁じるチェックは通ってしまう。
+    pytest.param(
+        "probe",
+        [("js/main.js", "const PROBE_CELL_PX = 66;", "const PROBE_CELL_PX = 600;")],
+        ("the readout table's columns are fixed width",),
+        id="readout_table_columns_are_fixed_but_enormous",
+    ),
+    # ---- the strip stacked again, in each of the two places it can be written
+    #
+    # `display: block` on `.readout` is the pre-task layout exactly: the panels
+    # sit one above another, the strip is as tall as their sum, and the tiles
+    # give up the difference. Nothing throws, every number is right, and the
+    # placement and width checks are both indifferent to it -- they constrain
+    # ancestry and the absence of `fr`, neither of which is a layout. The
+    # stylesheet and an inline attribute are separate entries because they are
+    # separate edits and the sheet-only check missed the second.
+    # `.readout` の `display: block` はタスク以前のレイアウトそのもので、板は
+    # 縦に積まれ、その分だけタイルが低くなる。例外は出ず、数値は正しく、
+    # 置き場所と列幅のチェックはどちらも無関心である（祖先と `fr` の不在を
+    # 見ているだけで、どちらもレイアウトではない）。シートとインラインは別の
+    # 編集なので項目も分ける。
+    pytest.param(
+        "probe",
+        [("style.css", ".readout {\n  display: flex;", ".readout {\n  display: block;")],
+        ("the readout lays its panels out in a row",),
+        id="readout_panels_stack_via_the_stylesheet",
+    ),
+    pytest.param(
+        "probe",
+        [("index.html", "<section class=\"readout\">",
+          "<section class=\"readout\" style=\"display: block\">")],
+        ("the readout lays its panels out in a row",),
+        id="readout_panels_stack_via_an_inline_style",
+    ),
+    # ---- the duplicate panel, put back
+    #
+    # `ビュー値` beside `行列` is the same twelve numbers twice on any view whose
+    # picture *is* the matrix: 974px of a 1600px strip -- the widest element in
+    # a bar whose purpose is to stop wasting width -- and at 900px the strip
+    # doubles to 224px, taking 113px off the tiles to restate what is 20px to
+    # its left. Forcing it visible is the state that shipped, and it fails
+    # nothing else: the panel's contents are still written and still correct.
+    # 描かれているものが行列そのものであるビューでは、`ビュー値` は `行列` と
+    # 同じ12個である（1600pxの帯で974px＝最も広い要素、900pxでは帯が224pxに
+    # なりタイルから113px）。常に出す実装は出荷されていた状態であり、中身は
+    # 書かれ続けているので他のチェックは落ちない。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  $(\"view-panel\").hidden = state.spec.values_are_matrix === true;",
+            "  $(\"view-panel\").hidden = false;",
+        )],
+        ("the view-value panel is dropped where it repeats the matrix",),
+        id="the_duplicate_view_value_panel_is_always_shown",
+    ),
+    # ---- and the two ways to ignore the declaration while still passing
+    #
+    # `views/base.py` argues the default must be the showing direction,
+    # `routers/view.py` says the answer is "not derivable from ``kind``", and
+    # `main.js` repeats both -- and until `tri_scalar`'s panel was checked, all
+    # three sentences were unasserted prose. `coef_tiles` (scalar, declares
+    # true) and `surface` (rgb, declares false) cannot tell any of these
+    # implementations apart. A view that is `scalar` and declares nothing --
+    # a residual-error view, say -- loses its only numbers under both.
+    # 宣言を無視したまま通ってしまう2つの実装。`coef_tiles`（scalar・真）と
+    # `surface`（rgb・偽）だけでは、宣言を読む実装と区別が付かない。
+    # scalar で無宣言のビュー（残差ビューなど）は、どちらでも唯一の数値を失う。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  $(\"view-panel\").hidden = state.spec.values_are_matrix === true;",
+            "  $(\"view-panel\").hidden = state.spec.kind === \"scalar\";",
+        )],
+        ("a view that declares nothing about its values keeps its panel",),
+        id="view_value_panel_hidden_by_kind_instead_of_the_declaration",
+    ),
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  $(\"view-panel\").hidden = state.spec.values_are_matrix === true;",
+            "  $(\"view-panel\").hidden = state.spec.values_are_matrix !== false;",
+        )],
+        ("a view that declares nothing about its values keeps its panel",),
+        id="an_undeclared_view_defaults_to_hiding_its_own_values",
+    ),
+    # ---- the readout left describing a matrix that is no longer on screen
+    #
+    # `clearReadout()` at the end of `reload()`. Deleting it broke no check at
+    # all: after loading matrix B the strip kept matrix A's twelve coefficients
+    # and A's out-of-region marker, under the picture of B, until the pointer
+    # moved.
+    # `reload()` 末尾の `clearReadout()`。消しても何も落ちなかった——行列Bを
+    # 読み込んだあとも、帯にはAの12個とAの「領域外」の印が、Bの絵の下に、
+    # ポインタが動くまで残る。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  clearReadout();\n\n  const bytes = payload.data.byteLength;",
+            "\n  const bytes = payload.data.byteLength;",
+        )],
+        ("a load clears the readout instead of leaving the previous matrix's numbers",),
+        id="a_load_leaves_the_previous_matrix_in_the_readout",
+    ),
+    # ---- the marker cleared while the numbers it disclaims were still shown
+    #
+    # `showProbe` writes the heading synchronously and the twelve cells are not
+    # touched until the answer lands, so writing `false` here cleared the marker
+    # over the previous pixel's out-of-region values -- printed in the same
+    # type, colour and precision as real coefficients, for one round trip,
+    # every time the pointer left a masked pixel.
+    # 見出しは同期的に書かれ、セルは応答が来るまで変わらない。ここで `false`
+    # を書くと、前の画素の領域外の値が本物と同じ見た目で残ったまま印だけが
+    # 消える——マスク画素からポインタを動かすたび、1往復ぶん。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  setProbePos(hit.col, hit.row, $(\"probe-pos\").classList.contains(\"outside\"));",
+            "  setProbePos(hit.col, hit.row, false);",
+        )],
+        ("the marker stays with the numbers it disclaims",),
+        id="the_marker_is_cleared_before_the_numbers_it_describes",
+    ),
+    # ---- the readout bound to the newest matrix instead of the drawn one
+    #
+    # `state.matrixId` changes when `POST /session/matrix` answers, seconds
+    # before that matrix's pixels arrive. Reading it here answers hovers about
+    # the matrix still in transfer while the tiles show the previous one --
+    # and `inside_active_region` differs between matrices, so the marker and
+    # the picture disagree for the whole transfer.
+    # `state.matrixId` は POST が返った時点で変わり、その行列の画素が届くのは
+    # 数秒後である。ここでそれを読むと、タイルが前の行列を映している間の
+    # ホバーに転送中の行列が答える。有効領域は行列ごとに違うので、印と絵が
+    # 転送のあいだずっと食い違う。
+    pytest.param(
+        "probe",
+        [("js/main.js", "      const matrixId = state.shownMatrixId;",
+          "      const matrixId = state.matrixId;")],
+        ("a hover during a load asks the matrix on screen",),
+        id="the_readout_probes_the_arriving_matrix_not_the_drawn_one",
+    ),
+    # ---- the named grid rows, whose absence is invisible everywhere else
+    #
+    # `body`'s template is positional and `#space-note` is `hidden` for a
+    # projector-space matrix, so without these five lines every band after it
+    # moves up one row and the `1fr` lands on the readout: a blank band under
+    # the strip, and a tile height equal to the sidebar's content -- i.e.
+    # decided by how many controls the current view declares. Deleting them
+    # passed every check in every scenario.
+    # `body` のテンプレートは位置で決まり、`#space-note` は投影座標の行列では
+    # `hidden` になるため、この5行が無いと以降の段が1行ずつ繰り上がり `1fr` が
+    # 読み取り欄に載る（帯の下の空白と、サイドバーの内容で決まるタイル高）。
+    # 消しても全シナリオが通っていた。
+    pytest.param(
+        "probe",
+        [(
+            "style.css",
+            ".toolbar { grid-row: 1; }\n"
+            "#space-note { grid-row: 2; }\n"
+            "main { grid-row: 3; }\n"
+            ".readout { grid-row: 4; }\n"
+            "footer#status { grid-row: 5; }\n",
+            "",
+        )],
+        ("each band of the page is placed in a named grid row",),
+        id="the_page_bands_fall_back_to_document_order",
+    ),
+    # ---- the status line printing what is already on screen
+    #
+    # Restores both halves at once, because that is how it would come back: the
+    # line regains 転送 / レンジ / GPU転送 -- two of the three verbatim copies of
+    # the 計測 panel 20px above it -- and the panel loses the one figure that
+    # lived nowhere else. The check pins the line to the dimension summary *and*
+    # レンジ to the panel, so either half alone fails it.
+    # 戻るときは両方まとめて戻るので、変異も両方を戻す。行は 計測 パネルの
+    # 20px下でその2つを逐語的に繰り返し、パネルはここにしか無い数値を失う。
+    pytest.param(
+        "probe",
+        [
+            (
+                "js/main.js",
+                "  $(\"perf-ranges\").textContent = `${perf.rangesMs} ms`;\n",
+                "",
+            ),
+            (
+                "js/main.js",
+                "  status(`${payload.width}×${payload.height}×${payload.channels} を表示中`);",
+                "  status(\n"
+                "    `${payload.width}×${payload.height}×${payload.channels} を表示中 — ` +\n"
+                "    `転送 ${perf.fetchMs} ms / レンジ ${perf.rangesMs} ms / ` +\n"
+                "    `GPU転送 ${perf.uploadMs}+${perf.uploadFinishMs} ms`\n"
+                "  );",
+            ),
+        ],
+        ("the status line after a render is the dimensions alone",),
+        id="the_status_line_repeats_the_timings_panel",
+    ),
+    # ---- the heading written when the selector changes rather than when a view
+    #      renders
+    #
+    # The implementation the comment in ``reload()`` exists to forbid, and the
+    # one nothing caught: moving the write into the ``change`` handler passed
+    # every check in every scenario. It only shows on a view that is *refused* --
+    # unsupported kind, unknown layout, server 400 -- where the heading and the
+    # panel then describe a view that never rendered, over the numbers of the
+    # one that did.
+    # ``reload()`` のコメントが禁じている当の実装であり、何も検出しなかった
+    # もの（`change` 側へ移しても全シナリオが通っていた）。差が出るのは
+    # 拒否されたビューのときだけで、そこでは見出しと板が「描かれなかった
+    # ビュー」を説明し、その下には別のビューの数値が並ぶ。
+    pytest.param(
+        "views",
+        [
+            (
+                "js/main.js",
+                "  $(\"view-title\").textContent = state.spec.label || state.spec.key;\n",
+                "",
+            ),
+            (
+                "js/main.js",
+                "    state.spec = spec;\n    buildServerParams(spec);",
+                "    state.spec = spec;\n"
+                "    $(\"view-title\").textContent = spec.label || spec.key;\n"
+                "    buildServerParams(spec);",
+            ),
+        ],
+        ("a refused view leaves the readout naming the view still on screen",),
+        id="view_heading_written_when_the_selector_changes",
+    ),
+    # ---- and the heading inferred from the payload instead of read off the spec
+    #
+    # The other way to pass a heading check without having one: two of the three
+    # views in play are 12-channel scalar views, so a label chosen by channel
+    # count is right for `coef_tiles` and for `surface` and wrong only for the
+    # third. Registering a view in Python and getting its name on screen is the
+    # promise this whole registry exists for.
+    # 見出しらしきものを持たずにチェックを通すもう一つの方法。12チャンネルの
+    # scalar ビューが2つあるため、チャンネル数で選んだラベルは `coef_tiles`
+    # でも `surface` でも正しく、3つ目でだけ誤る。
+    pytest.param(
+        "views",
+        [(
+            "js/main.js",
+            "  $(\"view-title\").textContent = state.spec.label || state.spec.key;",
+            "  $(\"view-title\").textContent ="
+            " state.payload.channels === 3 ? \"投影面の色\" : \"12係数タイル\";",
+        )],
+        ("the readout's heading names the view that rendered, not its shape",),
+        id="view_heading_inferred_from_the_payload_shape",
+    ),
+    # ---- the heading that says whose numbers the second panel holds
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "  $(\"view-title\").textContent = state.spec.label || state.spec.key;\n",
+            "",
+        )],
+        ("names the view whose values it is showing",),
+        id="view_value_panel_never_names_its_view",
+    ),
+    # ---- and the readout's last remaining lie
+    #
+    # ``inside_active_region`` was shipped by the point query and consumed by
+    # nobody. The mask ``coef_tiles.py`` and ``surface.py`` paint is applied at
+    # *render* time, so outside the active region the tile is grey while the
+    # stored array still holds a finite coefficient -- and the readout, which
+    # reads the array, printed it in the same type, colour and precision as a
+    # real one. On data/linear_pipeline_1080/matrices_linear_gamma.npy (active
+    # region [613, 201, 722, 722]) hovering row 5, col 5 gave
+    # ``13.440 / 1.197 / 0.017`` under a grey tile, with nothing on screen to
+    # say those numbers mean nothing. Dropping the call restores exactly that:
+    # the position line is still written synchronously by ``showProbe``, so the
+    # readout keeps working and keeps lying.
+    # 点クエリが返している ``inside_active_region`` を誰も消費していなかった
+    # 状態に戻す。位置は ``showProbe`` が同期的に書くので、読み取り欄は
+    # 動いたまま嘘をつく。
+    pytest.param(
+        "probe",
+        [(
+            "js/main.js",
+            "        setProbePos(want.col, want.row, body.inside_active_region === false);\n",
+            "",
+        )],
+        (
+            "outside the active region is marked as such",
+            # The marker never comes on at all, so the check that watches it
+            # survive a pending answer has nothing to watch either.
+            # 印がそもそも一度も付かないので、応答待ちのあいだ印が残ることを
+            # 見るチェックにも見るものが無くなる。
+            "the marker stays with the numbers it disclaims",
+        ),
+        id="readout_never_says_a_pixel_is_outside_the_active_region",
     ),
 ]
 
@@ -490,7 +1052,7 @@ def test_harness_catches_the_regressions_it_exists_for(
     shutil.copytree(_STATIC_DIR, mutated_static)
 
     for filename, find, replace in edits:
-        target = mutated_static / "js" / filename
+        target = mutated_static / filename
         source = target.read_text(encoding="utf-8")
         assert find in source, f"mutation anchor no longer present in {filename}: {find!r}"
         target.write_text(source.replace(find, replace, 1), encoding="utf-8", newline="")

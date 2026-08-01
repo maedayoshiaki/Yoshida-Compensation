@@ -17,14 +17,19 @@
 // サーバ側ビューパラメータだけが再フェッチを起こし、それも 適用 でまとめて
 // 送る（コントロールごとではなく操作ごとに1回のレンダ）。
 //
-// The fetched Float32Array stays on the CPU for the whole session so pixel
-// probing reads it locally. The body is planar (C, H, W) -- channel c of pixel
-// (row, col) is data[c * width * height + row * width + col] -- with the older
-// interleaved (H, W, C) still handled wherever `payload.layout` says so.
-// 取得した Float32Array は保持し続け、画素読み取りはローカルで済ませる。
-// 本体は planar (C, H, W)。従来のインタリーブも layout を見て扱う。
+// The fetched Float32Array stays on the CPU for the whole session, so the
+// hovered pixel's *view* values are read locally. The body is planar (C, H, W)
+// -- channel c of pixel (row, col) is data[c * width * height + row * width +
+// col] -- with the older interleaved (H, W, C) still handled wherever
+// `payload.layout` says so. The hovered pixel's *matrix* coefficients are not
+// in that array at all under a view like `surface`, and are fetched one pixel
+// at a time instead; see the readout section.
+// 取得した Float32Array は保持し続け、ホバー画素の「ビューの値」はローカルで
+// 読む。本体は planar (C, H, W)。従来のインタリーブも layout を見て扱う。
+// ホバー画素の「行列の係数」は `surface` のようなビューではこの配列に無いので、
+// 1画素ずつ取りに行く（読み取りの節を参照）。
 
-import { loadMatrix, listViews, fetchView } from "./api.js";
+import { loadMatrix, listViews, fetchView, probeMatrix } from "./api.js";
 import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
 import { LAYOUT_PLANAR, requireSupportedKind, traitsFor } from "./contract.js";
 
@@ -51,16 +56,38 @@ const DEFAULT_COLS = ["out_R", "out_G", "out_B"];
 // layoutFor が軸を引き継いでよいのはこれが付いている場合だけである。
 const MATRIX_CORNER = "in \\ out";
 
-// rows x cols is the *tile* grid; probeCols is the readout grid, which for an
-// rgb view is not the same thing. See layoutFor.
-// rows x cols はタイルの並び、probeCols は読み取りの並び。rgbビューでは
-// この2つは一致しない。
+// rows x cols is the *tile* grid -- the shape of whatever view is on screen.
+// The readout table is not derived from it; it is always the matrix's own
+// 4x3, built once from DEFAULT_ROWS x DEFAULT_COLS. See buildProbeGrid.
+// rows x cols はタイルの並び、すなわち表示中のビューの形である。読み取り表は
+// ここから導かれず、常に行列自身の4x3である。
 const DEFAULT_LAYOUT = {
   rows: DEFAULT_ROWS,
   cols: DEFAULT_COLS,
-  probeCols: DEFAULT_COLS,
   corner: MATRIX_CORNER,
 };
+
+// The readout table's column widths, in CSS pixels.
+//
+// Fixed lengths, not fractions. The table is always the matrix's own 4x3 and a
+// cell holds seven characters, so `minmax(0, 1fr)` stretched `-0.1234` across a
+// 500px column on a 1600px window -- 12 numbers occupying the full width of the
+// screen, with the display range and the transfer timings pushed into the
+// sidebar's overflow because there was nowhere else for them to go. At these
+// widths the whole table is about 240px and the rest of the readout fits beside
+// it.
+//
+// Set here rather than in style.css because buildProbeGrid writes the template
+// inline, and an inline style wins: a value in the sheet would look live and be
+// dead. See the note on .probe-grid there.
+//
+// 読み取り表の列幅（CSSピクセル）。分数ではなく固定長にする。表は常に行列
+// 自身の4x3で、1セルは7文字しかないため、`1fr` では1600pxの窓で1列500pxに
+// なっていた——12個の数値が画面の全幅を占め、表示レンジと計測はサイドバーの
+// 溢れた先へ追いやられていた。この幅なら表は約240pxで、残りは横に並ぶ。
+// style.css ではなくここに書くのは、インライン指定が優先されるためである。
+const PROBE_HEAD_PX = 38;
+const PROBE_CELL_PX = 66;
 
 // Gamma bounds for the typed input. The shader guards with max(u_gamma, 1e-6),
 // so the floor here is about keeping the control usable rather than safe.
@@ -71,6 +98,30 @@ const GAMMA_MAX = 10;
 
 const state = {
   matrixId: null,
+  // The matrix the *tiles* are currently drawn from, which is not the same
+  // thing as `matrixId` and must not be confused with it.
+  //
+  // `matrixId` is what the newest load registered; it changes the moment
+  // `POST /session/matrix` answers, seconds before the view transfer that will
+  // put that matrix on screen has finished. The readout describes the picture,
+  // so it has to ask about the picture: a hover during those seconds used to
+  // be answered by the arriving matrix while the tiles still held the previous
+  // one, and `inside_active_region` is per-matrix -- two matrices captured
+  // either side of a config edit have different active regions, which is
+  // routine here. The tile under the cursor would be grey (masked in the
+  // matrix on screen) while the readout showed finite numbers and no marker
+  // (inside the region of the matrix still arriving), or the reverse.
+  //
+  // Set beside `state.payload`, because the two are the same fact.
+  //
+  // タイルが今描いている行列。`matrixId`（最新の読み込みが登録したもの）とは
+  // 別物である。後者は `POST /session/matrix` が返った時点で変わり、その行列が
+  // 画面に出るまでには数秒の転送がある。読み取り欄は画面を説明するものなので、
+  // 画面に出ている行列に問い合わせなければならない。以前は転送中のホバーが
+  // 到着中の行列に答えられており、`inside_active_region` は行列ごとの性質
+  // なので、設定を変えた前後で撮った2つの行列（このリポジトリでは日常）だと
+  // 印と絵が転送のあいだずっと食い違う。`state.payload` と同じ場所で更新する。
+  shownMatrixId: null,
   meta: null,
   specs: [],        // every ViewSpec from /api/views
   spec: null,       // the active one
@@ -88,6 +139,23 @@ const state = {
   // where it no longer matches.
   // 連続フェッチの順序保証。最新のリクエストIDと一致しない結果は捨てる。
   reqId: 0,
+  // Hover readout. Fetches are coalesced rather than queued: a mousemove can
+  // fire dozens of times a second and every one of them would otherwise be a
+  // round trip. At most one request is in flight; the newest position waits
+  // for it and fires once, so a fast drag costs two requests, not fifty.
+  //
+  // Deliberately a series of its own rather than `reqId`. That one guards the
+  // view transfers, and sharing it would mark the in-flight view fetch stale
+  // on every mousemove -- the tiles would simply stop arriving while the
+  // pointer was over them, with nothing to say why.
+  //
+  // ホバーの点クエリは1つずつに合流させる。飛んでいる間の移動は最新の位置だけを
+  // 残し、戻ってきたら1回だけ追加で投げる。`reqId` とは別系列にすること。
+  // 流用するとホバーのたびに転送中のビュー取得がスタール扱いになり、ポインタを
+  // 載せている間タイルが届かなくなる（しかも理由がどこにも出ない）。
+  probeSeq: 0,        // monotonic; a response older than this is dropped
+  probeInFlight: false,
+  probeWanted: null,  // { col, row, seq } claimed while a fetch was in flight
 };
 
 // Uniform-only display parameters. Changing any of these must not fetch.
@@ -97,7 +165,7 @@ const display = {
 
 const views = [];       // one GLView per channel
 const captions = [];    // per-tile caption elements
-const probeCells = [];  // per-channel readout elements
+const probeCells = [];  // the 12 readout cells, row-major over DEFAULT_ROWS x DEFAULT_COLS
 let syncBusy = false;   // guards onViewChange against re-entry
 
 // ---------------------------------------------------------------- utilities
@@ -268,17 +336,11 @@ function fallbackAxes(labels, channels) {
 // like it works. `kind` is the thing that actually says how many pictures are
 // in the payload, so that is what decides.
 //
-// The readout grid is deliberately *not* keyed the same way: a hovered pixel
-// still has three numbers, so it keeps one cell per channel and the two grids
-// differ in exactly that one place.
-//
 // タイル配置は kind で分岐させる。scalar はチャンネル数だけタイルを並べるが、
 // rgb の3チャンネルは1枚の絵であり、3枚のグレースケールにしては意味が無い。
 // ラベル ["R","G","B"] は `axesFromLabels` では解釈できず、フォールバックだと
 // まさにその1行3列になってしまう（しかも黙って描けてしまう）。ペイロードに
 // 絵が何枚あるかを知っているのは kind だけなので、それで決める。
-// 読み取りグリッドだけは別で、ホバー1画素につき数値は3つあるためチャンネル数
-// で組む。両者が食い違うのはここだけ。
 function layoutFor(payload, current, traits) {
   // `channels === 3` as well as the trait: an rgb view is one colour per pixel,
   // so three channels is what "rgb" means here. requireRgbHasThreeChannels has
@@ -290,12 +352,7 @@ function layoutFor(payload, current, traits) {
   // 実際に弾いているのは requireRgbHasThreeChannels 側で、ここは多重防御だが、
   // 1枚タイルが正しいのは rgb 経路が詰められるペイロードに限られる。
   if (traits.singleTile && payload.channels === 3) {
-    return {
-      rows: [""],
-      cols: ["RGB"],
-      probeCols: fallbackAxes(payload.labels, payload.channels).cols,
-      corner: "",
-    };
+    return { rows: [""], cols: ["RGB"], corner: "" };
   }
   // Keeping the current axes is only sound when they *are* axes -- that is,
   // when the layout on screen came from a matrix-shaped set of labels. The
@@ -320,9 +377,7 @@ function layoutFor(payload, current, traits) {
     || (inheritable
       ? { rows: current.rows, cols: current.cols }
       : fallbackAxes(payload.labels, payload.channels));
-  return {
-    rows: axes.rows, cols: axes.cols, probeCols: axes.cols, corner: MATRIX_CORNER,
-  };
+  return { rows: axes.rows, cols: axes.cols, corner: MATRIX_CORNER };
 }
 
 function buildGrid(layout) {
@@ -366,7 +421,7 @@ function buildGrid(layout) {
     }
   }
   linkViews();
-  buildProbeGrid(rows, layout.probeCols);
+  buildProbeGrid();
 }
 
 // Pan/zoom is shared by all tiles. The guard stops the propagation loop from
@@ -404,10 +459,19 @@ function linkViews() {
   });
 }
 
-function buildProbeGrid(rows, cols) {
+// The readout table is the *matrix*, so it is always 4 inputs x 3 outputs --
+// no argument, and nothing about the view on screen reaches it. It used to be
+// built from the payload's own axes, which is why an rgb view produced a 1x3
+// table of surface colours under headings that named coefficients.
+// 読み取り表は行列そのものなので、常に入力4×出力3で組む。画面上のビューは
+// 一切影響しない。以前はペイロードの軸から組んでいたため、rgbビューでは
+// 係数の見出しの下に投影面のRGBが3つ並んでいた。
+function buildProbeGrid() {
+  const rows = DEFAULT_ROWS, cols = DEFAULT_COLS;
   const grid = $("probe-grid");
   grid.textContent = "";
-  grid.style.gridTemplateColumns = `var(--rowhead) repeat(${cols.length}, minmax(0, 1fr))`;
+  grid.style.gridTemplateColumns =
+    `${PROBE_HEAD_PX}px repeat(${cols.length}, ${PROBE_CELL_PX}px)`;
   probeCells.length = 0;
 
   grid.appendChild(document.createElement("div"));
@@ -432,16 +496,133 @@ function buildProbeGrid(rows, cols) {
   }
 }
 
-// Read all channels for one pixel straight out of the cached array. No fetch.
-// キャッシュ済み配列から全チャンネルを読む。フェッチはしない。
+// The readout is two panels with different sources, and keeping them apart is
+// the whole of this section.
+//
+// `#view-values` is what the *displayed view* holds at that pixel. It comes
+// out of `state.payload`, which is already in hand, so it is written
+// synchronously and costs nothing.
+//
+// `#probe-grid` is the *matrix*'s own 4x3, which the client does not have:
+// under `surface` there is no matrix on this side at all, and shipping a
+// second 99 MB copy to get one would undo the heap the planar transfer bought.
+// So it is fetched a pixel at a time. Until it was, the table showed the
+// payload too -- hovering `surface` printed three projection-surface colours
+// beneath headings that read `in_R -> out_R`.
+//
+// 読み取り欄は出所の違う2枚の板でできており、それを混ぜないことがこの節の要点。
+// `#view-values` は表示中のビューの値で、手元の `state.payload` から同期的に
+// 作れる。`#probe-grid` は行列そのものの4x3で、こちら側には無い（`surface` を
+// 見ているときクライアントに行列は存在せず、2つ目の99MBを送れば計画B2で
+// 半減させたヒープが元に戻る）。だから1画素ずつ取りに行く。それ以前は表も
+// ペイロードを読んでいたため、`surface` をホバーすると `in_R -> out_R` という
+// 見出しの下に投影面のRGBが並んでいた。
+
+function clearMatrixCells() {
+  for (const cell of probeCells) { cell.textContent = "—"; cell.className = "probe-cell"; }
+}
+
+// The position line, and the one warning the table cannot give by itself.
+//
+// `outside` says the pixel is excluded from the mask coef_tiles.py and
+// surface.py paint -- and the numbers below are still printed, because they are
+// what the file holds. That is the whole problem: the mask is applied at
+// *render* time, so the tile is grey while the stored array keeps a finite,
+// meaningless coefficient underneath. Measured on
+// data/linear_pipeline_1080/matrices_linear_gamma.npy (active region
+// [613, 201, 722, 722]), row 5 col 5 reads 13.440 / 1.197 / 0.017 -- set in the
+// same type, the same colour and the same four decimals as a real one. Nothing
+// distinguished them, and they are plausible enough to be written down.
+//
+// They are labelled rather than hidden: blanking them would make this
+// indistinguishable from "nothing has been read yet" (the "—" clearReadout
+// writes), and would also hide the one thing worth seeing here, which is that
+// the file has values out there at all.
+//
+// Written from `want`/`hit` in full every time rather than appended to, so the
+// text cannot end up describing a different pixel from the one that produced
+// the numbers, and a second answer for the same pixel cannot double the suffix.
+//
+// 位置の表示と、表だけでは出せない唯一の警告。`outside` は
+// coef_tiles.py / surface.py が塗るマスクの外側であることを指す。値は消さずに
+// 出す——マスクは描画時に掛かるものなので、タイルが灰色でも配列には有限で
+// 無意味な係数が残っているからである（実測: 上記の行列の row 5 col 5 で
+// 13.440 / 1.197 / 0.017。本物と同じ字体・色・桁数で出ていた）。消さないのは、
+// 消すと「まだ何も読んでいない」を意味する「—」と区別が付かなくなるうえ、
+// 「ファイルには領域外にも値が入っている」という見るべき事実まで隠れるため。
+// 毎回まるごと書き直すのは、数値を出した画素と表示が食い違わないようにする
+// ためと、同じ画素への2度目の応答で接尾辞が重ならないようにするため。
+//
+// The wording says what is true of the numbers, which is not that they failed
+// to be read. They are real values the file holds; what is wrong with them is
+// that the mask covers those pixels, so nothing downstream uses them. 「無効」
+// read as "invalid / the read failed" and contradicted the sentence above about
+// why they are worth showing. 「マスク対象」 is also the vocabulary the sidebar
+// legend already uses for the same pixels.
+// 文言は「読めなかった」ではなく「その値がどういうものか」を述べる。値は
+// ファイルに実在し、問題はその画素がマスクの対象で誰も使わないことにある。
+// 「無効」は読み取り失敗と読め、値を出す理由と矛盾していた。「マスク対象」は
+// サイドバーの凡例が同じ画素に使っている語でもある。
+function setProbePos(col, row, outside) {
+  const el = $("probe-pos");
+  el.textContent = `col ${col}, row ${row}${outside ? " — 有効投影領域の外（マスク対象）" : ""}`;
+  el.classList.toggle("outside", !!outside);
+}
+
+// Reset both panels, and retire whatever claim is in flight.
+//
+// Called on pointer-leave and after a render. Without the `probeSeq` bump a
+// response already on its way would repaint the table a moment after it was
+// cleared, over a `#probe-pos` that says "—".
+// 両方の板を戻し、飛んでいる要求の権利を失効させる。ポインタが外れたときと
+// 再描画のあとに呼ぶ。`probeSeq` を進めないと、消した直後に飛来した応答が
+// 「—」と表示された位置の下に表を描き直す。
+function clearReadout() {
+  $("probe-pos").textContent = "—";
+  $("probe-pos").classList.remove("outside");
+  $("view-values").textContent = "";
+  clearMatrixCells();
+  state.probeSeq += 1;
+  state.probeWanted = null;
+}
+
+// The position and the view's own values, both from data already here.
+//
+// The marker is carried over from whatever it already said, and that is the
+// point: the twelve cells are *not* cleared here, so until the point query
+// answers they still hold the previous pixel's coefficients -- and the marker
+// disclaims those numbers, not the heading above them. Writing `false` here
+// (which is what this did) cleared the marker while the out-of-region values
+// it referred to were still on screen, in the same type, colour and precision
+// as real ones: exactly the state setProbePos exists to make impossible, for
+// one round trip, every time the pointer left a masked pixel.
+//
+// Guessing "inside" is the direction this marker exists to break, so the
+// wrong-but-safe direction is to keep warning until the answer arrives. The
+// alternative -- blanking the twelve cells on every mousemove -- would strobe
+// the table during a drag and collide with the "—" that means "nothing read".
+//
+// 位置と、表示中のビューの値。印は「今出ている状態」をそのまま持ち越す。ここで
+// 12個のセルは消さないので、応答が来るまで表には前の画素の係数が残っており、
+// 印が打ち消しているのはその数値であって、上の見出しではない。以前のように
+// `false` を書くと、領域外の値が本物と同じ字体・色・桁数で表に残ったまま印だけ
+// が消える——マスクされた画素からポインタを動かすたびに、1往復のあいだ、
+// setProbePos が無くそうとしている状態そのものが再現していた。「内側」と
+// 推量する側こそこの印が破ろうとしている沈黙なので、誤るなら警告を残す側に
+// 倒す。12個を毎回消す案は、ドラッグ中に表が点滅し、「まだ何も読んでいない」を
+// 意味する「—」とも衝突する。
 function showProbe(hit) {
+  if (!hit) { clearReadout(); return; }
+  setProbePos(hit.col, hit.row, $("probe-pos").classList.contains("outside"));
+  showViewValues(hit);
+  requestMatrixProbe(hit);
+}
+
+function showViewValues(hit) {
+  const host = $("view-values");
+  host.textContent = "";
   const p = state.payload;
-  if (!p || !hit) {
-    $("probe-pos").textContent = "—";
-    for (const cell of probeCells) { cell.textContent = "—"; cell.className = "probe-cell"; }
-    return;
-  }
-  $("probe-pos").textContent = `col ${hit.col}, row ${hit.row}`;
+  if (!p) return;
   // Planar (C, H, W) puts the channel index outermost; interleaved (H, W, C)
   // puts it innermost. Getting this backwards misreports every hovered value
   // while the tiles themselves still look right -- nothing would flag it.
@@ -450,13 +631,163 @@ function showProbe(hit) {
   const planar = p.layout === LAYOUT_PLANAR;
   const stride = p.width * p.height;
   const offset = hit.row * p.width + hit.col;
-  for (let c = 0; c < probeCells.length && c < p.channels; c++) {
+  for (let c = 0; c < p.channels; c++) {
     const v = planar
       ? p.data[c * stride + offset]
       : p.data[offset * p.channels + c];
-    const cell = probeCells[c];
-    cell.textContent = fmt(v);
-    cell.className = Number.isFinite(v) ? "probe-cell" : "probe-cell nan";
+    const item = document.createElement("div");
+    item.className = "view-value";
+    const label = document.createElement("span");
+    label.className = "vv-label";
+    label.textContent = String(p.labels[c] ?? c);
+    const value = document.createElement("span");
+    value.className = Number.isFinite(v) ? "vv-num" : "vv-num nan";
+    value.textContent = fmt(v);
+    item.appendChild(label);
+    item.appendChild(value);
+    host.appendChild(item);
+  }
+}
+
+// Write one 4x3 into the table.
+//
+// `null` arrives for every non-finite coefficient. That is the point query's
+// contract, not an accident (routers/session.py::_finite_or_none). It is a
+// contract for matrices that carry NaN, though, and not a description of the
+// ones loaded here: the stored array is finite everywhere, including outside
+// the active projection region, and the NaN on screen is written by the views
+// at render time. That is the whole reason `#probe-pos` carries an
+// out-of-region marker -- see setProbePos, and the measurement quoted there.
+// A `null` here therefore means "this matrix really does hold a non-finite
+// coefficient at that pixel", which is rare and worth showing as such.
+//
+// Read back to NaN here rather than branched on in the cell loop, so exactly
+// one place decides what a masked coefficient looks like. `fmt(null)` returns
+// "—", and in this readout "—" already means "nothing has been read yet" --
+// it is the initial text and what a failed query restores. Reusing it would
+// spell "outside the projection area" and "no answer" with the same glyph.
+// NaN prints "NaN" and takes the mask colour the tiles already paint those
+// same pixels in, so the table and the picture agree.
+//
+// 非有限係数は `null` で届く。これは点クエリの契約であって偶然ではないが
+// （routers/session.py::_finite_or_none）、NaNを持ちうる行列のための契約で
+// あって、ここで読んでいる行列の説明ではない。保存された配列は有効投影領域の
+// 外も含めて全て有限で、画面上のNaNはビューが描画時に書いている。`#probe-pos`
+// が独自の「領域外」の印を持つ理由がこれである（setProbePos の実測値を参照）。
+// したがってここで `null` が来るということは「その画素に本当に非有限の係数が
+// 入っている」を意味し、それは稀であり、そう見えるべきである。
+// セル側で分岐させずここで NaN に読み替えるのは、マスクされた係数の見た目を
+// 決める場所を1つにするため。`fmt(null)` は「—」を返すが、この欄で「—」は
+// 既に「まだ何も読んでいない」を意味しており（初期値であり、失敗時に戻す値
+// でもある）、流用すると「投影領域の外」と「答えが無い」が同じ字面になる。
+// NaN ならタイルが同じ画素に塗っているマスク色が付き、表と絵が一致する。
+function showMatrixValues(values) {
+  for (let i = 0; i < DEFAULT_ROWS.length; i++) {
+    for (let j = 0; j < DEFAULT_COLS.length; j++) {
+      const cell = probeCells[i * DEFAULT_COLS.length + j];
+      if (!cell) continue;
+      const raw = (values[i] || [])[j];
+      const v = raw === null || raw === undefined ? NaN : raw;
+      cell.textContent = fmt(v);
+      cell.className = Number.isFinite(v) ? "probe-cell" : "probe-cell nan";
+    }
+  }
+}
+
+// The status line is shared with the loader and a hover fires dozens of times
+// a second, so repeating one failure would strobe it. Only a message that
+// differs from the last one is worth writing.
+//
+// A success has to put the line back, not merely stop writing to it: leaving
+// it would mark the bar as an error over a readout that is working again, for
+// as long as nothing else happens to write there -- which, once a matrix is
+// loaded and the user is only hovering, is indefinitely. So the sentence the
+// line held before the readout claimed it is restored. Only if it is still the
+// sentence *this* wrote, though; if the loader has since taken the line, that
+// is the newer truth and it stays.
+//
+// ステータス行は読み込みと共用で、ホバーは毎秒何十回も起きるため、同じ失敗を
+// 連投すると点滅する。書くのは前回と違うときだけ。復旧時は「書かない」では
+// 足りず、行を元に戻す必要がある——放置すると、既に直っている読み取りについて
+// 行が赤いまま残り、他の誰かが書くまで（行列を読み込んだあとホバーしている
+// だけなら永久に）そのままになる。ただし戻すのは、行の内容がまだこちらの
+// 書いた文である場合に限る。読み込み側が既に書いていればそちらが新しい。
+let lastProbeError = null;      // the failure the readout currently claims the line for
+let probeErrorText = null;      // exactly what was written, to tell whether it is still ours
+let statusBeforeProbe = null;   // what the line said before the readout took it
+
+function reportProbeError(message) {
+  if (message === lastProbeError) return;
+  if (message) {
+    if (lastProbeError === null) statusBeforeProbe = $("status").textContent;
+    lastProbeError = message;
+    probeErrorText = `読み取りに失敗: ${message}`;
+    status(probeErrorText, true);
+    return;
+  }
+  lastProbeError = null;
+  if (probeErrorText !== null && $("status").textContent === probeErrorText) {
+    status(statusBeforeProbe ?? "");
+  }
+  probeErrorText = null;
+  statusBeforeProbe = null;
+}
+
+// Claim the readout for this pixel, and fetch unless something is already in
+// flight -- in which case the claim is what the in-flight request picks up
+// when it returns.
+//
+// Every hover claims a new `probeSeq`, whether or not it gets to issue a
+// request. That is what keeps the position on screen and the numbers under it
+// describing the same pixel: `#probe-pos` is written synchronously, so a
+// response for a superseded claim would put one pixel's coefficients under
+// another pixel's heading.
+//
+// ホバーのたびに `probeSeq` を進める（要求を出せたかどうかに関わらず）。
+// 位置の表示は同期的に書き換わるので、追い越された要求の応答を描くと
+// 「ある画素の係数が別の画素の見出しの下に出る」ことになる。
+function requestMatrixProbe(hit) {
+  // The matrix on screen, not the newest one registered. See state.shownMatrixId.
+  // 画面に出ている行列。最新の登録ではない。
+  if (!state.shownMatrixId) { clearMatrixCells(); return; }
+  state.probeSeq += 1;
+  state.probeWanted = { col: hit.col, row: hit.row, seq: state.probeSeq };
+  if (state.probeInFlight) return;
+  // Not awaited -- nothing here has anything to wait for. The loop reports its
+  // own failures; this catch is the net for a throw that is not a failed
+  // fetch, routed through the same de-duplication so a bug on the hover path
+  // cannot strobe the status line either.
+  // 待つものが無いので await しない。fetch の失敗はループ側が報告するので、この
+  // catch はそれ以外の例外のための網であり、同じ重複除去を通す。
+  runMatrixProbes().catch((e) => reportProbeError(errorText(e)));
+}
+
+async function runMatrixProbes() {
+  state.probeInFlight = true;
+  try {
+    while (state.probeWanted) {
+      const want = state.probeWanted;
+      state.probeWanted = null;
+      const matrixId = state.shownMatrixId;
+      try {
+        const body = await probeMatrix(matrixId, want.row, want.col);
+        if (want.seq !== state.probeSeq) continue;   // the pointer has moved on
+        // Only an explicit `false` is a claim. A response without the field is
+        // a server that does not answer this question, and "it did not say"
+        // must not be rendered as "it said you are inside".
+        // 明示的な false のときだけ主張する。フィールドが無い応答は「この問いに
+        // 答えないサーバ」であって、「内側だと答えた」ではない。
+        setProbePos(want.col, want.row, body.inside_active_region === false);
+        showMatrixValues(body.values);
+        reportProbeError(null);
+      } catch (e) {
+        if (want.seq !== state.probeSeq) continue;
+        clearMatrixCells();
+        reportProbeError(errorText(e));
+      }
+    }
+  } finally {
+    state.probeInFlight = false;
   }
 }
 
@@ -710,6 +1041,12 @@ function requireRgbHasThreeChannels(kind, channels, where) {
 // new one.
 async function reload(req = beginRequest()) {
   if (!state.matrixId || !state.spec) return;
+  // Captured once, so the id this request fetched from is the id published
+  // with its payload. Re-reading `state.matrixId` after the await would let a
+  // newer load's id be attached to this transfer's pixels.
+  // 発行時に控える。await のあとに読み直すと、この転送の画素に新しい行列のIDが
+  // 付きうる。
+  const matrixId = state.matrixId;
   // Checked from the registry first, so a view that cannot be drawn is refused
   // before the transfer rather than after it.
   // まず登録内容で判定し、描けないビューは転送前に断る。
@@ -728,7 +1065,7 @@ async function reload(req = beginRequest()) {
   status(`ビュー取得中… (${state.spec.key} ${JSON.stringify(params)})`);
 
   const t0 = performance.now();
-  const payload = await fetchView(state.matrixId, state.spec.key, params);
+  const payload = await fetchView(matrixId, state.spec.key, params);
   const t1 = performance.now();
   if (isStale(req)) return;   // a newer request owns the screen now
   // Backstop: the registry and the response could disagree. `traitsFor` is the
@@ -741,6 +1078,52 @@ async function reload(req = beginRequest()) {
   const traits = traitsFor(payload.kind, "サーバの応答");
   requireRgbHasThreeChannels(payload.kind, payload.channels, "サーバの応答");
   state.payload = payload;
+  // The pixels and the matrix they came from, published together. The readout
+  // asks this id, so it can never describe a matrix other than the one drawn.
+  // 画素と、その出所の行列IDを同時に確定する。読み取り欄はこのIDに問い合わせる。
+  state.shownMatrixId = matrixId;
+  // The heading over #view-values, set with the payload it describes.
+  //
+  // Two panels of numbers now sit side by side and only one of them is the
+  // matrix; without this the three values under `surface` are just three
+  // unlabelled numbers next to twelve coefficients. Written here rather than
+  // when the selector changes, so a view that is refused -- an unsupported
+  // kind, a server-side 400 -- leaves the heading naming what is still on
+  // screen instead of a view that never rendered.
+  // #view-values の見出し。数値の板が2枚並ぶが行列はそのうち1枚だけであり、
+  // これが無いと `surface` の3つは12個の係数の隣に並んだ無名の数値になる。
+  // セレクタの変更時ではなくペイロード確定時に書くので、拒否されたビューの
+  // 名前が画面に残ることはない。
+  $("view-title").textContent = state.spec.label || state.spec.key;
+  // ...and whether that panel belongs on screen at all.
+  //
+  // The readout table already shows the matrix on every view. Where the picture
+  // *is* the matrix, this panel is the same twelve numbers again -- measured at
+  // 974px of a 1600px strip, the widest element in it, and the reason the strip
+  // doubled to 224px at 900px wide, taking 113px back off the tiles to restate
+  // what was already 20px to the left.
+  //
+  // Read from the registry rather than sniffed from the payload, and never from
+  // `kind`: `coef_tiles` and `plain_tiles` are both `scalar`, and so would be a
+  // residual-error view, which is not the matrix. Only an explicit `true` hides
+  // anything, so a view that does not declare the field -- an older server, a
+  // newly registered one -- keeps its panel rather than being silently blanked.
+  //
+  // The one thing the panel used to add on a coefficient view was that a masked
+  // pixel read `NaN` here while the table printed the stored value. The
+  // out-of-region marker on `#probe-pos` now says that in words, in red, above
+  // the numbers it disclaims.
+  //
+  // その板を出すかどうか。読み取り表はどのビューでも行列を出しているので、
+  // 描かれているものが行列そのものなら、この板は同じ12個の繰り返しである
+  // （1600pxの帯で974px＝最も広い要素。900pxでは帯が224pxになり、その113pxは
+  // タイルから奪われていた）。判断はレジストリの宣言に従う。`kind` では
+  // 決めない——`coef_tiles` も `plain_tiles` も `scalar` であり、残差ビューも
+  // またそうだが、それは行列ではない。明示的な `true` のときだけ隠すので、
+  // 宣言の無いビュー（古いサーバ、新しく登録されたビュー）は黙って空白に
+  // ならない。係数ビューでこの板が唯一足していた情報——マスク画素でここだけ
+  // NaN になること——は、`#probe-pos` の印が言葉で述べるようになった。
+  $("view-panel").hidden = state.spec.values_are_matrix === true;
 
   const layout = layoutFor(payload, state.layout, traits);
   // Compared by value, and only then rebuilt: buildGrid disposes and recreates
@@ -820,6 +1203,12 @@ async function reload(req = beginRequest()) {
   if (needsFit) views[0].fit();
   state.pinned = null;
   $("probe-pin").textContent = "";
+  // What the readout was describing is no longer on screen -- a different
+  // matrix, or the same one through a different view. Clearing also retires
+  // any point query still in flight, so it cannot repaint the table afterwards.
+  // 読み取りが説明していたものは画面から消えた。飛んでいる点クエリの権利も
+  // ここで失効させる。
+  clearReadout();
 
   const bytes = payload.data.byteLength;
   const perf = {
@@ -840,13 +1229,26 @@ async function reload(req = beginRequest()) {
   console.log("[perf]", perf);
 
   $("perf-fetch").textContent = `${perf.fetchMs} ms (${perf.megabytes} MB, ${perf.mbPerSec} MB/s)`;
+  $("perf-ranges").textContent = `${perf.rangesMs} ms`;
   $("perf-upload").textContent = `${perf.uploadMs} ms + finish ${perf.uploadFinishMs} ms`;
   $("perf-heap").textContent = perf.jsHeapMB ? `${perf.jsHeapMB} MB` : "計測不可";
-  status(
-    `${payload.width}×${payload.height}×${payload.channels} を表示中 — ` +
-    `転送 ${perf.fetchMs} ms / レンジ ${perf.rangesMs} ms / ` +
-    `GPU転送 ${perf.uploadMs}+${perf.uploadFinishMs} ms`
-  );
+  // What was rendered, and nothing that is already on screen.
+  //
+  // This line used to end with `転送 570.8 ms / レンジ 0.3 ms / GPU転送 51.2+0.7
+  // ms`, twenty pixels below a 計測 panel showing two of those three timings
+  // verbatim, and it still opens with dimensions the toolbar also states. The
+  // only datum here that lived nowhere else was レンジ, which is now the panel's
+  // second row -- so the line goes back to being what it is everywhere else in
+  // this app: the transient-state line, for errors, 「ビュー取得中…」 and the
+  // unapplied-parameter notice, saying what is on screen when there is nothing
+  // else to say.
+  //
+  // 画面上の他所にあるものは書かない。この行は以前 計測 パネルの20px下で同じ
+  // 転送・GPU転送を繰り返し、寸法もツールバーと重複していた。ここにしかない
+  // 値はレンジだけだったので、それをパネルへ移して行を戻す。この行は他の場面
+  // では過渡的な状態（エラー、取得中、未適用の通知）を出す場所であり、
+  // 言うことが無いときは何を表示しているかだけを述べればよい。
+  status(`${payload.width}×${payload.height}×${payload.channels} を表示中`);
 }
 
 // How many load() calls are still running. The 読み込み button is disabled

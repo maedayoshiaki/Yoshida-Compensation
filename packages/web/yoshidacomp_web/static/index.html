@@ -66,13 +66,6 @@
 
       <hr />
 
-      <div class="group readouts mono">
-        <div>表示レンジ <span id="range-info" class="val">—</span></div>
-        <div>転送 <span id="perf-fetch" class="val">—</span></div>
-        <div>GPU転送 <span id="perf-upload" class="val">—</span></div>
-        <div>JSヒープ <span id="perf-heap" class="val">—</span></div>
-      </div>
-
       <div class="group legend">
         <span class="legend-swatch nan"></span>
         <span class="muted">マスク色 = NaN（有効投影領域の外）</span>
@@ -84,12 +77,66 @@
     </aside>
   </main>
 
+  <!-- The readout is one row of panels, not a stack.
+
+       Everything here describes the same moment -- the hovered pixel, the range
+       the tiles are drawn against, and what the last transfer cost -- so it has
+       to be legible at once and without scrolling. The display range and the
+       three timings used to live at the bottom of the sidebar, below the
+       controls, where the sidebar's own overflow put them off screen on a short
+       window; the matrix table used to be stretched across the full width above
+       an equally wide list of view values. Both cost the tiles vertical space
+       to show whitespace.
+
+       読み取り欄は縦積みではなく1行に並べる。ここに出るものは全て同じ瞬間を
+       説明している（ホバー中の画素、タイルの表示レンジ、直前の転送の実測）ので、
+       スクロールせずに同時に読めなければ意味がない。表示レンジと計測は以前
+       サイドバー下端にあり、窓が低いと画面外だった。行列の表は全幅に伸びていた。
+       どちらもタイルの高さを余白のために削っていた。 -->
   <section class="readout">
-    <div class="readout-head mono">
-      ホバー読み取り <span id="probe-pos" class="val">—</span>
-      <span id="probe-pin" class="muted"></span>
+    <div class="rd-panel">
+      <div class="rd-title mono">
+        行列 <span id="probe-pos" class="val">—</span>
+        <span id="probe-pin" class="muted"></span>
+      </div>
+      <div id="probe-grid" class="probe-grid mono"></div>
     </div>
-    <div id="probe-grid" class="probe-grid mono"></div>
+
+    <!-- The second panel of numbers, shown only when the picture is not the
+         matrix. Under a view of the coefficients themselves it holds the same
+         twelve numbers the table to its left already shows -- measured at 974px
+         of a 1600px strip, the widest thing in a bar whose whole purpose is to
+         stop wasting width -- so `values_are_matrix` on the view spec takes it
+         away entirely, heading included. See reload() in js/main.js.
+         2枚目の数値の板。描かれているものが行列でないときだけ出す。係数その
+         ものを見ているビューでは左の表と同じ12個であり、1600pxの帯のうち
+         974pxを占めていた（幅を無駄にしないための帯で最も広い要素だった）。
+         ビュー仕様の `values_are_matrix` によって見出しごと消える。 -->
+    <div id="view-panel" class="rd-panel grow">
+      <div class="rd-title mono">ビュー値 <span id="view-title" class="muted">—</span></div>
+      <div id="view-values" class="view-values mono"></div>
+    </div>
+
+    <div class="rd-panel">
+      <div class="rd-title mono">表示レンジ</div>
+      <div class="rd-rows mono">
+        <div><span id="range-info" class="val">—</span></div>
+      </div>
+    </div>
+
+    <div class="rd-panel">
+      <div class="rd-title mono">計測</div>
+      <!-- In the order the work happens. レンジ came up from the status line,
+           which was printing 転送 and GPU転送 again 20px below this panel.
+           作業の順。レンジはステータス行から移した（同じ行がこの板の20px下で
+           転送とGPU転送を繰り返していた）。 -->
+      <div class="rd-rows mono">
+        <div>転送 <span id="perf-fetch" class="val">—</span></div>
+        <div>レンジ <span id="perf-ranges" class="val">—</span></div>
+        <div>GPU転送 <span id="perf-upload" class="val">—</span></div>
+        <div>JSヒープ <span id="perf-heap" class="val">—</span></div>
+      </div>
+    </div>
   </section>
 
   <footer id="status" class="mono">起動中…</footer>

@@ -82,7 +82,39 @@ class ViewResult:
 
 @dataclass(frozen=True)
 class ViewSpec:
-    """A registered view."""
+    """A registered view.
+
+    Attributes:
+        key, label, kind, channels, params, render: as used by
+            ``routers/view.py`` and by the frontend's automatic controls.
+        values_are_matrix: Whether the picture this view draws *is* the matrix.
+
+            The readout along the bottom of the page always shows the hovered
+            pixel's own 4x3 coefficients, fetched a pixel at a time, on every
+            view. Beside it sits a second panel holding the *displayed view's*
+            values at that pixel -- which for a view of the coefficients
+            themselves is the same twelve numbers a second time, in a second
+            format, twenty pixels away. Declaring it here lets the frontend drop
+            that panel where it would only repeat the readout, and keep it where
+            the picture is something else (``surface``'s three projected
+            colours, say).
+
+            Defaults to ``False``, which is the *showing* direction, and
+            deliberately so: a view that does not answer this question is one
+            whose values the readout has no reason to duplicate, and hiding them
+            would silently blank the only numbers that view produces. Wrong in
+            this direction costs a redundant panel; wrong in the other costs the
+            data.
+
+            このビューが描いているものが行列そのものかどうか。画面下の読み取り
+            欄はどのビューでもホバー画素の4x3係数を出す。その隣の板は「表示中の
+            ビューの値」であり、係数そのものを見ているビューでは同じ12個が別の
+            書式で20px隣に並ぶだけになる。ここで宣言しておけば、重複する場合
+            だけ板を落とし、``surface`` のように別のものを描いているビューでは
+            残せる。既定は「出す」側の ``False`` にする。答えていないビューの値
+            は重複と決めつけられず、消せばそのビューが出す唯一の数値が黙って
+            消える。誤ったときの損失が小さいのはこちら。
+    """
 
     key: str
     label: str
@@ -90,6 +122,7 @@ class ViewSpec:
     channels: int
     params: list[ParamSpec]
     render: Callable[[MatrixContext, dict], ViewResult]
+    values_are_matrix: bool = False
 
 
 REGISTRY: dict[str, ViewSpec] = {}

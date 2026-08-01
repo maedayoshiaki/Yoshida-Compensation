@@ -470,5 +470,12 @@ def test_surface_is_listed_with_its_params() -> None:
     spec = next(v for v in views if v["key"] == "surface")
     assert spec["kind"] == "rgb"
     assert spec["channels"] == 3
+    # The picture here is the projected colour, not the matrix, so the readout's
+    # second panel says something the 4x3 table beside it cannot -- and has to
+    # stay. This is the other half of the same declaration ``coef_tiles`` uses
+    # to have it dropped.
+    # ここで描いているのは投影面の色であって行列ではないので、読み取り欄の
+    # 2枚目の板は隣の4x3が言えないことを述べており、残さねばならない。
+    assert spec["values_are_matrix"] is False
     assert {p["name"] for p in spec["params"]} == {"p_r", "p_g", "p_b"}
     assert all(p["type"] == "number" for p in spec["params"])
