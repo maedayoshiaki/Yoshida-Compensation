@@ -64,7 +64,6 @@ export async function fetchView(matrixId, key, params) {
   const qs = new URLSearchParams(params).toString();
   const res = await fetch(`/api/matrix/${matrixId}/view/${key}?${qs}`);
   if (!res.ok) throw new Error(await res.text());
-  const buf = await res.arrayBuffer();
   // "planar" = (C, H, W); "interleaved" = (H, W, C). A *missing* header means
   // interleaved, because that is what a pre-planar endpoint looks like and it
   // still has to render. A header that is present but says something else is
@@ -72,12 +71,18 @@ export async function fetchView(matrixId, key, params) {
   // the four places that index into `data` -- each of which would otherwise
   // read it as interleaved and agree with the other three about the wrong
   // answer. See contract.js::requireKnownLayout.
+  //
+  // Checked before the body is read, mirroring routers/view.py: buffering a
+  // camera-space payload is 1.5 GB, and there is no point paying that for a
+  // response that is about to be rejected.
   // ヘッダが無い場合はインタリーブ（planar 化前のエンドポイントの見え方であり、
   // それでも描けなければならない）。値が有って未知の場合は、`data` に添字を
   // 立てる4か所ではなくワイヤを解釈するここで断る。4か所に任せるとどこもが
-  // インタリーブとして読み、互いに同じ間違いで一致してしまう。
+  // インタリーブとして読み、互いに同じ間違いで一致してしまう。判定は本体を
+  // 読む前に行う（カメラ座標では 1.5 GB を捨てるために確保することになる）。
   const layout = res.headers.get("X-Layout") || LAYOUT_INTERLEAVED;
   requireKnownLayout(layout, "サーバの応答");
+  const buf = await res.arrayBuffer();
   return {
     data: new Float32Array(buf),
     height: Number(res.headers.get("X-Height")),

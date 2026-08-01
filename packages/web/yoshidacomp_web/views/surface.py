@@ -158,8 +158,19 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     invertible = np.abs(det) > _DET_REL_EPS * frobenius_cubed
 
     def command_minus_bias(index: int, name: str) -> np.ndarray:
-        """``P_i - b_i`` as one plane, subtracted in place to avoid a copy."""
-        bias = np.asarray(array[:, :, 3, index], dtype=np.float64)
+        """``P_i - b_i`` as one plane, subtracted in place to avoid a copy.
+
+        ``.astype`` rather than ``np.asarray``: it copies unconditionally, so
+        the in-place subtraction below is guaranteed to be writing into our own
+        buffer. ``np.asarray`` can return a *view*, and a view here would
+        overwrite the loaded matrix's bias row -- silently, and for every later
+        request against the same ``matrix_id``.
+        ``np.asarray`` ではなく ``.astype`` を使う。無条件に複製するため、
+        続くインプレース減算が自分のバッファへの書き込みであることが保証される。
+        ``np.asarray`` はビューを返しうるが、ここでビューを掴むと読み込み済み
+        行列の bias 行を破壊し、同じ ``matrix_id`` への以降の要求すべてに残る。
+        """
+        bias = array[:, :, 3, index].astype(np.float64)
         return np.subtract(float(params.get(name, 1.0)), bias, out=bias)
 
     q_r = command_minus_bias(0, "p_r")
