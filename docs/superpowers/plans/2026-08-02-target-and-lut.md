@@ -425,7 +425,31 @@ git commit -m "feat(web): ターゲットに行列を適用する compensation �
 
 ---
 
-### Task 4: LUTの読み込みとカーブ表示
+### Task 4: ターゲットとLUTの読み込みUI、カーブ表示
+
+**【計画の訂正】** 当初この Task は LUT のみを扱う手順で書かれていたが、
+File Structure 表は `main.js` に「ターゲット/LUT の選択UI」を割り当てており、
+**どの Task の手順もターゲット読み込みUIを作らなかった。** Task 3 のレビューが
+独立にこれを指摘している（`compensation` ビューはブラウザから駆動できず、
+`POST /api/target` に呼び出し側が存在しない）。計画の中心的な成果物が
+curl 無しでは使えない状態になるため、ターゲットUIをこの Task に加える。
+
+**追加要件（Step 5 の前に実施すること）**
+
+- ツールバーかサイドバーに**ターゲット画像のパス入力と読み込みボタン**を置く。
+  行列の `path-input` / `btn-load` と同じ作法にすること。
+- 読み込むと `POST /api/target` を呼び、返った id を
+  `compensation` ビューの `target` パラメータ欄へ**自動的に入れる**。
+  手で貼らせない。
+- ディレクトリを読み込んだ場合は `meta.images` の一覧を出し、選ぶと
+  `index` が変わって再取得されること。
+- 失敗（404/400）は既存の `errorMessage()` 経由で散文として出すこと。
+- ハーネスに次を足す:
+  1. 読み込み後に `target` 欄が id で埋まること
+  2. 一覧から選ぶと `index` が変わって再取得が起きること
+  3. 404 のとき散文が出て、UIが操作不能にならないこと
+
+
 
 **Files:**
 - Create: `packages/web/yoshidacomp_web/lut.py`, `routers/lut.py`
