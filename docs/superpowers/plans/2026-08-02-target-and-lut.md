@@ -11,8 +11,22 @@
 ## Global Constraints
 
 - **web層は `yoshidacomp.compensation.color_mixing_matrix` を import しない。**
-  module scope で `torch` と `psutil` を引く。Task 1 がこの制約と `pipeline.py` の
-  衝突を解消するまで、web層は `pipeline.py` も import できない。
+  module scope で `torch` と `psutil` を引く。
+  **[Task 1完了により解消済み・以下は経緯として残す]** Task 1 実行前は
+  `pipeline.py` がこの `color_mixing_matrix` を module scope で import しており、
+  web層は `pipeline.py` も import できなかった。Task 1
+  （`.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md`）が
+  `_linearize_gamma` を numpy 実装（`_apply_inverse_gamma_numpy`）へ切り替え、
+  `calc_compensation_image`（`photometric_compensation.py`）も同様に numpy 化した
+  ことで、`pipeline.py` は `generate_projection_image` の呼び出しグラフ全体で
+  torch に依存しなくなった。web層は `pipeline.py` を import・使用してよい。
+  ただし `pipeline.prepare_target_image_for_compensation`（P2C/C2Pワープ経由で
+  `geometry.warp` を呼ぶ）は依然として初回呼び出しで torch を引き約7秒かかる
+  （本物のGPUワープのため意図的に未対応。計画B4がこの経路をweb層へ配線する
+  場合は事前ウォームアップか停止許容かを判断すること）。
+  **上記「`color_mixing_matrix` を import しない」という制約自体は今も有効**
+  であり、web層が直接 `color_mixing_matrix.apply_inverse_gamma_correction` を
+  import・呼び出すことは変わらず禁止（下記の訂正も参照）。
 - 画素データは `application/octet-stream` の float32 リトルエンディアンで送る。
   JSON に載せない。LUTカーブは画素データではないので JSON でよい。
 - ビューの本体は **planar `(C, H, W)`**。`X-Layout: planar` を必ず送る。
@@ -23,9 +37,13 @@
   numpy の `ValueError` は 500 のままにする（計画Cで分離済み）。
 - 新しい `ViewSpec` には `values_are_matrix` を宣言する。既定は *表示*。
   読み取り欄の「ビュー値」パネルの出し分けに使う。
-- **`apply_inverse_gamma_correction` は渡した指数をそのまま `pow` に使う。**
+- **`apply_inverse_gamma_correction`（および Task 1 が追加した numpy版
+  `pipeline._apply_inverse_gamma_numpy`）は渡した指数をそのまま `pow` に使う。**
   明るくするには `gamma=1/projector.gamma`（≈0.4545）を渡す。省略すると 2.2 が
-  適用され逆方向に暗くなる。
+  適用され逆方向に暗くなる。**web層からの呼び出しは
+  `pipeline.LINEARIZERS["gamma"]` 経由とし、`color_mixing_matrix.
+  apply_inverse_gamma_correction` を直接importしないこと**（Global Constraint
+  1つ目を参照）。この罠自体はどちらの実装でも同じ。
 - 実測LUTの終端は 1.0 とは限らない（ISO400実測でチャンネルランプが
   約 0.876/0.876/0.688）。縦軸を 1.0 で固定しないこと。
 - テストは `node` が無ければ skip する既存の仕組みを壊さない。
@@ -50,10 +68,25 @@ Step の変異試験は形式ではない。実際に壊して、名前の付い
 
 ## File Structure
 
+**Task 1 実績（当初の計画は下の2行のみを挙げていたが、実際は測定の結果として
+4本の本番ファイル・3本のテストファイルに拡大した。詳細は
+`.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md`）:**
+
 | ファイル | 責任 |
 | --- | --- |
-| `packages/core/yoshidacomp/compensation/pipeline.py` | ガンマ線形化から torch を外す |
-| `tests/test_pipeline_gamma_numpy.py` | numpy版とtorch版の一致検証（新規） |
+| `packages/core/yoshidacomp/compensation/pipeline.py` | ガンマ線形化から torch を外す（当初計画） |
+| `tests/test_pipeline_gamma_numpy.py` | numpy版とtorch版の一致検証（新規、当初計画） |
+| `packages/core/yoshidacomp/geometry/warp.py` | torch importを関数内へ遅延化（測定後追加） |
+| `packages/core/yoshidacomp/compensation/inverse_lut.py` | scipy importを関数内へ遅延化（測定後追加） |
+| `packages/core/yoshidacomp/compensation/photometric_compensation.py` | calc_compensation_imageをtorchからnumpyへ切り替え（測定後追加） |
+| `tests/test_package_boundaries.py` | import/呼び出し境界テストを追加（測定後追加） |
+| `tests/test_photometric_compensation_numpy.py` | calc_compensation_imageのnumpy版とtorch版の一致検証（新規、測定後追加） |
+| `tests/_torch_reference.py` | 複数テストファイルが共有するtorch参照実装（新規、レビュー指摘後追加） |
+
+**Task 2 以降のファイル一覧（当初計画のまま）:**
+
+| ファイル | 責任 |
+| --- | --- |
 | `packages/web/yoshidacomp_web/target.py` | ターゲット画像の読み込みと保持（新規） |
 | `packages/web/yoshidacomp_web/routers/target.py` | `POST /api/target`（新規） |
 | `packages/web/yoshidacomp_web/lut.py` | 逆LUTの読み込みとカーブ抽出（新規） |
@@ -412,11 +445,18 @@ git commit -m "feat(web): ターゲットに行列を適用する compensation �
 
 **注意**
 
-`inverse_lut.py` は module scope で `scipy` と `cv2` を引き、撮影用の巨大な
-コードを抱えている。`torch` は引かないので Global Constraints には反しないが、
-**import コストは測って報告すること。** 無視できない場合は `load_inverse_lut` と
-`InverseLut` だけを torch-free / scipy-free な小さいモジュールへ切り出す案を
-報告に書くこと（このタスクでは実施しない）。
+**[Task 1完了により解消済み]** この節は執筆時点（`inverse_lut.py` が
+module scope で `scipy.interpolate.PchipInterpolator` を import していた頃）の
+記述である。Task 1（`.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md`、
+コミット `9f73f71`）が測定した結果、`PchipInterpolator` の唯一の利用箇所は
+`_build_channel_lut`（LUT*構築*時のみ。`pipeline.py` が使う `apply_inverse_lut`
+のホットパスは `np.interp` のみ）だったため、import を `_build_channel_lut` の
+関数内へ遅延化した。**Task 4 の実装者がこのimportコストを計測しても、scipyの
+コストはもう存在しない** -- ここで計測して見つからなかった場合、それは計画が
+誤っていたのではなく、Task 1 で既に解消済みだったということである（計測結果と
+計画のどちらが誤りか判断できない、という事態を避けるためにここへ明記する）。
+`cv2` は今も module scope で import されている（撮影用コードが直接使うため）。
+`inverse_lut.py` は撮影用の巨大なコードを抱えている点は変わらない。
 
 - [ ] **Step 1: 失敗するテストを書く（サーバ側）**
 
@@ -497,12 +537,26 @@ git commit -m "feat(web): LUTカーブを解析ガンマと重ねて表示する
 ## Self-Review
 
 **Spec coverage:** 仕様書 §12 の項目7「ターゲット入力、線形化、LUTカーブ」を
-Task 2/3/4 が覆う。Task 1 は §8 が指定する `apply_inverse_gamma_correction` の
-利用と Global Constraints の torch 禁止が衝突するために必要になった前提整備。
+Task 2/3/4 が覆う。Task 1 は §8 が指定していた `apply_inverse_gamma_correction`
+の利用と Global Constraints の torch 禁止が衝突するために必要になった前提整備。
+**[測定後の訂正]** Task 1 はこの衝突を §8 に従うことでではなく、§8 から
+**離れる**ことで解消した（`gamma` linearizer を `pipeline.LINEARIZERS["gamma"]`
+経由のnumpy実装へ切り替え、§8 が指定していた torch 関数を呼ばなくした）。
+そのため §8 自体を訂正済み（`docs/superpowers/specs/2026-07-31-matrix-viewer
+-gui-design.md` の該当箇所）。仕様が Global Constraint と矛盾していたのは
+計画のミスであり、Task 1 が「§8を実装した」のではなく「§8の指示が誤りだったと
+判明したので仕様側を直した」という順序である点を記録として残す。
 
 **スコープ外（計画B4へ）:** `gamut` ビュー（`categorical` kind のフロント実装が
 まるごと必要）、`POST /api/generate`（投影画像の保存とメタデータJSON）、
-カメラ座標行列のP2Cワープ（バックグラウンドジョブ）。
+カメラ座標行列のP2Cワープ（バックグラウンドジョブ）。**このP2Cワープ経路は
+`pipeline.prepare_target_image_for_compensation` または `geometry.warp` を
+直接呼ぶことになるが、Task 1 はこの経路のtorch依存を解消していない**
+（`invwarp_image`/`warp_image` はGrayCodeの `PixelMapWarperTorch` による
+本物のGPU規模ワープで、意図的に対象外とした）。初回呼び出しで実測約7秒
+かかりCUDAを初期化する。計画B4の実装時は、プロセス起動時にtorchを
+事前ウォームアップするか、初回リクエストの約7秒停止を受け入れるかを
+判断すること -- 「Task 1で解決済み」ではない。
 
 **Placeholder scan:** Task 3 の `ParamSpec` の動的 choices 問題と、Task 1 の
 一致/不一致の分岐は、**意図的に実装者の判断へ委ねている**。どちらも実測か
