@@ -277,47 +277,82 @@ def _apply_inverse_gamma_numpy(
     初回に数秒止まり、プロジェクタを駆動しているのと同じGPUのメモリを取るため
     割に合わない。加えて torch は module scope で psutil ごと web 層へ漏れる。
 
-    **Not wired into ``LINEARIZERS["gamma"]``.** Measured against the torch
-    implementation (see ``.superpowers/sdd/2026-08-02-target-and-lut/
-    task-1-report.md`` for the full table): uint8 output matches
-    byte-for-byte over all 256 input values in both directions (768/768
-    elements exhaustively), on both the CPU and CUDA torch backends.
-    Float32 output does **not** match bit-for-bit -- on a 4001-point [0, 1]
-    grid (12003 elements across 3 channels) at gamma=1/2.2, **774/12003**
-    disagreed between ``np.power`` and ``torch.pow`` (CPU), by up to 1 ULP
-    (5.96e-8 at this magnitude); torch's own CUDA and CPU backends disagree
-    with *each other* by the same 1-ULP margin on 411/12003 of the same
-    grid, so this is intrinsic to differing ``powf`` implementations, not a
-    bug in either version. An exhaustive uint16 sweep (all 65536 values x 3
-    channels = 196608) also turned up 1-LSB disagreements: **45/196608**
-    brightening (gamma=1/2.2), **21/196608** darkening (gamma=2.2) -- both
-    small fractions (~0.02%) that a coarser sample would have missed.
-    Because the web layer this task exists to unblock specifically wants
-    float output (an unquantized preview, per
-    :func:`generate_projection_image`'s *dtype* docs), ``_linearize_gamma``
-    keeps calling the torch implementation (lazily imported so it stays out
-    of this module's import chain) rather than switching to this function.
-    This function is kept for the web layer's own direct use, where a
-    sub-ULP difference from what torch would have produced is immaterial.
+    **Wired into ``LINEARIZERS["gamma"]``** (via :func:`_linearize_gamma`).
+    Measured against the torch implementation (see
+    ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md`` for the
+    full table, corrected after an earlier draft attributed these numbers to
+    the wrong device/denominator):
 
-    ``LINEARIZERS["gamma"]`` には配線していない。torch 版との実測比較
-    （詳細は上記レポートの表）では、uint8 出力は 256 値×両方向×CPU/CUDA
-    いずれでもバイト単位で一致した（768/768要素、全数検査）。しかし
-    float32 出力はビット単位で一致しない -- [0, 1] を4001点で刻んだ
-    グリッド（3チャンネルで12003要素）、gamma=1/2.2 で **774/12003** が
-    ``np.power`` と ``torch.pow``（CPU）の間で最大1ULP（このレンジで
-    5.96e-8）ずれた。torch の CUDA版とCPU版同士でも同じグリッドの
-    411/12003 で同じ1ULP幅のずれがあり、これはどちらかの実装のバグでは
-    なく ``powf`` 実装差に起因する。uint16 を全数検査（65536値×3ch=
-    196608）すると、1LSB の相違が明方向（gamma=1/2.2）**45/196608**・
-    暗方向（gamma=2.2）**21/196608** 件見つかり、いずれも約0.02%と小さい
-    ものの、粗いサンプルでは見逃していた。このタスクが解放しようとして
-    いるweb層はまさに float 出力（量子化前のプレビュー、
-    :func:`generate_projection_image` の *dtype* 説明を参照）を必要と
-    するため、``_linearize_gamma`` は torch 実装を呼び続ける（遅延import
-    でこのモジュールの import 連鎖からは外す）。この関数は web 層が
-    直接使う用途として残す -- そこでは torch が出したはずの値との
-    サブULPの差は無視できる。
+    - **uint8** (every real caller's dtype -- the CLI default and the only
+      dtype any current call site passes) matches **byte-for-byte over all
+      256 input values in both directions, exhaustively, against both the
+      CPU and CUDA torch backends** (0/768 mismatches every time). This is
+      the decisive result: for every input this codebase actually produces,
+      this function and the torch implementation are bit-identical, so
+      switching changes nothing about delivered output.
+    - **float32** does not match bit-for-bit, but the disagreement is
+      smaller than torch's own cross-device disagreement with itself: on a
+      4001-point [0, 1] grid (12003 elements) at gamma=1/2.2, this function
+      disagrees with torch-CPU on 222/12003 elements and with torch-CUDA on
+      774/12003, always by exactly 1 ULP (5.96e-8 at this magnitude) --
+      while torch-CUDA disagrees with torch-CPU, on that same grid, on
+      **762/12003** elements, by the same 1 ULP. ``_linearize_gamma`` calls
+      torch with the CUDA default, so "the torch answer" was never a single
+      fixed value to begin with -- it already depended on which device the
+      process happened to run on. There is no bit-exact float32 target this
+      function could preserve that torch itself preserves across its own
+      backends.
+    - An exhaustive uint16 sweep (all 65536 values x 3 channels = 196608,
+      no current caller uses this dtype) found 1-LSB disagreements: 45/196608
+      brightening (gamma=1/2.2), 21/196608 darkening (gamma=2.2) -- both
+      real, if very small (~0.02%), effects of the same underlying 1-ULP
+      float32 gap landing on an integer rounding boundary.
+
+    Because the dtype that decides real behavior (uint8) is exhaustively
+    identical, and the dtype that isn't (float32) is off by less than torch
+    disagrees with itself, ``_linearize_gamma`` calls this function rather
+    than torch: delivery output is unchanged, the float32 preview the web
+    layer wants is within torch's own noise floor, and the gamma step's own
+    marginal contribution to the ~8s CUDA-initialization stall (and the
+    projector GPU's memory contention) is gone. Note this does not remove
+    that stall from ``generate_projection_image`` as a whole --
+    ``calc_compensation_image`` still pulls torch unconditionally; see
+    :func:`_linearize_gamma`'s docstring.
+
+    ``LINEARIZERS["gamma"]`` に（:func:`_linearize_gamma` 経由で）配線
+    している。torch 版との実測比較（詳細は上記レポートの表。旧版はこの
+    数値をCPU/CUDAの取り違え・分母の誤りで誤記していたため訂正済み）:
+
+    - **uint8**（実際の呼び出しが渡す唯一のdtype。CLIの既定でもある）は
+      256値×両方向×CPU/CUDAいずれでも**バイト単位で全数一致**した
+      （0/768、常に）。これが決め手になった結果である -- このコードベースが
+      実際に生成するあらゆる入力について、この関数とtorch実装はビット単位で
+      同一であり、切り替えても配信物は何も変わらない。
+    - **float32** はビット単位で一致しないが、その差は torch 自身の
+      CPU/CUDA間の差より小さい: [0, 1] を4001点で刻んだグリッド
+      （12003要素）、gamma=1/2.2 で、この関数は torch-CPU と 222/12003、
+      torch-CUDA と 774/12003 で不一致（常に1ULP、このレンジで5.96e-8）。
+      一方 torch-CUDA と torch-CPU は同じグリッドで **762/12003** 不一致
+      （同じ1ULP幅）。``_linearize_gamma`` は既定でCUDAのtorchを呼んでいた
+      ため、「torchの答え」はそもそも単一の固定値ではなく、どのデバイスで
+      実行したかに依存していた。torch自身が自分のバックエンド間で保てない
+      ビット精度を、この関数が保つべき基準は存在しない。
+    - uint16 を全数検査（65536値×3ch=196608、現行の呼び出し元は誰も
+      このdtypeを使わない）すると、1LSB の相違が明方向（gamma=1/2.2）
+      45/196608・暗方向（gamma=2.2）21/196608 件見つかった。いずれも
+      小さい（約0.02%）が、同じ1ULPのfloat32ギャップが整数丸め境界に
+      落ちた実在の効果である。
+
+    実際の挙動を決めるdtype（uint8）が全数一致し、一致しないdtype
+    （float32）もtorch自身の自己不一致より小さいずれしかないため、
+    ``_linearize_gamma`` は torch ではなくこの関数を呼ぶ: 配信物は不変、
+    web層が求める float プレビューは torch自身のノイズ幅に収まり、
+    ガンマ処理自身が約8秒のCUDA初期化停止（とプロジェクタと同じGPUの
+    メモリ競合）に寄与していた分は無くなる。ただしこれで
+    ``generate_projection_image`` 全体が初回呼び出しでその停止を
+    免れるわけではない -- ``calc_compensation_image`` は依然として
+    無条件に torch を引く。:func:`_linearize_gamma` の docstring を
+    参照。
 
     Args:
         image: RGB image, shape ``(H, W, 3)``. uint8 in [0, 255], uint16 in
@@ -372,28 +407,60 @@ def _linearize_gamma(
 
     プロジェクタの解析逆ガンマを適用する。
 
-    Note: apply_inverse_gamma_correction() uses the given exponent directly,
-    so brightening requires 1 / projector.gamma. It preserves the input's
-    dtype, so *dtype* is accepted only for protocol conformance.
-    注: apply_inverse_gamma_correction() は与えた指数をそのまま使うため、
-    明るくするには 1 / projector.gamma を渡す必要がある。入力の dtype を
-    保つため、*dtype* はプロトコル整合のためだけに受け取る。
+    Note: the exponent is used directly, so brightening requires
+    1 / projector.gamma. This preserves the input's dtype, so *dtype* is
+    accepted only for protocol conformance.
+    注: 指数をそのまま使うため、明るくするには 1 / projector.gamma を
+    渡す必要がある。入力の dtype を保つため、*dtype* はプロトコル整合の
+    ためだけに受け取る。
 
-    This imports ``color_mixing_matrix`` (and therefore ``torch`` and
-    ``psutil``) lazily, inside the call, specifically so that importing
-    this module does not pull torch in -- see
-    :func:`_apply_inverse_gamma_numpy` for why the numpy reimplementation
-    is not used here instead.
-    ``color_mixing_matrix``（延いては ``torch`` と ``psutil``）はこの
-    呼び出しの中で遅延importする。このモジュールを import しても torch を
-    引かないようにするためで、なぜここで numpy 再実装を使わないかは
-    :func:`_apply_inverse_gamma_numpy` を参照。
+    Calls :func:`_apply_inverse_gamma_numpy`, **not** the torch
+    implementation in ``color_mixing_matrix``. *This function's own*
+    contribution to torch/psutil/scipy dependency is now zero, on both
+    import and first call. See :func:`_apply_inverse_gamma_numpy`'s
+    docstring for the measurement that justifies this: byte-for-byte
+    identical to torch for every dtype any real caller uses (uint8), and
+    for the one dtype where it isn't (float32) the gap is smaller than the
+    gap between torch's own CPU and CUDA backends. An earlier version of
+    this function called torch directly (lazily imported, to at least keep
+    it out of module-scope import); that was reversed after measuring that
+    the *first call* -- not just the import -- cost ~7.9s and initialized
+    CUDA, which is exactly the interactive-GUI stall the numpy version
+    exists to avoid.
+
+    This does **not** make ``generate_projection_image`` as a whole
+    torch-free on first call: ``calc_compensation_image`` (the compensation
+    matrix-multiply step, called unconditionally regardless of linearizer)
+    still needs torch and still costs roughly the same ~7.6-7.7s on first
+    use -- confirmed by measuring ``linearizer="none"`` alone, which pulls
+    torch and costs about the same. That is out of this function's scope:
+    it is genuine GPU-scale linear algebra, not the trivial elementwise
+    power the brief singled out gamma correction for. See the task report's
+    "Addendum 3" for the full measurement and why it was left alone here.
+    :func:`_apply_inverse_gamma_numpy` を呼ぶ。``color_mixing_matrix`` の
+    torch 実装は呼ばない。*この関数自身*が寄与する torch/psutil/scipy
+    依存は、import・初回呼び出しのいずれにおいてもゼロになった。
+    この判断の根拠となる実測は :func:`_apply_inverse_gamma_numpy` の
+    docstring を参照: 実際の呼び出し元が使う唯一の dtype（uint8）では
+    torch とバイト単位で完全一致し、一致しない float32 でも、その差は
+    torch 自身の CPU/CUDA バックエンド間の差より小さい。以前のこの関数は
+    torch を直接呼んでいた（遅延importでmodule scopeからは外していた）が、
+    import だけでなく*初回呼び出し*自体が約7.9秒かかりCUDAを初期化する
+    ことを実測し、これはまさに numpy 版が避けようとしている対話的GUIの
+    停止そのものだったため、この判断を覆した。
+
+    これによって ``generate_projection_image`` 全体が初回呼び出しで
+    torch-freeになるわけではない: ``calc_compensation_image``（補償の
+    行列積ステップ。linearizer に関わらず無条件に呼ばれる）は依然として
+    torch を必要とし、初回利用時に同程度の約7.6〜7.7秒かかる --
+    ``linearizer="none"`` 単体でも torch を引き、同程度のコストが
+    かかることを実測して確認済み。これはこの関数の範囲外である:
+    ブリーフがガンマ補正について「割に合わない」と名指しした些細な
+    要素ごとのべき乗とは異なり、本物のGPU規模の線形代数だからである。
+    詳細と、ここでは手を付けなかった理由はレポートの「Addendum 3」を
+    参照。
     """
-    from yoshidacomp.compensation.color_mixing_matrix import (
-        apply_inverse_gamma_correction,
-    )
-
-    return apply_inverse_gamma_correction(image, gamma=1.0 / projector.gamma)
+    return _apply_inverse_gamma_numpy(image, gamma=1.0 / projector.gamma)
 
 
 def _linearize_inverse_lut(
@@ -496,7 +563,7 @@ def generate_projection_image(
     if not clip and linearizer != "none":
         raise ValueError(
             f"clip=False requires linearizer='none', got {linearizer!r}. "
-            "apply_inverse_gamma_correction() and apply_inverse_lut() both "
+            "_apply_inverse_gamma_numpy() and apply_inverse_lut() both "
             "assume input in [0, 1] (they normalize/index against that range) "
             "and would return garbage for the out-of-range values clip=False "
             "is meant to preserve."
@@ -510,10 +577,11 @@ def generate_projection_image(
             "clip=False exists to preserve."
         )
 
-    # Lazily imported for the same reason as _linearize_gamma's import of
-    # apply_inverse_gamma_correction: photometric_compensation imports torch
-    # at module scope, and this module must not pull torch in just from
-    # being imported.
+    # Lazily imported: photometric_compensation imports torch at module
+    # scope, and this module must not pull torch in just from being
+    # imported (nor, per _linearize_gamma's docstring, from the gamma
+    # linearizer's first call -- this is the same reasoning applied here
+    # since calc_compensation_image itself still needs real torch compute).
     from yoshidacomp.compensation.photometric_compensation import (
         calc_compensation_image,
     )
@@ -539,6 +607,10 @@ def generate_projection_image(
     projector_image = linearize(
         compensation, projector=projector, lut=lut, dtype=dtype
     )
-    if hasattr(projector_image, "cpu"):
-        projector_image = projector_image.cpu().numpy()
+    # Every entry in LINEARIZERS returns a plain numpy array now that
+    # _linearize_gamma calls _apply_inverse_gamma_numpy instead of torch
+    # (see that function's docstring); a torch-tensor conversion shim used
+    # to live here for the old torch-backed gamma path and has been removed
+    # as dead code rather than left to imply a torch tensor could still
+    # arrive.
     return compensation, np.asarray(projector_image, dtype=dtype)

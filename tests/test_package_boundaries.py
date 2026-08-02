@@ -131,3 +131,144 @@ print("ok")
     )
     assert result.returncode == 0, result.stderr
     assert "ok" in result.stdout
+
+
+def test_importing_pipeline_does_not_pull_torch() -> None:
+    """``pipeline`` の import だけでは torch / psutil / color_mixing_matrix /
+    scipy を引かないこと。
+
+    Moved here from ``tests/test_pipeline_gamma_numpy.py`` (Task 1 of the
+    target-and-lut plan): this is a layering guard like the rest of this
+    file, not a gamma-linearizer-specific test.
+
+    History (see ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md``
+    for full measurements): this started out weaker -- only asserting
+    ``color_mixing_matrix`` and ``psutil`` were absent -- because
+    ``yoshidacomp.geometry.warp`` (also imported by ``pipeline``, for
+    ``prepare_target_image_for_compensation()``) used to do an
+    unconditional ``import torch`` at its own module scope. Fixed by moving
+    that import inside the two functions that use it (mirroring the
+    lazy-import-per-function pattern this same file already uses for
+    ``graycode``), which changes no module attribute so
+    ``tests/test_sample_mocked.py``'s ``warp_image``/``invwarp_image``
+    monkeypatches on the ``pipeline`` module keep working. A further
+    ``scipy.interpolate`` import (in ``inverse_lut.py``, used only by LUT
+    *construction*, not the ``apply_inverse_lut`` hot path) was fixed the
+    same way. Net: ``import yoshidacomp.compensation.pipeline`` went from
+    ~9.4-13.0s to ~0.5s wall time.
+
+    This test covers *import* only. ``generate_projection_image`` still
+    pulls torch on its *first call* regardless of linearizer, because
+    ``calc_compensation_image`` (the compensation matrix multiply, called
+    unconditionally) needs it -- see
+    ``test_generate_projection_image_gamma_call_pulls_only_what_the_matrix_step_needs``
+    below, which covers that.
+
+    Run in a subprocess: in-process, some other test collected earlier in
+    the same session may have already imported these modules, which would
+    make the assertion pass regardless of whether ``pipeline.py`` (or
+    ``warp.py``/``inverse_lut.py``) is actually responsible.
+    """
+    code = (
+        "import sys; import yoshidacomp.compensation.pipeline; "
+        "mods = sys.modules; "
+        "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods)); "
+        "print('psutil=%s' % ('psutil' in mods)); "
+        "print('geometry.warp=%s' % ('yoshidacomp.geometry.warp' in mods)); "
+        "print('torch=%s' % ('torch' in mods)); "
+        "print('scipy=%s' % any('scipy' in m for m in mods)); "
+        "print('cv2=%s' % ('cv2' in mods))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+
+    assert reported["color_mixing_matrix"] == "False", out.stdout
+    assert reported["psutil"] == "False", out.stdout
+    assert reported["torch"] == "False", out.stdout
+    assert reported["scipy"] == "False", out.stdout
+    # geometry.warp and cv2 are legitimately still imported -- pipeline.py
+    # needs WarpMethod/invwarp_image/warp_image from warp, and cv2 is an
+    # existing, accepted dependency -- but none of them may bring torch,
+    # psutil, or scipy along for the ride.
+    assert reported["geometry.warp"] == "True", out.stdout
+    assert reported["cv2"] == "True", out.stdout
+
+
+def test_generate_projection_image_gamma_call_pulls_only_what_the_matrix_step_needs() -> None:
+    """``generate_projection_image(..., linearizer="gamma")`` の初回呼び出し後、
+    ``psutil``・``color_mixing_matrix``・``scipy`` は sys.modules に無いこと。
+
+    This is the test the review that reversed Task 1's original "keep
+    torch" decision asked for: import-only coverage let an 8s-plus,
+    CUDA-initializing *first call* stall through even though the module
+    import itself was fast. ``_linearize_gamma`` now calls
+    ``_apply_inverse_gamma_numpy`` (numpy), not the torch implementation,
+    so the gamma step itself contributes none of ``torch``/``psutil``/
+    ``color_mixing_matrix``.
+
+    **``torch`` is deliberately NOT asserted absent here -- it will be
+    present, and that is correct, not a regression.**
+    ``calc_compensation_image`` (``photometric_compensation.py``), the
+    compensation *matrix-multiply* step, is called unconditionally by
+    ``generate_projection_image`` regardless of which linearizer is
+    selected -- confirmed by measuring ``linearizer="none"`` alone, which
+    pulls torch and costs the same ~7.7s as ``linearizer="gamma"`` did
+    before this task's numpy switch. Profiling that cost (see the task
+    report) found it is overwhelmingly the cost of ``import torch`` itself
+    (~7.1s of it, independent of CUDA specifically: ``torch.cuda.is_available()``
+    is ~0.15s and the first real CUDA op is ~0.38s more) -- a cost that was
+    always going to be paid on any real (non-``"none"``) call to
+    ``generate_projection_image``, before or after this task, because the
+    matrix step is genuine GPU-scale linear algebra, not the trivial
+    elementwise power the brief singled out gamma correction for. Switching
+    the gamma linearizer to numpy measurably shrinks the first-call cost
+    (~7.9s to ~7.6-7.7s -- the marginal cost of the old gamma-specific
+    torch call plus the ``color_mixing_matrix``/``psutil`` import it used to
+    trigger) but does **not** eliminate the dominant stall; that remains
+    ``calc_compensation_image``'s and is out of this task's scope (see the
+    task report's "Addendum 3" section for the full numbers and why this
+    was not also rewritten here).
+
+    Run in a subprocess for the same reason as the import-only test above.
+    """
+    import numpy as np
+
+    code = (
+        "import sys\n"
+        "import numpy as np\n"
+        "from dataclasses import dataclass\n"
+        "from yoshidacomp.compensation.pipeline import generate_projection_image\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class Projector:\n"
+        "    width: int = 4\n"
+        "    height: int = 4\n"
+        "    gamma: float = 2.2\n"
+        "\n"
+        "matrices = np.zeros((4, 4, 4, 3), dtype=np.float32)\n"
+        "for c in range(3):\n"
+        "    matrices[:, :, c, c] = 1.0\n"
+        "target = np.full((4, 4, 3), 200, dtype=np.uint8)\n"
+        "generate_projection_image(\n"
+        "    target, matrices, projector=Projector(), active_region=(0, 0, 4, 4),\n"
+        "    linearizer='gamma', target_decode='none',\n"
+        ")\n"
+        "mods = sys.modules\n"
+        "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods))\n"
+        "print('psutil=%s' % ('psutil' in mods))\n"
+        "print('scipy=%s' % any('scipy' in m for m in mods))\n"
+        "print('torch=%s' % ('torch' in mods))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+
+    assert reported["color_mixing_matrix"] == "False", out.stdout
+    assert reported["psutil"] == "False", out.stdout
+    assert reported["scipy"] == "False", out.stdout
+    # See docstring: torch is expected here, from calc_compensation_image,
+    # not from the gamma step.
+    assert reported["torch"] == "True", out.stdout

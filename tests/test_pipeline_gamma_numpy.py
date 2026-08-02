@@ -1,18 +1,29 @@
 """Numpy vs. torch agreement for the inverse-gamma linearizer.
 
 Task 1 of the target-and-lut plan (see
-``.superpowers/sdd/2026-08-02-target-and-lut/task-1-brief.md``): decide,
-by measurement, whether a pure-numpy reimplementation of
-``color_mixing_matrix.apply_inverse_gamma_correction`` can replace it in
-``pipeline.py``'s ``_linearize_gamma``. It cannot -- float32 output does
-not agree bit-for-bit (see the docstring on
-``pipeline._apply_inverse_gamma_numpy`` and
+``.superpowers/sdd/2026-08-02-target-and-lut/task-1-brief.md``, and
 ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md`` for the
-measured numbers) -- so ``_linearize_gamma`` keeps calling the torch
-version (now lazily imported) and the numpy version is exposed only for
-the web layer's own direct use.
+full history including a reversal): whether a pure-numpy reimplementation
+of ``color_mixing_matrix.apply_inverse_gamma_correction`` can replace it in
+``pipeline.py``'s ``_linearize_gamma``.
 
-This file therefore does two different things, deliberately kept apart:
+**It now does.** An earlier version of this module's docstring said it
+could not, because float32 output isn't bit-for-bit identical to torch's.
+That measurement was correct but the conclusion drawn from it was wrong:
+uint8 -- the only dtype any real caller in this codebase passes through
+``LINEARIZERS["gamma"]`` -- matches byte-for-byte, exhaustively, against
+*both* of torch's own backends; and the float32 gap (1 ULP) is smaller than
+the gap between torch's CPU and CUDA backends disagreeing with *each
+other* on the same grid. There was never a bit-exact float32 "torch answer"
+to preserve -- ``_linearize_gamma`` calls torch with the CUDA default, so
+which value it produced already depended on which device happened to run
+it. Separately, and decisively: the *first call* to the torch version (not
+just importing it) cost ~7.9s and initialized CUDA -- verbatim the
+interactive-GUI stall the brief warns a trivial elementwise power doesn't
+justify. See :func:`yoshidacomp.compensation.pipeline._apply_inverse_gamma_numpy`'s
+docstring for the full, corrected measurement table.
+
+This file does three different things, deliberately kept apart:
 
 1. Measure agreement between the two implementations (skipped if torch
    isn't installed -- these tests need torch to compare against).
@@ -20,6 +31,14 @@ This file therefore does two different things, deliberately kept apart:
    alone (never skipped -- this is the trap the brief calls out: passing
    ``projector.gamma`` directly, instead of its reciprocal, darkens the
    image instead of brightening it).
+3. Confirm the actual wiring (``LINEARIZERS["gamma"]`` /
+   ``generate_projection_image``), not just the raw function, produces
+   output bit-identical to what the torch version used to produce -- so
+   switching did not silently change any CLI-visible output.
+
+The subprocess-based "does importing/calling this module pull torch"
+boundary tests live in ``tests/test_package_boundaries.py`` alongside the
+repo's other layering guards, not here.
 """
 
 from __future__ import annotations
@@ -34,15 +53,15 @@ import pytest
 
 
 def test_gamma_numpy_matches_torch_byte_for_byte_on_uint8() -> None:
-    """uint8 の全256値・両方向で、torch版とバイト単位で一致すること。
+    """uint8 の全256値・両方向で、torch版とバイト単位で一致すること（CPU・CUDA双方）。
 
     This is an exhaustive sweep, not a sample -- it walks every possible
-    quantization boundary a uint8 input can land on. Verified against the
-    CPU torch backend for reproducibility outside this machine's GPU; a
-    one-off exploratory check (not asserted here) additionally confirmed
-    0/768 mismatches against the CUDA backend too.
+    quantization boundary a uint8 input can land on. This is the decisive
+    measurement for the switch: every real caller in this codebase passes
+    uint8 through ``LINEARIZERS["gamma"]``, and it matches torch exactly,
+    on both backends, so the switch changes no delivered output.
     """
-    pytest.importorskip("torch")
+    torch = pytest.importorskip("torch")
     from yoshidacomp.compensation.color_mixing_matrix import (
         apply_inverse_gamma_correction,
     )
@@ -52,31 +71,40 @@ def test_gamma_numpy_matches_torch_byte_for_byte_on_uint8() -> None:
     assert image.dtype == np.uint8
     assert sorted(np.unique(image).tolist()) == list(range(256))
 
-    for gamma in (1.0 / 2.2, 2.2):
-        numpy_out = _apply_inverse_gamma_numpy(image, gamma=gamma)
-        torch_out = apply_inverse_gamma_correction(image, gamma=gamma, device="cpu")
+    devices = ["cpu"]
+    if torch.cuda.is_available():
+        devices.append("cuda")
 
-        assert numpy_out.dtype == np.uint8
-        assert numpy_out.shape == image.shape
-        np.testing.assert_array_equal(
-            numpy_out,
-            np.asarray(torch_out),
-            err_msg=f"uint8 mismatch at gamma={gamma}",
-        )
+    for device in devices:
+        for gamma in (1.0 / 2.2, 2.2):
+            numpy_out = _apply_inverse_gamma_numpy(image, gamma=gamma)
+            torch_out = apply_inverse_gamma_correction(image, gamma=gamma, device=device)
+
+            assert numpy_out.dtype == np.uint8
+            assert numpy_out.shape == image.shape
+            np.testing.assert_array_equal(
+                numpy_out,
+                np.asarray(torch_out),
+                err_msg=f"uint8 mismatch at gamma={gamma}, device={device}",
+            )
 
 
 def test_gamma_numpy_matches_torch_within_one_ulp_on_float32_in_range() -> None:
-    """float32 [0, 1] の細かいグリッドで torch 版とほぼ一致すること。
+    """float32 [0, 1] の細かいグリッドで torch 版とほぼ一致すること（CPU比較）。
 
     Not byte-for-byte: ``np.power`` and ``torch.pow`` disagree by up to 1
     ULP (~5.96e-8 in this magnitude range) on a real, measured fraction of
-    a fine grid (774/12003 samples in the exploratory sweep). An
-    ``assert_array_equal`` here would fail permanently and for a reason
-    that has nothing to do with a real bug -- see the module docstring.
-    The tolerance below (2e-7, roughly 3-4x the observed max diff) is deliberately
-    tight enough that a clamp bug or a wrong normalization scale (both of
-    which move results by orders of magnitude more than 1 ULP) still fails
-    this test.
+    a fine grid -- 222/12003 against torch-CPU on this exact grid (the
+    number this test's tolerance is set against). An ``assert_array_equal``
+    here would fail permanently and for a reason that has nothing to do
+    with a real bug -- see the module docstring and
+    ``pipeline._apply_inverse_gamma_numpy``'s docstring for why this
+    doesn't block wiring the numpy version in: torch's CUDA backend
+    disagrees with torch's own CPU backend on 762/12003 of this same grid,
+    a *larger* gap than this function's. The tolerance below (2e-7, roughly
+    3-4x the observed max diff) is deliberately tight enough that a clamp
+    bug or a wrong normalization scale (both of which move results by
+    orders of magnitude more than 1 ULP) still fails this test.
     """
     pytest.importorskip("torch")
     from yoshidacomp.compensation.color_mixing_matrix import (
@@ -97,9 +125,8 @@ def test_gamma_numpy_matches_torch_within_one_ulp_on_float32_in_range() -> None:
 
     # Pin the fact that they are *not* identical, so this test would fail
     # loudly (rather than silently pass a stricter bound) if a future numpy
-    # or torch release happens to close the gap -- that would be worth
-    # revisiting the "do not switch" decision over, not something a green
-    # suite should hide.
+    # or torch release happens to close the gap -- worth knowing about, not
+    # something a green suite should hide.
     max_diff = float(np.max(np.abs(numpy_out.astype(np.float64) - torch_out.astype(np.float64))))
     assert 0.0 < max_diff <= 2e-7, max_diff
 
@@ -172,85 +199,121 @@ def test_gamma_direction_is_not_inverted_by_the_numpy_version() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 3. Import boundary
+# 3. Wiring: LINEARIZERS["gamma"] / generate_projection_image, bit-equality
 # ---------------------------------------------------------------------------
 
 
-def test_importing_pipeline_does_not_pull_torch() -> None:
-    """``pipeline`` の import だけでは torch / psutil / color_mixing_matrix /
-    scipy を引かないこと。
+def test_linearizers_gamma_matches_torch_byte_for_byte() -> None:
+    """``LINEARIZERS["gamma"]``（実際の呼び出し経路）が torch 版とバイト一致すること。
 
-    This started out weaker -- only asserting ``color_mixing_matrix`` and
-    ``psutil`` were absent -- because ``yoshidacomp.geometry.warp`` (also
-    imported by this module, for ``prepare_target_image_for_compensation()``)
-    used to do an unconditional ``import torch`` at its own module scope,
-    which made the blanket "no torch" claim genuinely false regardless of
-    what this task did to ``pipeline.py``. Measured before that was fixed:
-    importing ``pipeline`` took ~9.4-13.0s wall time (three trials) and put
-    ``torch`` in ``sys.modules``.
-
-    That was fixed *in ``warp.py`` itself*: its two ``import torch`` use
-    sites (inside ``warp_camera_array_to_projector`` and ``invwarp_image``)
-    are local imports, following the exact pattern that module's own
-    docstring already used for the ``graycode`` git submodule. Because the
-    fix lives inside those function bodies, it changes no module-level
-    attribute of ``warp`` or of ``pipeline`` -- ``tests/test_sample_mocked.py``'s
-    ``_patch_warp_helper``, which monkeypatches
-    ``warp_image``/``invwarp_image`` as attributes on the ``pipeline``
-    module (~10 call sites), keeps working untouched, since ``pipeline.py``
-    still imports those two names at its own module scope from ``warp``
-    (only ``warp``'s *internal* torch import moved). That got the wall time
-    to ~2.0s (three trials, versus ~9.4-13.0s before).
-
-    A profile of that remaining ~2.0s showed 73% of it (~1.5s) was
-    ``scipy.interpolate``, pulled in by this module's own
-    ``from scipy.interpolate import PchipInterpolator`` at module scope.
-    Checked before moving it: ``PchipInterpolator`` has exactly one call
-    site in the whole file, inside ``_build_channel_lut`` (LUT
-    *construction*, called only from ``build_inverse_lut``, which
-    ``pipeline.py`` does not even import). ``apply_inverse_lut`` -- the
-    function every ``LINEARIZERS["inverse_lut"]`` call actually goes
-    through -- uses only ``np.interp``. So the same treatment applied:
-    the import moved into ``_build_channel_lut``. Measured after: ~0.55s
-    (three trials), with ``scipy.interpolate`` absent from ``sys.modules``.
-
-    ``yoshidacomp.geometry.warp`` and ``cv2`` are both still imported (the
-    former because ``pipeline.py`` still imports
-    ``WarpMethod``/``invwarp_image``/``warp_image`` from it at module
-    scope; the latter is an existing, accepted dependency of the view
-    layer), but neither drags torch, psutil, or scipy along with it
-    anymore.
-
-    Run in a subprocess: in-process, some other test collected earlier in
-    the same session may have already imported these modules, which would
-    make the assertion pass regardless of whether ``pipeline.py`` (or
-    ``warp.py``/``inverse_lut.py``) is actually responsible.
+    The earlier tests in this file compare ``_apply_inverse_gamma_numpy``
+    directly; this one goes through ``_linearize_gamma`` /
+    ``LINEARIZERS["gamma"]`` -- the actual call path every CLI script and
+    ``generate_projection_image`` use -- to prove the *wiring*, not just
+    the underlying function, is correct: a plausible bug here would be
+    forgetting to pass ``gamma=1.0 / projector.gamma`` (using
+    ``projector.gamma`` directly) at the call site, which
+    ``test_gamma_direction_is_not_inverted_by_the_numpy_version`` above
+    only checks against the raw function, not this wiring.
     """
-    import subprocess
-    import sys
+    torch = pytest.importorskip("torch")
+    from dataclasses import dataclass
 
-    code = (
-        "import sys; import yoshidacomp.compensation.pipeline; "
-        "mods = sys.modules; "
-        "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods)); "
-        "print('psutil=%s' % ('psutil' in mods)); "
-        "print('geometry.warp=%s' % ('yoshidacomp.geometry.warp' in mods)); "
-        "print('torch=%s' % ('torch' in mods)); "
-        "print('scipy=%s' % any('scipy' in m for m in mods)); "
-        "print('cv2=%s' % ('cv2' in mods))"
+    from yoshidacomp.compensation.color_mixing_matrix import (
+        apply_inverse_gamma_correction,
     )
-    out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=True
-    )
-    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+    from yoshidacomp.compensation.pipeline import LINEARIZERS
 
-    assert reported["color_mixing_matrix"] == "False", out.stdout
-    assert reported["psutil"] == "False", out.stdout
-    assert reported["torch"] == "False", out.stdout
-    assert reported["scipy"] == "False", out.stdout
-    # geometry.warp and cv2 are legitimately still imported -- pipeline.py
-    # needs WarpMethod/invwarp_image/warp_image from warp, and cv2 is an
-    # existing, accepted dependency -- but none of them may bring torch,
-    # psutil, or scipy along for the ride.
-    assert reported["geometry.warp"] == "True", out.stdout
-    assert reported["cv2"] == "True", out.stdout
+    @dataclass(frozen=True)
+    class Projector:
+        gamma: float = 2.2
+
+    image = np.arange(256, dtype=np.uint8).reshape(16, 16, 1).repeat(3, axis=2)
+    wired_out = LINEARIZERS["gamma"](image, projector=Projector(), lut=None)
+    reference = apply_inverse_gamma_correction(
+        image, gamma=1.0 / Projector().gamma, device="cpu"
+    )
+
+    assert wired_out.dtype == np.uint8
+    np.testing.assert_array_equal(wired_out, np.asarray(reference))
+
+
+def test_generate_projection_image_gamma_output_is_byte_identical_to_torch() -> None:
+    """CLI が実際に使う経路 (``generate_projection_image``, linearizer="gamma",
+    dtype=uint8) の出力が、torch を直接呼んだ場合とバイト単位で一致すること。
+
+    This is the end-to-end check the CLI scripts' output depends on:
+    ``examples/python/sample.py`` and
+    ``examples/python/rebuild_compensation_with_map.py`` both go through
+    exactly this function with ``linearizer="gamma"`` and the default
+    ``dtype=np.uint8``. A diverse (not flat/symmetric) target and matrix
+    are used so the compensation values feeding into the gamma step cover
+    many different code points, not just one.
+    """
+    torch = pytest.importorskip("torch")
+    from dataclasses import dataclass
+
+    from yoshidacomp.compensation.color_mixing_matrix import (
+        apply_inverse_gamma_correction,
+    )
+    from yoshidacomp.compensation.pipeline import generate_projection_image
+    from yoshidacomp.compensation.photometric_compensation import (
+        calc_compensation_image,
+    )
+
+    @dataclass(frozen=True)
+    class Projector:
+        width: int = 16
+        height: int = 16
+        gamma: float = 2.2
+
+    rng = np.random.default_rng(20260802)
+    target = rng.integers(0, 256, size=(16, 16, 3), dtype=np.uint8)
+    # A non-trivial, asymmetric matrix: each output channel is a distinct mix
+    # of R/G/B plus a per-channel bias, so target diversity survives into
+    # compensation diversity instead of collapsing onto one value.
+    matrices = np.zeros((16, 16, 4, 3), dtype=np.float32)
+    matrices[:, :, 0, 0] = 0.9
+    matrices[:, :, 1, 0] = 0.05
+    matrices[:, :, 1, 1] = 0.85
+    matrices[:, :, 2, 1] = 0.1
+    matrices[:, :, 2, 2] = 0.95
+    matrices[:, :, 0, 2] = 0.05
+    matrices[:, :, 3, 0] = 0.02
+    matrices[:, :, 3, 1] = -0.01
+    matrices[:, :, 3, 2] = 0.01
+
+    _, wired_codes = generate_projection_image(
+        target,
+        matrices,
+        projector=Projector(),
+        active_region=(0, 0, 16, 16),
+        linearizer="gamma",
+        target_decode="none",
+    )
+
+    # Independently reconstruct what the pre-switch torch path would have
+    # produced: same compensation step, then the torch gamma correction
+    # directly (device="cpu" -- uint8 already measured identical on CUDA
+    # too, see test_gamma_numpy_matches_torch_byte_for_byte_on_uint8).
+    compensation = calc_compensation_image(
+        target_image=target.astype(np.float32) / 255.0,
+        color_mixing_matrices=matrices,
+        dtype=np.uint8,
+        clip=True,
+    )
+    from yoshidacomp.compensation.projection_region import mask_to_active_region
+
+    compensation = mask_to_active_region(compensation, (0, 0, 16, 16))
+    reference_codes = np.asarray(
+        apply_inverse_gamma_correction(
+            compensation, gamma=1.0 / Projector().gamma, device="cpu"
+        )
+    )
+
+    assert wired_codes.dtype == np.uint8
+    # Sanity: the target/matrix combination above must actually exercise a
+    # range of compensation values, not collapse to one -- otherwise this
+    # test would pass even with a badly broken implementation.
+    assert len(np.unique(compensation)) > 10
+    np.testing.assert_array_equal(wired_codes, reference_codes)
