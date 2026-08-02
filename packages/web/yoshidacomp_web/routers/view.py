@@ -150,12 +150,62 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
     # from the array. A view that declares 99 and renders 3 used to get a
     # 200 OK and a silently wrong grid; fail here instead.
     # 宣言値と実配列が食い違うと200のまま表示だけが壊れるので明示的に失敗させる。
-    if channels != spec.channels or len(result.labels) != channels:
+    if channels != spec.channels:
         raise HTTPException(
             status_code=500,
             detail=(
                 f"view {key!r} declares channels={spec.channels} but rendered "
                 f"{channels} with {len(result.labels)} label(s)"
+            ),
+        )
+
+    # What ``labels`` counts is decided by ``kind``, and exactly one kind
+    # differs.
+    #
+    # For ``scalar`` and ``rgb`` a label names a channel -- they are the tile
+    # captions and the readout's column headings -- so there must be one per
+    # channel. For ``categorical`` the single channel carries a class *index*
+    # and the labels name the classes, so there are as many labels as classes
+    # and ``len(labels) == channels`` would reject every such view on sight
+    # (``views/gamut.py``: one channel, four class names). The class names have
+    # nowhere else to travel: ``X-Labels-B64`` is the only string-carrying
+    # header in this contract.
+    #
+    # The check kept for that kind is the one that still has teeth. A
+    # categorical view's values are indices into ``labels``, so its display
+    # range is not a choice either -- it is ``[0, len(labels) - 1]`` by
+    # definition, and the frontend maps exactly that range onto its colours.
+    # Adding a class and forgetting ``vmax`` (or the reverse) leaves every
+    # class drawn in the wrong colour, with no error anywhere; this fails
+    # instead. It is O(1) and does not touch the pixels.
+    #
+    # ``labels`` が何を数えているかは ``kind`` が決める。``scalar``/``rgb`` は
+    # チャンネル名なのでチャンネル数と一致しなければならないが、
+    # ``categorical`` の1チャンネルはクラス番号であり、ラベルはクラス名なので
+    # 数はクラス数になる（``gamut`` は1チャンネル・4クラス）。クラス名を運べる
+    # ヘッダは他に無い。代わりに固定するのは表示レンジで、クラス番号の
+    # ビューではそれは選択の余地が無く ``[0, len(labels) - 1]`` である。
+    # クラスを増やして ``vmax`` を忘れると、全クラスが誤った色で描かれたまま
+    # どこにも異常が出ない。
+    if spec.kind == "categorical":
+        labels_ok = (result.vmin, result.vmax) == (0.0, float(len(result.labels) - 1))
+        expected = (
+            "a categorical view's labels name its classes, so vmin/vmax must "
+            f"be (0.0, {float(len(result.labels) - 1)}) for "
+            f"{len(result.labels)} label(s)"
+        )
+    else:
+        labels_ok = len(result.labels) == channels
+        expected = (
+            f"a {spec.kind!r} view's labels name its channels, so it must "
+            "render one label per channel"
+        )
+    if not labels_ok:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"view {key!r} rendered {len(result.labels)} label(s) with "
+                f"vmin={result.vmin!r} vmax={result.vmax!r}: {expected}"
             ),
         )
 

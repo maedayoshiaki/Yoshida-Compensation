@@ -57,21 +57,35 @@ def _decode_labels(response) -> list[str]:
 
 
 @contextlib.contextmanager
-def _temporary_view(key: str, labels: list[str], *, channels=None, params=None, kind="scalar"):
+def _temporary_view(
+    key: str,
+    labels: list[str],
+    *,
+    channels=None,
+    params=None,
+    kind="scalar",
+    rendered_channels=None,
+    vmax=1.0,
+):
     """Register a throwaway view for the duration of a ``with`` block.
 
     Registering rather than adding a real view keeps these contract tests
     independent of which views happen to ship.
     実ビューを増やさずに契約だけを検証するため、使い捨てビューを登録する。
+
+    *rendered_channels* and *vmax* exist for the ``categorical`` contract,
+    where the array has one channel while the labels name the classes -- a
+    combination no ``scalar`` or ``rgb`` view can express.
     """
     declared = len(labels) if channels is None else channels
+    rendered = len(labels) if rendered_channels is None else rendered_channels
 
     def _render(context, params_: dict) -> ViewResult:
         height, width = context.array.shape[0], context.array.shape[1]
         return ViewResult(
-            data=np.zeros((height, width, len(labels)), dtype=np.float32),
+            data=np.zeros((height, width, rendered), dtype=np.float32),
             vmin=0.0,
-            vmax=1.0,
+            vmax=vmax,
             labels=labels,
         )
 
@@ -330,6 +344,73 @@ def test_declared_channels_must_match_the_rendered_array(
         assert response.status_code == 500
         detail = response.json()["detail"]
         assert "99" in detail and "3" in detail
+
+
+def test_a_categorical_view_labels_its_classes_not_its_channels(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """``categorical`` のラベルはチャンネル名ではなくクラス名である。
+
+    1チャンネル（クラス番号）に対してラベルが4つ、という組み合わせは
+    ``scalar``/``rgb`` では作れない。``len(labels) == channels`` を全 kind に
+    課すと ``views/gamut.py`` は一目で 500 になる（クラス名を運べるヘッダは
+    ``X-Labels-B64`` しか無い）。
+
+    代わりに固定されるのは表示レンジで、クラス番号のビューでは
+    ``[0, len(labels) - 1]`` 以外に選択の余地が無い。ここが緩いと、クラスを
+    増やして ``vmax`` を忘れた実装が全クラスを誤った色で描いたまま 200 を
+    返す。
+    """
+    stand_in_projector_config(**_CAMERA_SAFE_FRAME)
+    store.clear()
+    # One matrix for all three views below. ``load_matrix`` keeps the ``.npy``
+    # memory-mapped, and Windows refuses to rewrite a mapped file, so calling
+    # ``_load`` three times against the same ``tmp_path`` fails with an OSError
+    # that has nothing to do with the contract under test.
+    # ``load_matrix`` は ``.npy`` を mmap したままにするため、同じ ``tmp_path``
+    # へ3回書き戻すと Windows が拒否する。行列は1つで足りる。
+    client = TestClient(create_app(), raise_server_exceptions=False)
+    matrix_id = _load(client, tmp_path, height=6, width=8)
+
+    labels = ["範囲内", "負クリップ", "1超クリップ", "両方"]
+    with _temporary_view(
+        "_test_categorical_ok",
+        labels,
+        channels=1,
+        kind="categorical",
+        rendered_channels=1,
+        vmax=3.0,
+    ):
+        response = client.get(f"/api/matrix/{matrix_id}/view/_test_categorical_ok")
+        assert response.status_code == 200, response.text
+        assert response.headers["X-Channels"] == "1"
+        assert _decode_labels(response) == labels
+
+    # ...and the range must agree with the number of classes.
+    with _temporary_view(
+        "_test_categorical_range",
+        labels,
+        channels=1,
+        kind="categorical",
+        rendered_channels=1,
+        vmax=1.0,
+    ):
+        response = client.get(f"/api/matrix/{matrix_id}/view/_test_categorical_range")
+        assert response.status_code == 500
+        detail = response.json()["detail"]
+        assert "categorical" in detail
+        assert "3.0" in detail
+
+    # The per-channel rule still holds for every other kind.
+    with _temporary_view(
+        "_test_scalar_label_count",
+        ["a", "b"],
+        channels=3,
+        rendered_channels=3,
+    ):
+        response = client.get(f"/api/matrix/{matrix_id}/view/_test_scalar_label_count")
+        assert response.status_code == 500
+        assert "channel" in response.json()["detail"]
 
 
 def test_unknown_view_is_404(tmp_path, stand_in_projector_config) -> None:
