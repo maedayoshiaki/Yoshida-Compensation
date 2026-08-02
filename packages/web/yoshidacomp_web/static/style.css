@@ -200,6 +200,24 @@ canvas.lut-curve {
 .legend-swatch.nan { background: var(--nan); }
 .legend-swatch.grad { background: linear-gradient(to right, #3b4cbf, #fff, #b5051f); }
 
+/* The class legend for a `categorical` view.
+
+   Note what is *not* here: any colour. Each row's swatch gets its background
+   inline from js/main.js, out of the same CLASS_COLORS array the fragment
+   shader's palette is generated from -- the same rule as --nan above, and for
+   the same reason. A palette in this file would look live and be a copy.
+
+   The rows are their own block rather than four `.group.legend` siblings so
+   they sit together with a tighter rhythm than the two standing legends
+   beneath them, which are unrelated statements rather than one list.
+
+   クラス凡例。色はここに書かない（--nan と同じ規則で、js/main.js が
+   CLASS_COLORS から実行時に入れる）。行同士は1つの一覧なので、下の独立した
+   凡例2つより詰めて並べる。 */
+.class-legend { display: flex; flex-direction: column; gap: 4px; }
+.class-legend .class-row { gap: 7px; }
+.class-legend .legend-swatch { width: 18px; height: 12px; }
+
 /* Hover readout: one row of panels along the bottom.
    下部の読み取り欄。板を横に並べる。 */
 .readout {

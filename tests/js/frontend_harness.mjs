@@ -2,7 +2,7 @@
 //
 // Usage: node frontend_harness.mjs <static-dir> <scenario>
 //   <static-dir>  directory holding index.html and js/{main,glview,api,plot}.js
-//   <scenario>    "ordering" | "views" | "button" | "rgb" | "probe"
+//   <scenario>    "ordering" | "views" | "button" | "rgb" | "gamut" | "probe"
 //                 | "target" | "lut"
 // Prints one JSON object to stdout: { scenario, checks: [{name, ok, detail}] }.
 //
@@ -84,6 +84,34 @@ function emit() {
 // undefined のまま——記録ではなく例外になる状態だった。現時点の glview.js に
 // そうした呼び出しは無いが、将来の呼び出しが検証できない理由がスタブ側に
 // あってはならない。
+//
+// The GL *constants* are the third thing not swallowed, and they had to stop
+// being swallowed for the texture format to be checkable at all. Every
+// SCREAMING_CASE property used to answer the same `1`, so `gl.R32F` and
+// `gl.RGB32F` were the same value and `texImage2D` could not tell which had
+// been asked for: a categorical view uploading its class indices as RGB32F --
+// which puts the index in the red component alone and leaves green and blue
+// undefined -- was indistinguishable from the R32F upload it needs. Each name
+// now gets its own id, and the id maps back to the name so a check can say
+// "RGB32F" rather than "4098".
+// GL定数も飲み込まない。以前はどの定数も同じ `1` だったため `gl.R32F` と
+// `gl.RGB32F` が区別できず、クラス番号を RGB32F で載せる実装（赤成分だけに
+// 番号が入り、緑と青は未定義）が正しい R32F の転送と同じに見えていた。
+const GL_CONSTANT_IDS = new Map();    // name -> id
+const GL_CONSTANT_NAMES = new Map();  // id -> name
+let nextGlConstant = 0x4000;
+
+function glConstant(name) {
+  if (!GL_CONSTANT_IDS.has(name)) {
+    const id = nextGlConstant++;
+    GL_CONSTANT_IDS.set(name, id);
+    GL_CONSTANT_NAMES.set(id, name);
+  }
+  return GL_CONSTANT_IDS.get(name);
+}
+
+const glConstantName = (id) => GL_CONSTANT_NAMES.get(id) ?? id;
+
 function glStub(uploads, uniforms) {
   const fn = function () { return glStub(uploads, uniforms); };
   return new Proxy(fn, {
@@ -94,6 +122,7 @@ function glStub(uploads, uniforms) {
       if (prop === "getUniformLocation") return (_prog, name) => name;
       if (prop === "uniform1i") return (name, value) => { uniforms[name] = value; };
       if (prop === "texImage2D") {
+        // (target, level, internalformat, w, h, border, format, type, pixels)
         return (...args) => {
           const px = args[args.length - 1];
           uploads.push({
@@ -101,10 +130,12 @@ function glStub(uploads, uniforms) {
             first: px[0],
             last: px[px.length - 1],
             head: Array.from(px.slice(0, 6)),
+            internal: glConstantName(args[2]),
+            format: glConstantName(args[6]),
           });
         };
       }
-      if (typeof prop === "string" && /^[A-Z0-9_]+$/.test(prop)) return 1;
+      if (typeof prop === "string" && /^[A-Z0-9_]+$/.test(prop)) return glConstant(prop);
       return glStub(uploads, uniforms);
     },
     apply() { return glStub(uploads, uniforms); },
@@ -481,8 +512,30 @@ const VIEWS = [
       default: "shared", choices: ["shared", "per_tile"],
     }],
   },
-  // Declared in the Python ViewKind but unimplemented in the frontend (F4).
-  { key: "gamut", label: "色域外判定", kind: "categorical", channels: 4, params: [] },
+  // One channel of class indices, four class labels: the `categorical`
+  // contract routers/view.py pins (channels == 1, len(labels) >= 2,
+  // vmax == len(labels) - 1). It is registered with its real shape rather
+  // than a convenient one because every categorical check here reads
+  // `state.payload.labels`, and a fixture whose label count matched its
+  // channel count would let the two axes be confused with no visible effect.
+  // クラス番号1チャンネルとクラス名4つ。ラベル数とチャンネル数が一致する
+  // フィクスチャにすると、2つの軸を取り違えても見た目に差が出なくなる。
+  { key: "gamut", label: "色域外判定", kind: "categorical", channels: 1, params: [] },
+  // A kind no frontend implements, and the only reason it exists.
+  //
+  // `gamut` used to be this fixture -- `categorical` was the unimplemented
+  // kind -- and the check that the viewer refuses what it does not understand
+  // rode on it. Implementing `categorical` would have taken that check with
+  // it: the scenario would have gone on asserting a refusal that no longer
+  // happens, or (worse) been quietly repointed at a kind the viewer now draws
+  // and stopped asserting anything. The property is about *unknown* kinds and
+  // it outlives any particular one, so it gets a fixture that will never be
+  // implemented rather than borrowing whichever kind is next in line.
+  //
+  // 未対応 kind のフィクスチャ。以前はこれが `gamut`（= `categorical`）で
+  // あり、実装した時点でこの検査は行き場を失う。「未知の kind を断る」性質は
+  // 特定の kind より長生きするので、実装される予定の無いものを充てる。
+  { key: "vector_field", label: "未対応kindのビュー", kind: "flow", channels: 2, params: [] },
   // Three channels that are one colour, not three pictures -- the rgb scenario.
   {
     key: "surface", label: "投影面の色", kind: "rgb", channels: 3,
@@ -621,7 +674,19 @@ const LABELS_BY_KEY = {
   coef_tiles: TILE_LABELS,
   plain_tiles: TILE_LABELS,
   legacy_tiles: TILE_LABELS,
+  // Deliberately *not* views/gamut.py's own LABELS
+  // (["範囲内", "負クリップ", "1超クリップ", "両方"]), and deliberately not in
+  // its order. A frontend that hard-coded the shipped class names -- the
+  // obvious way to build a legend, and the one the brief for this task names
+  // as a mistake -- would produce a legend indistinguishable from a correct
+  // one against a fixture that echoed them. The comma inside the last entry is
+  // there so a legend that joined the labels into one string, or split them on
+  // one, is visibly wrong rather than coincidentally right.
+  // 実装が本物のラベルを埋め込んでも気付けるよう、意図的に別の語・別の順に
+  // する。最後の要素にカンマを入れてあるのは、連結や分割で作った凡例が偶然
+  // 正しく見えないようにするためである。
   gamut: ["色域外", "1超クリップ", "両方", "範囲内, 補正可"],
+  vector_field: ["u", "v"],
   surface: ["R", "G", "B"],
   compensation: ["R", "G", "B"],
   // Deliberately *not* ["R","G","B"]: `tri_scalar` must reach its 1x3 grid
@@ -997,7 +1062,59 @@ globalThis.fetch = async (url, options) => {
     const tag = tagForPath[matrixPath] ?? 0;
     const interleaved = INTERLEAVED_VIEWS.has(key);
     const data = new Float32Array(H * W * spec.channels);
-    if (interleaved) {
+    if (key === "gamut") {
+      // Class indices, not `(c + 1) * tag`.
+      //
+      // The generic fill would give a one-channel view a frame of a single
+      // value -- every pixel class 1 -- and that is a fixture symmetric in the
+      // dimension under test: a shader painting every class the same colour
+      // could not be told from a correct one, and neither could a legend row
+      // picked by a constant. `(row * 3 + col) % 4` puts all four classes in
+      // this 4x5 frame instead.
+      //
+      // The coefficient is 3 rather than 1 on purpose. `(row + col) % 4` also
+      // gives four classes, and it is symmetric under transposition -- pixel
+      // (row 1, col 2) and pixel (row 2, col 1) hold the same class -- so it
+      // cannot see a readout that swaps the two coordinates. That failure is
+      // the one this repository has now shipped twice; see
+      // `hover_probe_transposes_row_and_col` in tests/test_web_frontend_js.py.
+      //
+      // Measured rather than reasoned about, in three runs:
+      //
+      //   (row * 3 + col) % 4, NaN at (2,1)  + transposed readout : 2 fail
+      //   (row + col) % 4,     NaN at (2,1)  + transposed readout : 2 fail
+      //   (row + col) % 4,     NaN at (2,2)  + transposed readout : 0 fail
+      //
+      // The middle row is the trap. The symmetric fill does catch it -- but
+      // only because the swapped index lands on the masked pixel, which is
+      // where the NaN happens to be and not a property of the fill. Move the
+      // NaN onto the diagonal, where it is its own transpose, and the whole
+      // scenario passes 24/24 with the bug in place. With this fill,
+      // (row 1, col 2) is class 1 and (row 2, col 1) is class 3, so the swap
+      // is visible without help.
+      //
+      // One pixel is NaN, at (row 2, col 1). Outside the active projection
+      // region a pixel has no class, and 0.0 is a perfectly good class 0 --
+      // "everything here is representable", written across the part of the
+      // frame the projector never lit. It sits off the first six elements, off
+      // the first and off the last, so it does not collide with the upload
+      // summary the plane checks read.
+      //
+      // クラス番号を入れる。共通の埋め方だと1チャンネルのビューは全画素が
+      // 同じ値になり、「全クラスを同じ色で塗るシェーダ」も「定数で選んだ凡例」
+      // も区別できない。係数を3にしてあるのは、`(row + col) % 4` が転置に対して
+      // 対称であり（(row 1, col 2) と (row 2, col 1) が同じクラスになる）、
+      // 行と列の取り違えを検出できないためである。実測（転置の変異に対して）:
+      // `(row*3+col)%4` かつ NaN (2,1) は2件失敗、`(row+col)%4` かつ NaN (2,1)
+      // も2件失敗、しかし `(row+col)%4` かつ NaN を対角の (2,2) へ動かすと
+      // 24件すべて通ってしまう。対称な埋め方が捕まえていたのは、入れ替えた添字が
+      // たまたまマスク画素に当たっていたからにすぎない。NaN を1つ置く理由は、
+      // 領域外が黙ってクラス0（範囲内）になる失敗がこのビューで最も重いため。
+      for (let row = 0; row < H; row++) {
+        for (let col = 0; col < W; col++) data[row * W + col] = (row * 3 + col) % 4;
+      }
+      data[2 * W + 1] = NaN;
+    } else if (interleaved) {
       for (let i = 0; i < data.length; i++) data[i] = ((i % spec.channels) + 1) * tag;
     } else {
       for (let c = 0; c < spec.channels; c++) {
@@ -1021,10 +1138,21 @@ globalThis.fetch = async (url, options) => {
     // 外は coef_tiles も surface も NaN を書くため、マスクされた画素は珍しく
     // ない。rgbの転送検査が見る先頭6要素・先頭・末尾のいずれでもない位置に置く。
     if (key === "surface") data[1 * H * W + 3 * W + 0] = NaN;
+    // A categorical view's range is the class index range, which
+    // routers/view.py pins to [0, len(labels) - 1] -- not the +/-1 every other
+    // fixture here declares. Sent as itself so a client that ignored the
+    // header and assumed a symmetric range would be visible: 0 and 3 are
+    // neither of the defaults, and neither is derivable from the other view's.
+    // categorical のレンジはクラス番号の範囲であり、他のフィクスチャの ±1 とは
+    // 別物である。0/3 はどちらの既定値でもないので、ヘッダを読まない実装が
+    // 見える。
+    const range = key === "gamut"
+      ? { vmin: "0.0", vmax: String(viewLabels(spec).length - 1) }
+      : { vmin: "-1.0", vmax: "1.0" };
     const headers = {
       "X-Height": String(H), "X-Width": String(W),
       "X-Channels": String(spec.channels), "X-Kind": spec.kind,
-      "X-Vmin": "-1.0", "X-Vmax": "1.0",
+      "X-Vmin": range.vmin, "X-Vmax": range.vmax,
       "X-Labels-B64": Buffer.from(JSON.stringify(viewLabels(spec)), "utf-8").toString("base64"),
     };
     // Every view declares its layout, except `headerless_tiles`, whose whole
@@ -1072,9 +1200,31 @@ const payloadTag = () => (state.payload ? state.payload.data[0] : null);
 // whichever layout the body arrived in.
 // 各タイルが最後に載せた平面の値。layout に関わらずタイルcはチャンネルc、
 // すなわち (c + 1) * tag を受け取らねばならない。
+// The *contents* only. `internal`/`format` are recorded on the same entry but
+// read by uploadedFormats() below, so the existing contents assertions keep
+// comparing against the same four fields they always have.
+// 中身だけを見る。形式は同じ記録に入っているが下の関数で別に読む。
 const uploadedPlanes = () => views.map((v) => {
   const u = v.gl.__uploads;
-  return u.length ? u[u.length - 1] : null;
+  if (!u.length) return null;
+  const { length, first, last, head } = u[u.length - 1];
+  return { length, first, last, head };
+});
+
+// ...and the *format* only.
+//
+// Separate from the contents because a wrong format and wrong contents are
+// different failures with different symptoms: RGB32F on a one-channel plane
+// uploads exactly the same numbers and draws exactly the same first tile, with
+// the class index in the red component and two undefined components beside it.
+// The plane summary above cannot see it; nothing in the picture says so either.
+// 形式だけを見る。1チャンネルの平面を RGB32F で載せても数値は同じで、赤成分に
+// 番号が入り残り2成分が未定義になるだけなので、中身の要約では見えない。
+const uploadedFormats = () => views.map((v) => {
+  const u = v.gl.__uploads;
+  if (!u.length) return null;
+  const { internal, format } = u[u.length - 1];
+  return { internal, format };
 });
 
 // Expected per-tile plane for matrix `tag`: full size, filled with (c+1)*tag.
@@ -1161,6 +1311,28 @@ const panelOf = (id) =>
 const colHeads = () => el("tile-grid").children
   .filter((e) => e.className === "col-head mono")
   .map((e) => e.textContent);
+
+// The class legend, read back the way the page presents it.
+//
+// Three separate readings, because three separate things can be wrong and
+// each is invisible from the others: how many rows there are, what they say,
+// and what colour each one claims. A legend built from a hard-coded list has
+// the right number of rows; one whose swatches all resolve to the same colour
+// has the right labels. Only reading all three separates them.
+// 凡例を3つの側面から読む（行数・文字・色）。どれか1つでは、ハードコードした
+// 一覧も、全行が同じ色のパレットも通ってしまう。
+const legendRows = () => el("class-legend").children;
+const legendLabels = () => legendRows().map((row) => row.children[1].textContent);
+const legendSwatches = () => legendRows().map((row) => row.children[0].style.background);
+
+// The tone-chain controls' enabled state, as one object so a failure names
+// which control is wrong rather than just "false".
+// トーン系コントロールの状態。失敗時にどれが違うか分かるようまとめて返す。
+const TONE_IDS = ["ev-slider", "gamma-input", "gamma-slider", "dither-check"];
+const toneDisabled = () =>
+  Object.fromEntries(TONE_IDS.map((id) => [id, el(id) ? el(id).disabled : "missing"]));
+const allToneDisabled = (want) =>
+  TONE_IDS.every((id) => el(id) && el(id).disabled === want);
 
 // How many binary view fetches have been *issued* so far. Server-side params
 // are staged and submitted as a group, so "did changing a control fetch?" is a
@@ -1379,8 +1551,8 @@ if (SCENARIO === "ordering") {
 if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
-    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,surface,"
-      + "compensation,tri_scalar,bad_rgb,mangled_layout,mono_scalar,"
+    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,vector_field,"
+      + "surface,compensation,tri_scalar,bad_rgb,mangled_layout,mono_scalar,"
       + "headerless_tiles,refused_view",
     options.join(","));
   check("a second registered view is reachable from the selector",
@@ -1436,12 +1608,20 @@ if (SCENARIO === "views") {
     JSON.stringify(state.ranges && state.ranges.map((r) => r.vmax)));
 
   // --- an unsupported kind must fail loudly, not render as if it were scalar
+  //
+  // `vector_field` declares `kind: "flow"`, which no row of KIND_TRAITS
+  // answers. It replaced `gamut` here when `categorical` was implemented, and
+  // the replacement is the point: this check is about *unknown* kinds, so
+  // pointing it at whichever kind happens to be unimplemented today would
+  // retire it the moment that kind is built. See the fixture's own note.
+  // 未知の kind は `flow`。`categorical` を実装した時点で `gamut` はここの
+  // 役目を果たせなくなるため、実装予定の無いものに差し替えてある。
   const before = state.payload;
-  el("view-select").value = "gamut";
+  el("view-select").value = "vector_field";
   el("view-select").__fire("change");
   await sleep(300);
   check("unsupported kind is refused with a message naming it",
-    /未対応/.test(statusText()) && /categorical/.test(statusText()), statusText());
+    /未対応/.test(statusText()) && /flow/.test(statusText()), statusText());
   check("unsupported kind leaves state.payload identity unchanged",
     state.payload === before, `same object: ${state.payload === before}`);
 
@@ -1915,6 +2095,214 @@ if (SCENARIO === "rgb") {
     /target=target7/.test(withTarget), withTarget);
   check("the select next to it is submitted in the same group",
     /output=code/.test(withTarget), withTarget);
+}
+
+if (SCENARIO === "gamut") {
+  // A categorical view is one picture of *class indices*, and nothing about
+  // that survives being treated as a scalar view of one channel.
+  //
+  // The failure this scenario is written against is the quiet one. A class
+  // index is a perfectly good float: the scalar path uploads it, the diverging
+  // colormap gives it a colour, exposure and gamma move that colour, and the
+  // result is a smooth-looking picture of four flat regions with a ± range
+  // under it. Everything renders. What is lost is that the numbers are names,
+  // not quantities -- and once the tone chain is live, the colours stop being
+  // the ones the legend is standing next to.
+  //
+  // categorical は「クラス番号の絵」であり、1チャンネルのスカラービューとして
+  // 扱うと何も残らない。クラス番号も float なので、転送もカラーマップも露出も
+  // 通ってしまい、絵は出る。失われるのは「その数値は量ではなく名前である」
+  // ことと、トーンチェーンが効いた瞬間に凡例と色が食い違うことである。
+  clickLoad("A");
+  await settled();
+
+  // Both directions for every control this view turns off. "Always enabled"
+  // and "always disabled" each pass one half, which is how a check about a
+  // control's state stops being able to fail.
+  // 無効化の検査は両方向で見る（常時有効・常時無効のどちらも片側だけなら通る）。
+  check("the tone controls are live on a scalar view",
+    allToneDisabled(false), JSON.stringify(toneDisabled()));
+  check("the colormap control is enabled for a scalar view",
+    el("cmap-select").disabled === false, `disabled=${el("cmap-select").disabled}`);
+
+  const options = el("view-select").children.map((o) => o.value);
+  check("the categorical view is reachable from the selector",
+    options.includes("gamut"), options.join(","));
+
+  el("view-select").value = "gamut";
+  el("view-select").__fire("change");
+  await settled();
+
+  check("a categorical view renders instead of being refused as an unknown kind",
+    /表示中/.test(statusText()), statusText());
+
+  // --- one tile, and one tile that is not captioned with a class name
+  //
+  // `axesFromLabels` cannot parse these labels (no "->"), so the label-derived
+  // fallback produces a 1x1 grid captioned `labels[0]` -- "色域外" here, the
+  // name of class 0, written over a picture containing all four. The tile
+  // count is right either way, which is exactly why the heading is asserted
+  // separately from it.
+  // ラベルは "->" 形式ではないのでフォールバックは1行1列を作り、見出しは
+  // `labels[0]`（＝クラス0の名前）になる。枚数はどちらでも正しいので、
+  // 見出しは別に検証する。
+  check("a categorical payload draws one tile",
+    views.length === 1, `tiles=${views.length}`);
+  check("the tile is not headed with the name of class 0",
+    JSON.stringify(colHeads()) === JSON.stringify(["クラス"]),
+    JSON.stringify(colHeads()));
+
+  // --- the upload: contents, and the format the contents went up in
+  //
+  // Two assertions because they fail differently and neither implies the
+  // other. RGB32F on this plane uploads the same twenty numbers -- so the
+  // contents check passes -- and puts each class index in a red component with
+  // two undefined components beside it, which draws.
+  // 中身と形式は別々に見る。RGB32F でも数値は同じなので中身の検査は通り、
+  // 赤成分だけに番号が入った状態で描けてしまう。
+  check("the single tile carries the whole class-index plane",
+    JSON.stringify(uploadedPlanes())
+      === JSON.stringify([{ length: H * W, first: 0, last: 1, head: [0, 1, 2, 3, 0, 3] }]),
+    JSON.stringify(uploadedPlanes()));
+  check("class indices are uploaded as R32F/RED, not as a colour",
+    JSON.stringify(uploadedFormats())
+      === JSON.stringify([{ internal: "R32F", format: "RED" }]),
+    JSON.stringify(uploadedFormats()));
+
+  // --- and the shader is told which branch to run
+  //
+  // The texture can be uploaded correctly and the shader left in u_mode = 0,
+  // which runs the diverging colormap over 0..3: four flat regions in four
+  // shades of one ramp, which looks like a working view of a classification.
+  // テクスチャを正しく載せても u_mode が0のままなら、0〜3が発散カラーマップに
+  // 通り、1本のランプ上の4段階として「それらしく」描かれてしまう。
+  check("the shader is told u_mode = 2 for the categorical tile",
+    views[0].gl.__uniforms.u_mode === 2, `u_mode=${views[0].gl.__uniforms.u_mode}`);
+
+  // --- the display range is the class range the server declared
+  //
+  // 0 and 3, from the header -- neither of which is this harness's default
+  // ±1, and neither derivable from it. views/gamut.py takes the range from
+  // its LABELS rather than from the pixels precisely so an all-in-gamut frame
+  // does not collapse to vmin == vmax == 0; a client that recomputed it from
+  // the data would undo that from the other side.
+  // レンジはヘッダの 0/3（このハーネスの既定 ±1 のどちらでもない）。
+  check("the categorical range is the class index range from the payload",
+    JSON.stringify(state.ranges) === JSON.stringify([{ vmin: 0, vmax: 3 }]),
+    JSON.stringify(state.ranges));
+
+  // --- the legend
+  //
+  // The one place the class -> colour mapping is stated in words, and the one
+  // thing a screenshot of this view is read against. Its labels have to come
+  // from `payload.labels`: the fixture's four are deliberately neither
+  // views/gamut.py's own class names nor in its order, so a legend built from
+  // a hard-coded list of the shipped names looks identical to a correct one
+  // against the real server and wrong only here.
+  // クラスと色の対応を言葉で述べる唯一の場所。ラベルは `payload.labels` から
+  // 取らねばならない。フィクスチャの4つは実装側の語とも順序とも違えてある。
+  check("the legend is on screen for a categorical view",
+    el("class-legend").hidden === false, `hidden=${el("class-legend").hidden}`);
+  check("the legend has one row per class in the payload",
+    legendRows().length === state.payload.labels.length,
+    `rows=${legendRows().length} labels=${state.payload.labels.length}`);
+  check("the legend's labels are the payload's, not a hard-coded list",
+    JSON.stringify(legendLabels()) === JSON.stringify(state.payload.labels),
+    `${JSON.stringify(legendLabels())} vs ${JSON.stringify(state.payload.labels)}`);
+  // Four rows are useless if two of them are the same colour: the picture
+  // would show three regions where the data has four, and the legend would
+  // insist there are four. Distinctness is what makes the mapping invertible
+  // by eye; how far apart the four are perceptually is measured on the GPU,
+  // where the pixels actually are.
+  // 4行あっても2つが同じ色なら意味がない（絵は3領域、凡例は4クラスと主張）。
+  // 見た目の距離はGPU側で測る。
+  check("each class in the legend has its own colour",
+    new Set(legendSwatches()).size === legendRows().length
+      && legendSwatches().every((c) => typeof c === "string" && c.length > 0),
+    JSON.stringify(legendSwatches()));
+  // ...and it has to be where the picture is being looked at.
+  //
+  // The sidebar is `overflow-y: auto`, and with a target and a LUT loaded its
+  // foot is off the bottom of a 1600x1000 window -- measured, in the browser,
+  // with the legend in its first position down among the two standing
+  // legends. That is the same failure the display range and the timings had
+  // before they moved into the readout strip, and it is worse here: those two
+  // restated numbers that were on screen elsewhere, while this is the only
+  // statement of what the four colours mean. Pinned by position rather than by
+  // pixels because there is no CSS engine here; the first `<hr>` is what
+  // separates the per-view controls at the top of the column from everything
+  // that scrolls below.
+  // サイドバーは縦に溢れる。ターゲットとLUTを読み込んだ1600x1000の窓では
+  // 下端が画面外にあることを実測した（凡例を最初に置いた位置）。表示レンジ
+  // と計測を移したのと同じ問題であり、しかもこちらは「4色が何を意味するか」
+  // を述べる唯一の場所なので、より重い。CSSエンジンが無いので位置で固定する。
+  check("the class legend sits above the sidebar's first divider",
+    (() => {
+      const kids = el("class-legend").parentElement.children;
+      const at = kids.indexOf(el("class-legend"));
+      const firstHr = kids.findIndex((c) => c.tagName === "HR");
+      return at >= 0 && firstHr >= 0 && at < firstHr;
+    })(),
+    panelOf("class-legend"));
+
+  // --- exposure, gamma and the colormap do not apply to a name
+  check("the colormap control is disabled for a categorical view",
+    el("cmap-select").disabled === true, `disabled=${el("cmap-select").disabled}`);
+  check("the tone controls are disabled for a categorical view",
+    allToneDisabled(true), JSON.stringify(toneDisabled()));
+
+  // --- the readout reads `labels[value]`, not `labels[channel]`
+  //
+  // The axis the brief for this task names. There is one channel and four
+  // labels: the per-channel reading every other kind uses prints `labels[0]`
+  // -- "色域外" -- beside the correct number, under the correct heading, for
+  // every pixel in the frame. The fixture's class at (col 2, row 1) is 1, so
+  // the two readings disagree here, and its transpose (col 1, row 2) is the
+  // masked pixel, so a swapped index disagrees too.
+  // チャンネルで引く読み方は全画素で `labels[0]` を出す。フィクスチャの
+  // (col 2, row 1) はクラス1、その転置 (col 1, row 2) はマスク画素なので、
+  // ラベルの軸と添字の順序の両方について食い違いが出る。
+  views[0].onHover({ col: 2, row: 1 });
+  const classItems = viewValueItems();
+  check("the readout names the class the pixel is, not the first class",
+    classItems.length === 1
+      && classItems[0].children[1].textContent === "1 1超クリップ",
+    `${classItems.length} item(s): ${JSON.stringify(viewValueNumbers())}`);
+  check("the readout's caption is the class axis, not a channel name",
+    JSON.stringify(viewValueLabels()) === JSON.stringify(["クラス"]),
+    JSON.stringify(viewValueLabels()));
+
+  // A pixel with no class must read as no class. Outside the active
+  // projection region the payload is NaN, and 0 -- the class a rounded NaN
+  // would land on -- is "範囲内": the most reassuring possible wrong answer,
+  // over the part of the frame the projector never lit.
+  // クラスの無い画素は「無い」と読めること。丸めた NaN が落ちる先はクラス0
+  // ＝「範囲内」であり、最も安心できる誤答になる。
+  views[0].onHover({ col: 1, row: 2 });
+  check("a pixel with no class reads as NaN rather than as class 0",
+    JSON.stringify(viewValueNumbers()) === JSON.stringify(["NaN"])
+      && JSON.stringify(viewValueClasses()) === JSON.stringify(["vv-num nan"]),
+    `${JSON.stringify(viewValueNumbers())} ${JSON.stringify(viewValueClasses())}`);
+
+  // --- and every one of those has to be given back on the way out
+  //
+  // A one-way trip would leave the coefficient tiles with dead exposure and γ
+  // sliders and a class legend explaining a picture that is no longer there.
+  // 片道だと、係数タイルに戻っても露出とγが死んだままになり、消えた絵を
+  // 説明する凡例が残る。
+  el("view-select").value = "coef_tiles";
+  el("view-select").__fire("change");
+  await settled();
+  check("switching back to a scalar view restores one tile per channel",
+    views.length === 12, `tiles=${views.length}`);
+  check("switching back to a scalar view puts the shader back in u_mode = 0",
+    views.every((v) => v.gl.__uniforms.u_mode === 0),
+    JSON.stringify(views.map((v) => v.gl.__uniforms.u_mode)));
+  check("switching back to a scalar view re-enables the tone controls",
+    allToneDisabled(false), JSON.stringify(toneDisabled()));
+  check("switching back to a scalar view takes the class legend away",
+    el("class-legend").hidden === true && legendRows().length === 0,
+    `hidden=${el("class-legend").hidden} rows=${legendRows().length}`);
 }
 
 if (SCENARIO === "probe") {

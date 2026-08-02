@@ -153,6 +153,50 @@ def test_an_rgb_view_draws_one_colour_tile_and_keeps_a_three_channel_readout() -
     _assert_all_passed(_run_harness(_STATIC_DIR, "rgb"))
 
 
+def test_a_categorical_view_draws_a_discrete_palette_with_a_legend() -> None:
+    """A ``categorical`` view must be class indices, not small numbers.
+
+    Nothing about the wrong reading fails loudly, which is the whole reason
+    this scenario exists. A class index is a perfectly ordinary float: the
+    scalar path uploads it as R32F, the diverging colormap gives it a colour,
+    exposure and gamma move that colour, and the tile comes out as four flat
+    regions in four shades of one ramp under a ``±`` range. It renders, and it
+    renders something that looks like a working view of a classification.
+
+    Four properties are pinned and each fails on its own:
+
+    - **One tile, headed as one.** ``gamut``'s labels are class names with no
+      ``"->"`` in them, so ``axesFromLabels`` returns null and the fallback
+      heads the tile ``labels[0]`` -- the name of class 0, over a picture
+      containing all four.
+    - **R32F/RED.** RGB32F uploads the same twenty numbers, so a contents
+      check cannot see it; the index lands in the red component with two
+      undefined components beside it.
+    - **The legend's labels come from ``payload.labels``.** The palette is
+      JavaScript and the class names are the server's, and writing the names
+      into ``index.html`` makes those two sources of truth for one mapping.
+      ``views/gamut.py`` says in as many words that the *order* of its
+      ``LABELS`` is the class index and part of the wire contract, so a
+      relabelling there would leave the page explaining the previous meaning
+      of the same four colours.
+    - **Exposure, γ and the colormap do not apply to a name.** The shader's
+      categorical branch reads none of the tone uniforms and the controls are
+      disabled; either half alone is insufficient (a uniform can still be
+      pushed from code; a live slider that moves nothing is the same lie the
+      colormap dropdown on an rgb view was).
+
+    What this scenario cannot see is what the pixels look like -- the stub has
+    no GPU. That is measured separately, by compiling and drawing on
+    ANGLE/D3D11 and reading the framebuffer back; see the task report.
+
+    ``categorical`` はクラス番号の絵であり、小さな数値の絵ではない。誤った
+    読み方でも描画は成功する（1本のランプ上の4段階として「それらしく」出る）
+    ため、静かに壊れる4つの性質を個別に固定する。画素そのものはスタブでは
+    見えないので、実GPUでの読み戻しは別に行う。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "gamut"))
+
+
 def test_the_hover_readout_reads_the_matrix_through_the_point_query() -> None:
     """The readout must show the matrix on every view, one pixel at a time.
 
@@ -287,11 +331,66 @@ _MUTATIONS = [
         ("released after a reload", "released after a view switch"),
         id="button_borrows_the_request_counter",
     ),
+    # The refusal itself, removed: the viewer no longer says which kind it
+    # cannot draw.
+    #
+    # Only one check fails, and the one that does not is worth reading. The
+    # payload's identity survives this mutation because the *table* still
+    # refuses: `traitsFor` finds no row for "flow", returns `undefined`, and
+    # the first read of it throws before `state.payload = payload` runs. That
+    # is the trait table doing its job with the guard gone -- which is why the
+    # entry below, which makes the lookup answer `scalar` instead of nothing,
+    # is a separate mutation rather than a variant of this one. Narrowing the
+    # expectation here rather than making that read defensive: a `traits &&`
+    # would turn "there is no row for this kind" back into a silent default.
+    # 拒否の文言だけを外す。ペイロードが差し替わらないのは、ガードが無くても
+    # 表が拒んでいるためである（行が無く `undefined` を読んだ時点で例外になり、
+    # `state.payload` の代入まで到達しない）。既定行へ落とす変異は下に別項目
+    # として置く。ここで `traits &&` のように守ると、それこそ静かな既定値に戻る。
     pytest.param(
         "views",
         [("js/contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
-        ("unsupported kind is refused", "leaves state.payload identity unchanged"),
+        ("unsupported kind is refused",),
         id="unsupported_kind_renders_as_scalar",
+    ),
+    # ...and the failure the table was built to make impossible: an unlisted
+    # kind reaching a default row.
+    #
+    # This is the pre-table behaviour exactly, restated in one line. Five sites
+    # used to answer "scalar" for anything they did not recognise, and this
+    # mutation reinstates all five at once from a single place: `vector_field`
+    # (kind "flow") is then drawn as two greyscale coefficient tiles through
+    # the diverging colormap, with per-channel ranges and a live colormap
+    # dropdown. Nothing throws, nothing is logged, and the viewer paints
+    # plausible pixels for a view it does not understand -- including
+    # overwriting the payload that was on screen, which is why both checks fail
+    # here while only one does above.
+    # 表が防いでいる当の失敗（未登録の kind が既定行へ落ちる）。以前は5か所が
+    # 独立に「知らなければ scalar」と答えていたが、それを1行で再現する。例外も
+    # ログも出ず、理解していないビューがそれらしく描かれ、画面に出ていた
+    # ペイロードも差し替わる。
+    #
+    # Two edits, one guard. The rule -- "unknown has exactly one meaning,
+    # refused" -- is enforced at the check *and* at the only way to read the
+    # table, and reinstating the fall-through means undoing both: with the
+    # lookup alone defaulted, `reload()`'s own pre-flight `requireSupportedKind`
+    # still refuses and the mutation changes nothing (measured -- the views
+    # scenario stayed at 29/29). That the rule needs two lines to remove is a
+    # property of the design and not of this entry.
+    # 2つの編集で1つのガード。既定行へ落とす変更だけでは `reload()` 側の
+    # 事前検査が依然として断り、何も変わらない（実測 29/29 のまま）。
+    pytest.param(
+        "views",
+        [
+            ("js/contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {"),
+            (
+                "js/contract.js",
+                "  requireSupportedKind(kind, where);\n  return KIND_TRAITS[kind];",
+                "  return KIND_TRAITS[kind] ?? KIND_TRAITS.scalar;",
+            ),
+        ],
+        ("unsupported kind is refused", "leaves state.payload identity unchanged"),
+        id="an_unlisted_kind_falls_through_to_the_scalar_row",
     ),
     pytest.param(
         "views",
@@ -330,7 +429,11 @@ _MUTATIONS = [
     # rgbビューの2つの要素を1つずつ外す。どちらも描画自体は成功してしまう。
     pytest.param(
         "rgb",
-        [("js/main.js", "  if (traits.singleTile && payload.channels === 3) {", "  if (false) {")],
+        [(
+            "js/main.js",
+            "  if (traits.singleTile && payload.channels === traits.tileChannels) {",
+            "  if (false) {",
+        )],
         (
             "draws one tile",
             # The three tiles share one range object, so applyDisplay reads
@@ -404,7 +507,7 @@ _MUTATIONS = [
         "rgb",
         [(
             "js/main.js",
-            "  if (traits.singleTile && payload.channels === 3) {",
+            "  if (traits.singleTile && payload.channels === traits.tileChannels) {",
             "  if (payload.channels === 3) {",
         )],
         ("kind is scalar still draws one tile per channel",),
@@ -1118,6 +1221,149 @@ _MUTATIONS = [
             "the marker stays with the numbers it disclaims",
         ),
         id="readout_never_says_a_pixel_is_outside_the_active_region",
+    ),
+    # ---- the categorical row of KIND_TRAITS, one cell at a time
+    #
+    # The table exists so that adding a kind means writing down what it does at
+    # every decision, and these three are the cells whose wrong value still
+    # draws. Each is a one-token edit to ``contract.js`` or to the legend, and
+    # each changes exactly one thing on screen -- which is why each is expected
+    # to fail exactly one check. A cell whose wrong value broke five checks
+    # would not need a mutation entry; it would announce itself.
+    #
+    # 表の意味は「kind を足すとは全ての判断を書き下すこと」であり、この3つは
+    # 「誤った値でも描けてしまう」セルである。いずれも1トークンの変更で、
+    # 画面上の変化もちょうど1つずつになる。
+    #
+    # RGB32F on a one-channel plane uploads the identical twenty floats, so
+    # every contents assertion passes: the class index goes into the red
+    # component and green and blue are whatever the driver leaves there. The
+    # tile still draws. Only the recorded internal format tells them apart,
+    # which is why the harness stopped answering ``1`` for every GL constant.
+    # 1チャンネルの平面を RGB32F で載せても数値は同一なので中身の検査は全て
+    # 通り、番号が赤成分に入るだけである。区別できるのは形式の記録だけ。
+    pytest.param(
+        "gamut",
+        [(
+            "js/contract.js",
+            'texture: Object.freeze({ internal: "R32F", format: "RED" }),\n'
+            "    // shaders.js: 2 selects the discrete-palette branch.",
+            'texture: Object.freeze({ internal: "RGB32F", format: "RGB" }),\n'
+            "    // shaders.js: 2 selects the discrete-palette branch.",
+        )],
+        ("class indices are uploaded as R32F/RED",),
+        id="categorical_uploads_class_indices_as_a_colour",
+    ),
+    # The legend written from a hard-coded list instead of from the payload.
+    #
+    # The obvious build, and the one that is right on the machine it was
+    # written on: these *are* ``views/gamut.py``'s LABELS, so against the real
+    # server the legend would be correct and would stay correct until somebody
+    # renamed a class or reordered the list -- at which point the page keeps
+    # explaining the previous meaning of the same four colours, with nothing
+    # failing. The row count is untouched (four hard-coded names, four
+    # classes), so exactly one check sees it, and that is the point of having
+    # the count and the contents as separate checks.
+    # 実装側の LABELS をそのまま書いたもの。実サーバに対しては正しく、名前や
+    # 順序を変えた瞬間だけ嘘になる（そして何も失敗しない）。行数は変わらない
+    # ので、落ちるのは内容のチェック1つだけである。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "    text.textContent = payload.labels[i];",
+            '    text.textContent = ["範囲内", "負クリップ", "1超クリップ", "両方"][i];',
+        )],
+        ("the legend's labels are the payload's",),
+        id="the_class_legend_hardcodes_the_shipped_labels",
+    ),
+    # The colormap control left live over a discrete palette.
+    #
+    # Same shape as ``colormap_stays_enabled_for_an_rgb_view`` and kept as its
+    # own entry for the same reason the two ``percentileAbsPerChannel`` walks
+    # are: one kind passing is not the other kind passing. The dropdown does
+    # nothing here -- the shader's categorical branch never reaches a colormap
+    # -- and offering it says the four colours are a false-colour render of a
+    # quantity, which is exactly the reading this view exists to prevent.
+    # rgb 版と同じ形だが別項目にする（一方が通ることは他方が通ることではない）。
+    # ここでドロップダウンは何もせず、しかも「4色は量の疑似カラーである」と
+    # 主張してしまう。
+    pytest.param(
+        "gamut",
+        [(
+            "js/contract.js",
+            "    colormap: false,\n"
+            "    // One plane, uploaded as one float channel",
+            "    colormap: true,\n"
+            "    // One plane, uploaded as one float channel",
+        )],
+        ("the colormap control is disabled for a categorical view",),
+        id="colormap_stays_enabled_for_a_categorical_view",
+    ),
+    # The legend put back down with the two standing legends at the foot of the
+    # sidebar, which is where it was first written.
+    #
+    # It renders there. Every other check in the scenario passes: the rows are
+    # built, the labels are the payload's, the colours are distinct. The
+    # sidebar is ``overflow-y: auto``, though, and measured in the browser at
+    # 1600x1000 with a target loaded, its foot is below the fold -- so the only
+    # statement of what the four colours mean is off screen beside the picture
+    # they explain. Same failure as ``the_range_and_timings_go_back_into_the_
+    # sidebar`` above, and worse: those two restated numbers that were on
+    # screen elsewhere, and this restates nothing.
+    # 凡例を下端の凡例2つのところへ戻す。描画も中身も正しく、他のチェックは
+    # 全て通る。ただしサイドバーは縦に溢れるので、実測（1600x1000・ターゲット
+    # 読み込み済み）ではそこは画面外であり、4色の意味を述べる唯一の場所が
+    # 絵の隣から消える。
+    pytest.param(
+        "gamut",
+        [
+            ("index.html", '      <div id="class-legend" class="group class-legend" hidden></div>\n', ""),
+            (
+                "index.html",
+                '      <div class="group legend">\n'
+                '        <span class="legend-swatch nan"></span>',
+                '      <div id="class-legend" class="group class-legend" hidden></div>\n\n'
+                '      <div class="group legend">\n'
+                '        <span class="legend-swatch nan"></span>',
+            ),
+        ],
+        ("the class legend sits above the sidebar's first divider",),
+        id="the_class_legend_goes_back_below_the_fold",
+    ),
+    # The class readout's own index arithmetic, transposed.
+    #
+    # The failure this repository has now shipped twice, in the one place this
+    # task added a new one. It is here as much to keep the *fixture* honest as
+    # the code. Measured, three runs of this same mutation against three
+    # fixtures:
+    #
+    #   ``(row * 3 + col) % 4``, NaN at (2,1)   2 checks fail
+    #   ``(row + col) % 4``,     NaN at (2,1)   2 checks fail
+    #   ``(row + col) % 4``,     NaN at (2,2)   0 checks fail -- 24/24 green
+    #
+    # ``(row + col) % 4`` is symmetric under transposition, so it catches this
+    # only because the swapped index lands on the masked pixel; move the mask
+    # onto the diagonal, where it is its own transpose, and the bug becomes
+    # invisible to the whole scenario. The shipped fill is
+    # ``(row * 3 + col) % 4``, and this entry is what stops it quietly going
+    # back to something symmetric.
+    # 行と列の取り違え。このリポジトリが繰り返してきた失敗を、本タスクが増やした
+    # 唯一の添字計算に対して固定する。同じ変異を3つのフィクスチャで実測した
+    # 結果が上表で、対称な埋め方かつマスクを対角へ置くと24件すべて通る。
+    # この項目は埋め方が黙って対称なものへ戻らないようにするためでもある。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "    const v = p.data[hit.row * p.width + hit.col];",
+            "    const v = p.data[hit.col * p.width + hit.row];",
+        )],
+        (
+            "the readout names the class the pixel is",
+            "a pixel with no class reads as NaN rather than as class 0",
+        ),
+        id="the_class_readout_transposes_row_and_col",
     ),
     # ---- the LUT plot's vertical axis, pinned back to 1.0
     #

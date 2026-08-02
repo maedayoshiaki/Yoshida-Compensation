@@ -33,6 +33,42 @@
         <select id="view-select"></select>
       </div>
 
+      <!-- The class legend for a `categorical` view, and deliberately empty.
+
+           Both the colours and the labels are written by js/main.js's
+           renderClassLegend: the swatches from CLASS_COLORS (the array the
+           fragment shader's palette is generated from) and the text from
+           `payload.labels`. Writing the four Japanese class names here instead
+           would be the second source of truth for a mapping the server owns --
+           views/gamut.py says in as many words that the *order* of its LABELS
+           is the class index and is part of the wire contract -- so a
+           relabelling or a reordering on that side would leave this page
+           explaining the previous meaning of the same four colours, with
+           nothing failing anywhere.
+
+           Directly under the view picker, not down with the two standing
+           legends at the foot of this column. Those describe things that are
+           true of every view and can be read once; this one is the key to the
+           picture currently on screen, and without it the tiles are four
+           unexplained colours. The sidebar is `overflow-y: auto`, and measured
+           on a 1600x1000 window with a target and a LUT loaded, the foot of it
+           is off the bottom -- the same way the display range and the timings
+           used to be, for the same reason, before they moved into the readout
+           strip. Hidden until a categorical view renders, so for every other
+           view this costs the column nothing.
+
+           `categorical` ビュー用のクラス凡例。中身は空で、色もラベルも
+           js/main.js が書く（色は CLASS_COLORS、文字は `payload.labels`）。
+           和文のラベルをここに書くと、サーバが持っている対応関係の写しが
+           できてしまう。views/gamut.py の LABELS は並び自体がクラス番号で
+           あり、ワイヤ契約の一部である。
+           下端の凡例2つと並べずビュー選択の直下に置くのは、あちらが全ビュー
+           共通で一度読めば済むのに対し、これは今出ている絵を読むための鍵だから
+           である。サイドバーは `overflow-y: auto` で、1600x1000 の窓で
+           ターゲットとLUTを読み込むと下端は画面外にある（表示レンジと計測を
+           読み取り欄へ移した理由と同じ）。 -->
+      <div id="class-legend" class="group class-legend" hidden></div>
+
       <hr />
 
       <div class="group">

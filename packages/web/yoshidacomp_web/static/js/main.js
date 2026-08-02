@@ -35,6 +35,12 @@ import {
 } from "./api.js";
 import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
 import { LAYOUT_PLANAR, requireSupportedKind, traitsFor } from "./contract.js";
+// The class palette is imported from the shader module, not restated here.
+// The legend's swatches are `classColorCss(i)` of the same array the fragment
+// shader's classColor() is generated from, so a palette edit moves both or
+// neither -- see the note on CLASS_COLORS in shaders.js.
+// パレットはシェーダのモジュールから読む（ここに書き写さない）。
+import { CLASS_COLORS, classColorCss } from "./shaders.js";
 import { drawLutCurve } from "./plot.js";
 
 const $ = (id) => document.getElementById(id);
@@ -130,6 +136,20 @@ const state = {
   specs: [],        // every ViewSpec from /api/views
   spec: null,       // the active one
   payload: null,    // { data, width, height, channels, layout, vmin, vmax, labels }
+  // The KIND_TRAITS row `state.payload` was rendered through.
+  //
+  // Set beside the payload, because the two are the same fact: the traits are
+  // read off the payload's own `kind`, and a copy that could describe a
+  // different kind from the pixels on screen would put the class-index readout
+  // over a coefficient tile. Kept rather than re-derived at each reader for
+  // the same reason `shownMatrixId` is kept -- one place decides, everyone
+  // else asks. The hover readout is the reader that needs it: it fires between
+  // renders, when `state.spec` may already name a view whose transfer has not
+  // landed.
+  // 描かれているペイロードの特性行。ペイロードと同時に確定する（同じ事実で
+  // あり、食い違うとクラス番号の読み取り欄が係数タイルの上に出る）。ホバーは
+  // レンダの合間に起きるので `state.spec` からは導けない。
+  traits: null,
   ranges: null,     // [{ vmin, vmax }] per *tile* (per channel except for rgb)
   layout: DEFAULT_LAYOUT,
   pinned: null,     // { col, row } while the readout is frozen
@@ -379,17 +399,28 @@ function fallbackAxes(labels, channels) {
 // まさにその1行3列になってしまう（しかも黙って描けてしまう）。ペイロードに
 // 絵が何枚あるかを知っているのは kind だけなので、それで決める。
 function layoutFor(payload, current, traits) {
-  // `channels === 3` as well as the trait: an rgb view is one colour per pixel,
-  // so three channels is what "rgb" means here. requireRgbHasThreeChannels has
-  // already refused anything else by the time this runs -- this condition is
-  // defence in depth, not the active guard -- but a single-tile layout is only
-  // correct for a payload the rgb upload path can actually pack, and the two
-  // must not be able to disagree.
-  // 特性だけでなく channels も見る。rgb は1画素1色＝3チャンネルのこと。
-  // 実際に弾いているのは requireRgbHasThreeChannels 側で、ここは多重防御だが、
-  // 1枚タイルが正しいのは rgb 経路が詰められるペイロードに限られる。
-  if (traits.singleTile && payload.channels === 3) {
-    return { rows: [""], cols: ["RGB"], corner: "" };
+  // The channel count as well as the trait: a single-tile kind is defined by
+  // how many channels that one tile consumes -- three for `rgb` (one colour
+  // per pixel), one for `categorical` (one class index per pixel) -- and a
+  // single-tile layout is only correct for a payload the matching upload path
+  // can actually consume. Both numbers come from the same trait row as
+  // `packed` and `texture`, so "one tile", "how it is packed" and "how it is
+  // uploaded" cannot come apart. The active guards are elsewhere
+  // (requireRgbHasThreeChannels here, routers/view.py's categorical clause on
+  // the server); this is defence in depth.
+  //
+  // The caption is a trait too, and that is the interesting half. `labels` is
+  // ["R","G","B"] for `surface` and the four *class* names for `gamut`, so the
+  // label-derived fallback would head an rgb tile "R" and a categorical one
+  // "範囲内" -- the name of class 0, written across a picture of all four
+  // classes. It renders; it is simply a lie in 3-point type.
+  //
+  // 特性だけでなくチャンネル数も見る。1枚タイルの kind は「その1枚が何
+  // チャンネルを食うか」で定義される（rgb は3、categorical は1）。見出しも
+  // 特性から取る: ラベル由来にすると rgb は "R"、categorical はクラス0の名前
+  // が4クラスの絵の上に載る（描けてしまうが嘘である）。
+  if (traits.singleTile && payload.channels === traits.tileChannels) {
+    return { rows: [""], cols: [traits.tileCaption], corner: "" };
   }
   // Keeping the current axes is only sound when they *are* axes -- that is,
   // when the layout on screen came from a matrix-shaped set of labels. The
@@ -655,11 +686,69 @@ function showProbe(hit) {
   requestMatrixProbe(hit);
 }
 
+// One row: a caption and a number, in the classes the stylesheet colours.
+// Shared by both readings below so "what a masked value looks like here" is
+// decided once.
+// 1行ぶんの生成。マスクされた値の見た目を決める場所を1つにするため共有する。
+function appendViewValue(host, label, text, masked) {
+  const item = document.createElement("div");
+  item.className = "view-value";
+  const labelEl = document.createElement("span");
+  labelEl.className = "vv-label";
+  labelEl.textContent = label;
+  const value = document.createElement("span");
+  value.className = masked ? "vv-num nan" : "vv-num";
+  value.textContent = text;
+  item.appendChild(labelEl);
+  item.appendChild(value);
+  host.appendChild(item);
+}
+
 function showViewValues(hit) {
   const host = $("view-values");
   host.textContent = "";
   const p = state.payload;
   if (!p) return;
+  const traits = state.traits;
+
+  // A categorical payload is read down a different axis, and this is the site
+  // the brief for this task warns about by name.
+  //
+  // Every other kind has one label per channel, so the loop below prints
+  // `labels[c]` beside channel c's value. Here there is one channel and four
+  // labels, and they name the *classes*: `labels[0]` is the name of class 0,
+  // so the per-channel reading captions every pixel in the frame "範囲内"
+  // regardless of which class it actually is -- and it does so beside the
+  // correct number, in the correct type, under the correct heading. The class
+  // name is `labels[value]`, which is the only reading that changes as the
+  // pointer moves.
+  //
+  // The index is rounded rather than truncated, matching the shader's
+  // `int(floor(v + 0.5))`: the readout and the picture must agree about which
+  // class a pixel is, and two different roundings is a way for them not to.
+  //
+  // 他の kind はチャンネル1つにラベル1つなので `labels[c]` を出すが、
+  // categorical はチャンネル1・ラベル4で、しかもラベルはクラスの名前である。
+  // チャンネルで引くと全画素がクラス0の名前を名乗る（数値も見出しも正しい
+  // まま、名前だけが常に同じになる）。引くべきは `labels[値]` である。
+  // 丸め方はシェーダと揃える（読み取りと絵が別のクラスを指さないため）。
+  if (traits && traits.labelsAreClasses) {
+    // No layout branch: `tileChannels` is 1, and a one-channel body is the
+    // same run of pixels under both layouts (C=1 makes the planar stride and
+    // the interleaved stride the same walk). Writing one anyway would be a
+    // branch neither side of which could ever differ from the other.
+    // 1チャンネルなので planar とインタリーブで並びは同一であり、分岐しない。
+    const v = p.data[hit.row * p.width + hit.col];
+    if (!Number.isFinite(v)) {
+      appendViewValue(host, "クラス", "NaN", true);
+      return;
+    }
+    const index = Math.round(v);
+    const name = p.labels[index];
+    appendViewValue(host, "クラス", `${index} ${name ?? "（未定義のクラス）"}`, !name);
+    return;
+  }
+
   // Planar (C, H, W) puts the channel index outermost; interleaved (H, W, C)
   // puts it innermost. Getting this backwards misreports every hovered value
   // while the tiles themselves still look right -- nothing would flag it.
@@ -672,17 +761,72 @@ function showViewValues(hit) {
     const v = planar
       ? p.data[c * stride + offset]
       : p.data[offset * p.channels + c];
-    const item = document.createElement("div");
-    item.className = "view-value";
-    const label = document.createElement("span");
-    label.className = "vv-label";
-    label.textContent = String(p.labels[c] ?? c);
-    const value = document.createElement("span");
-    value.className = Number.isFinite(v) ? "vv-num" : "vv-num nan";
-    value.textContent = fmt(v);
-    item.appendChild(label);
-    item.appendChild(value);
-    host.appendChild(item);
+    appendViewValue(host, String(p.labels[c] ?? c), fmt(v), !Number.isFinite(v));
+  }
+}
+
+// The class legend: one row per class, in class order, from `payload.labels`.
+//
+// **The labels come from the payload and the colours from CLASS_COLORS**, and
+// neither is written down twice. The obvious build -- swatches in JavaScript,
+// Japanese class names in index.html -- is two sources of truth for one
+// mapping, and they drift in silence: views/gamut.py's LABELS are the wire
+// contract (their *order* is the class index, per that file), so a server-side
+// relabelling or a reordering leaves an HTML legend confidently explaining the
+// previous meaning of the same four colours. Nothing fails, nothing looks
+// wrong, and the picture now means something else.
+//
+// Hidden entirely for a kind whose labels are channels: `surface`'s three
+// labels are not classes and a legend of them would be three colour swatches
+// for a picture that has no classes in it.
+//
+// 凡例はラベルを `payload.labels` から、色を CLASS_COLORS から取る。どちらも
+// 二重に書かない。色をJSに・和文ラベルをHTMLに書くと真実源が2つになり、
+// サーバ側でラベルを変えたり並べ替えたりしても画面は前の意味を説明し続ける
+// （何も失敗せず、絵の意味だけが変わる）。ラベルがチャンネル名である kind
+// では丸ごと隠す。
+function renderClassLegend(payload, traits) {
+  const host = $("class-legend");
+  host.textContent = "";
+  host.hidden = !traits.labelsAreClasses;
+  if (!traits.labelsAreClasses) return;
+  for (let i = 0; i < payload.labels.length; i++) {
+    const row = document.createElement("div");
+    row.className = "legend class-row";
+    const swatch = document.createElement("span");
+    swatch.className = "legend-swatch";
+    // Derived from the shader's own palette, quantised the way the framebuffer
+    // quantises it -- see classColorCss in shaders.js. Set inline rather than
+    // in style.css for the same reason `--nan` is injected at runtime: a
+    // colour in the sheet would look live and be a copy.
+    // シェーダのパレットから導出してインラインで置く（シートに書くと写しになる）。
+    swatch.style.background = classColorCss(i);
+    const text = document.createElement("span");
+    text.className = "muted";
+    text.textContent = payload.labels[i];
+    row.appendChild(swatch);
+    row.appendChild(text);
+    host.appendChild(row);
+  }
+}
+
+// More classes than the palette has colours has to be refused, not wrapped.
+//
+// Reached only if a view is registered with more labels than CLASS_COLORS has
+// entries. Two classes sharing a colour is the failure this whole view exists
+// to avoid -- the picture still looks like a working classification, and two
+// of its regions have silently become one. The shader would paint the extra
+// indices in the mask colour, which is at least not a class, but the legend
+// would still list them with `classColorCss` returning null; say so instead.
+// パレットの色数を超えるクラス数は、回り込ませず断る。2つのクラスが同じ色に
+// なると、絵は正しく見えたまま2つの領域が1つに融ける。
+function requireClassesFitThePalette(labels, where) {
+  if (labels.length > CLASS_COLORS.length) {
+    throw new Error(
+      `${where} は ${labels.length} クラスありますが、離散パレットの色は ` +
+      `${CLASS_COLORS.length} 色しかありません` +
+      "（色が足りないまま描くと、別のクラスが同じ色になります）。"
+    );
   }
 }
 
@@ -1170,6 +1314,35 @@ function applyDisplay() {
   }
 }
 
+// The controls that make up the tone chain: exposure, γ (both its input and
+// its slider) and dither. Enabled exactly when the shader branch that is going
+// to draw actually applies one -- `KIND_TRAITS[kind].toneChain`.
+//
+// The colormap dropdown is *not* in this list even though it is disabled for
+// the same two kinds. It answers a different question -- "does this kind turn
+// a number into a colour" -- and rgb answers no to that while answering yes to
+// the tone chain. One list for both would be a coincidence of today's three
+// kinds, not a rule, and the first kind that broke it would break it silently.
+//
+// Values are left alone, not reset. A user who set -1 EV on the coefficient
+// tiles, looked at the gamut view and came back has not asked for 0 EV; the
+// slider is dead while the categorical picture is up and alive again with the
+// same value afterwards.
+//
+// トーンチェーンを構成するコントロール（露出・γ・ディザ）。描画する
+// シェーダ経路が実際にトーンチェーンを掛けるときだけ有効にする。
+// カラーマップはこの一覧に入れない——同じ2つの kind で無効になるが問いが
+// 違い（rgb はトーンチェーンを掛けるがカラーマップは通さない）、まとめると
+// 今日の3つの kind でたまたま一致しているだけの規則になる。値は消さない。
+const TONE_CONTROL_IDS = ["ev-slider", "gamma-input", "gamma-slider", "dither-check"];
+
+function setToneControlsEnabled(enabled) {
+  for (const id of TONE_CONTROL_IDS) {
+    const el = $(id);
+    if (el) el.disabled = !enabled;
+  }
+}
+
 // Does the *active* view declare this server-side parameter?
 //
 // `normalize` belongs to coef_tiles, not to views in general, and a view that
@@ -1197,8 +1370,22 @@ function computeRanges(traits) {
   // [vmin, vmax] で出す。
   if (traits.sharedRange) {
     state.ranges = [{ vmin: p.vmin, vmax: p.vmax }];
-    const text = `[${fmt(p.vmin)}, ${fmt(p.vmax)}]`;
-    if (captions.length) captions[0].textContent = `${p.labels.join(" ")}  ${text}`;
+    // A categorical range is a count, not a measurement, and it is written as
+    // one. `[0.0000, 3.0000]` invites the reading that 1.5 is a value this
+    // view can hold; and the caption cannot be `labels.join(" ")` either,
+    // because for this kind that is the four class names crammed under the
+    // tile, restating the legend in the one place with no room for it.
+    // クラスの範囲は測定値ではなく個数なので、そのように書く。ラベルを
+    // 並べる書き方も使えない（凡例を最も狭い場所で繰り返すことになる）。
+    const classes = traits.labelsAreClasses;
+    const text = classes
+      ? `クラス ${p.vmin}–${p.vmax}`
+      : `[${fmt(p.vmin)}, ${fmt(p.vmax)}]`;
+    if (captions.length) {
+      captions[0].textContent = classes
+        ? `${p.labels.length} クラス（凡例参照）`
+        : `${p.labels.join(" ")}  ${text}`;
+    }
     $("range-info").textContent = text;
     return;
   }
@@ -1312,7 +1499,17 @@ async function reload(req = beginRequest()) {
   // カラーマップ・テクスチャ）はすべてこの1つのオブジェクトを読む。
   const traits = traitsFor(payload.kind, "サーバの応答");
   requireRgbHasThreeChannels(payload.kind, payload.channels, "サーバの応答");
+  // Refused before anything is published, like the rgb channel count above: a
+  // legend with two identically-coloured rows is not something to draw and
+  // then explain.
+  // 上のチャンネル数と同じく、公開前に断る。
+  if (traits.labelsAreClasses) {
+    requireClassesFitThePalette(payload.labels, "サーバの応答");
+  }
   state.payload = payload;
+  // The traits the pixels were rendered through, published with them. See
+  // `state.traits`.
+  state.traits = traits;
   // The pixels and the matrix they came from, published together. The readout
   // asks this id, so it can never describe a matrix other than the one drawn.
   // 画素と、その出所の行列IDを同時に確定する。読み取り欄はこのIDに問い合わせる。
@@ -1388,6 +1585,18 @@ async function reload(req = beginRequest()) {
   // カラーマップは数値に色を与える仕組みで、rgb経路はそもそも通さない。
   // 何も起きないドロップダウンを残さず無効化する。
   $("cmap-select").disabled = !traits.colormap;
+
+  // Exposure, γ and dither, for the kind that is now on screen. See
+  // setToneControlsEnabled -- and note that the shader ignoring them is the
+  // half that actually holds; this is the half the user can see.
+  // 露出・γ・ディザ。実効的な保証はシェーダ側が無視することにあり、こちらは
+  // 「効かないコントロールを見せない」ためのもの。
+  setToneControlsEnabled(traits.toneChain);
+
+  // The class legend, from this payload's own labels. Cleared and hidden for
+  // every other kind, so a legend cannot outlive the view that explained it.
+  // クラス凡例。他の kind では消して隠す（説明していたビューより長生きさせない）。
+  renderClassLegend(payload, traits);
 
   // Decide before the upload, while the old image is still around: a reframe
   // is warranted only when there is no view worth keeping -- a rebuilt grid, a
