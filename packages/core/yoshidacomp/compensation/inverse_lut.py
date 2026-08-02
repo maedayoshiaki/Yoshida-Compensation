@@ -25,7 +25,6 @@ from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 import cv2
 import numpy as np
-from scipy.interpolate import PchipInterpolator
 
 from yoshidacomp.config import get_config
 
@@ -39,6 +38,23 @@ from yoshidacomp.config import get_config
 # 置くと、``compensation.pipeline`` が本モジュールをimportする都合で、純粋
 # 計算だけの利用者にもハードウェア層（と任意のカメラSDK）が付いてくる。
 # calibration スクリプトと同じ遅延パターン。
+#
+# NOTE: ``scipy.interpolate.PchipInterpolator`` is imported lazily inside
+# :func:`_build_channel_lut`, the only place that needs it (LUT
+# *construction*; ``apply_inverse_lut`` -- the hot path every LUT
+# linearizer call goes through -- uses only ``np.interp``). At module scope
+# it cost ~1.5s of ``scipy.interpolate`` import time, which was most of
+# what ``import yoshidacomp.compensation.pipeline`` still cost after the
+# torch fixes (see
+# ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md``). Same
+# deferral pattern as ``yoshidacomp.capture`` above.
+# 注: ``scipy.interpolate.PchipInterpolator`` は唯一の利用箇所である
+# :func:`_build_channel_lut`（LUT*構築*時のみ。全linearizer呼び出しが通る
+# ホットパスの ``apply_inverse_lut`` は ``np.interp`` のみを使う）の内部で
+# 遅延importする。module scope に置くと ``scipy.interpolate`` の import に
+# 約1.5秒かかり、torch対応後に残っていた ``import
+# yoshidacomp.compensation.pipeline`` のコストの大半を占めていた（詳細は
+# 上記レポート）。``yoshidacomp.capture`` と同じ遅延パターン。
 
 
 # Wall-clock settle time between projecting a new pattern and capturing it, so
@@ -1348,6 +1364,8 @@ def _build_channel_lut(
     *t_grid* 上の LUT サンプルと (p, n) フィットノットを返す。縮退時は
     恒等 LUT と ``None`` ノットを返す。
     """
+    from scipy.interpolate import PchipInterpolator
+
     if inputs.size < 2:
         return t_grid.copy(), None
 

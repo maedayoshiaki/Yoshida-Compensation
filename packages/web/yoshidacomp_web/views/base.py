@@ -47,14 +47,25 @@ class ParamSpec:
     Attributes:
         name: Parameter key passed back as a query string.
         label: Human-readable label.
-        type: "number" | "select" | "rgb".
+        type: "number" | "select" | "text" | "rgb".
+
+            ``"text"`` is for a value whose valid set only exists at runtime and
+            so cannot be a static ``choices`` -- a stored id, say. The view
+            validates the string it receives and raises ``ViewNotApplicable``
+            for one it cannot resolve, which is the same 400-with-a-reason the
+            router gives for a value outside a ``select``'s ``choices``.
+            ``views/compensation.py`` is the first user and carries the full
+            argument.
+            ``"text"`` は有効な値の集合が実行時にしか存在せず静的な
+            ``choices`` にできない値のための型。詳細は
+            ``views/compensation.py`` を参照。
         default: Default value.
         choices: Options when ``type == "select"``.
     """
 
     name: str
     label: str
-    type: Literal["number", "select", "rgb"]
+    type: Literal["number", "select", "text", "rgb"]
     default: object
     choices: list[str] = field(default_factory=list)
 

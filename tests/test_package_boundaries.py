@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CORE_DIR = _REPO_ROOT / "packages" / "core" / "yoshidacomp"
 _IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(yoshidacomp_web)\b", re.MULTILINE)
@@ -131,3 +133,269 @@ print("ok")
     )
     assert result.returncode == 0, result.stderr
     assert "ok" in result.stdout
+
+
+def test_importing_pipeline_does_not_pull_torch() -> None:
+    """``pipeline`` の import だけでは torch / psutil / color_mixing_matrix /
+    scipy を引かないこと。
+
+    Moved here from ``tests/test_pipeline_gamma_numpy.py`` (Task 1 of the
+    target-and-lut plan): this is a layering guard like the rest of this
+    file, not a gamma-linearizer-specific test.
+
+    History (see ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md``
+    for full measurements): this started out weaker -- only asserting
+    ``color_mixing_matrix`` and ``psutil`` were absent -- because
+    ``yoshidacomp.geometry.warp`` (also imported by ``pipeline``, for
+    ``prepare_target_image_for_compensation()``) used to do an
+    unconditional ``import torch`` at its own module scope. Fixed by moving
+    that import inside the two functions that use it (mirroring the
+    lazy-import-per-function pattern this same file already uses for
+    ``graycode``), which changes no module attribute so
+    ``tests/test_sample_mocked.py``'s ``warp_image``/``invwarp_image``
+    monkeypatches on the ``pipeline`` module keep working. A further
+    ``scipy.interpolate`` import (in ``inverse_lut.py``, used only by LUT
+    *construction*, not the ``apply_inverse_lut`` hot path) was fixed the
+    same way. Net: ``import yoshidacomp.compensation.pipeline`` went from
+    ~9.4-13.0s to ~0.5s wall time.
+
+    This test covers *import* only, and separately (Addendum 4 of the task
+    report) ``calc_compensation_image`` -- the compensation matrix multiply,
+    called unconditionally by ``generate_projection_image`` regardless of
+    linearizer -- was also switched to numpy, so
+    ``generate_projection_image``'s *first call* no longer pulls torch
+    either; see
+    ``test_generate_projection_image_first_call_pulls_no_torch`` below,
+    parametrized over both linearizers, which covers that (its docstring
+    also carries this history -- the two used to disagree on this point
+    because this docstring was not updated when that test's numeric switch
+    landed; do not let that happen again).
+
+    This does **not** mean ``pipeline.py`` as a whole is torch-free on
+    first call: ``prepare_target_image_for_compensation`` (a different
+    public function in this module) still calls ``geometry.warp``'s
+    ``invwarp_image``/``warp_image``, which still costs ~7s and initializes
+    CUDA on first use -- see that function's own docstring. No test in this
+    file covers that function; it is a known, intentionally unguarded gap
+    (the warp is genuine GPU-scale work, not something Task 1 measured or
+    decided to rewrite).
+
+    Run in a subprocess: in-process, some other test collected earlier in
+    the same session may have already imported these modules, which would
+    make the assertion pass regardless of whether ``pipeline.py`` (or
+    ``warp.py``/``inverse_lut.py``) is actually responsible.
+    """
+    code = (
+        "import sys; import yoshidacomp.compensation.pipeline; "
+        "mods = sys.modules; "
+        "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods)); "
+        "print('psutil=%s' % ('psutil' in mods)); "
+        "print('geometry.warp=%s' % ('yoshidacomp.geometry.warp' in mods)); "
+        "print('torch=%s' % ('torch' in mods)); "
+        "print('scipy=%s' % any('scipy' in m for m in mods)); "
+        "print('cv2=%s' % ('cv2' in mods))"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    )
+    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+
+    assert reported["color_mixing_matrix"] == "False", out.stdout
+    assert reported["psutil"] == "False", out.stdout
+    assert reported["torch"] == "False", out.stdout
+    assert reported["scipy"] == "False", out.stdout
+    # geometry.warp and cv2 are legitimately still imported -- pipeline.py
+    # needs WarpMethod/invwarp_image/warp_image from warp, and cv2 is an
+    # existing, accepted dependency -- but none of them may bring torch,
+    # psutil, or scipy along for the ride.
+    assert reported["geometry.warp"] == "True", out.stdout
+    assert reported["cv2"] == "True", out.stdout
+
+
+def test_building_the_web_app_pulls_no_torch() -> None:
+    """``create_app()`` の時点で torch / psutil / color_mixing_matrix / scipy の
+    いずれも sys.modules に無いこと。
+
+    The web layer's half of the constraint, which had no test until
+    ``views/compensation.py`` (plan B3 Task 3) became the first web module to
+    import ``yoshidacomp.compensation.pipeline`` at module scope. Before that
+    the guard would have had nothing to guard: ``test_importing_pipeline_does_
+    not_pull_torch`` above covers ``pipeline`` itself, and this file's other
+    web check only greps the tree for matplotlib/PyQt. Neither would notice a
+    web module importing ``color_mixing_matrix`` -- the one import the plan's
+    Global Constraints name explicitly -- or a future view reaching for torch
+    directly.
+
+    Importing is not enough: ``create_app()`` is what walks the router and view
+    registries, so a lazily-imported offender inside a ``register`` call or a
+    router module is only pulled in here.
+
+    Web層側の同じ制約。``views/compensation.py`` が ``pipeline`` を module
+    scope で import する最初のweb層モジュールになった時点で意味を持つ。
+    ``import`` だけでなく ``create_app()`` まで走らせるのは、ルータと
+    ビューのレジストリを実際に辿らせるためである。
+
+    Run in a subprocess for the same reason as the tests above: in-process,
+    another test may already have imported these.
+    """
+    code = (
+        "import sys\n"
+        "from yoshidacomp_web.app import create_app\n"
+        "create_app()\n"
+        "mods = sys.modules\n"
+        "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods))\n"
+        "print('psutil=%s' % ('psutil' in mods))\n"
+        "print('scipy=%s' % any('scipy' in m for m in mods))\n"
+        "print('torch=%s' % ('torch' in mods))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    )
+    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+
+    assert reported["color_mixing_matrix"] == "False", out.stdout
+    assert reported["psutil"] == "False", out.stdout
+    assert reported["scipy"] == "False", out.stdout
+    assert reported["torch"] == "False", out.stdout
+
+
+@pytest.mark.parametrize("linearizer", ["gamma", "none"])
+def test_generate_projection_image_first_call_pulls_no_torch(linearizer: str) -> None:
+    """``generate_projection_image(...)`` の初回呼び出し後、torch・psutil・
+    color_mixing_matrix・scipy のいずれも sys.modules に無いこと
+    （``linearizer`` を問わず）。
+
+    History: the review that reversed Task 1's original "keep torch"
+    decision found that import-only coverage let an 8s-plus,
+    CUDA-initializing *first call* stall through even though the module
+    import itself was fast. At that point, switching ``_linearize_gamma``
+    to ``_apply_inverse_gamma_numpy`` (numpy) removed the gamma step's own
+    contribution, but ``calc_compensation_image`` (the compensation
+    matrix-multiply step, called unconditionally regardless of linearizer)
+    still needed torch -- confirmed by this test's ``linearizer="none"``
+    case, which pulls no gamma code at all and still cost the same ~7.7s
+    that ``linearizer="gamma"`` did, proving the stall was unconditional on
+    the linearizer choice. That was the whole reason this test parametrizes
+    over both: ``"gamma"`` alone could not have shown this.
+
+    ``calc_compensation_image`` has since also been switched to numpy (same
+    measure-then-decide method: torch's own CPU and CUDA backends disagree
+    with each other on real 1920x1080 data by up to 1 count in uint8,
+    9 pixel-channels out of 6,220,800 -- never exceeded by numpy's own
+    divergence from either backend -- so there was no single bit-exact
+    torch answer to preserve; see
+    ``photometric_compensation.calc_compensation_image``'s docstring and
+    the task report's Addendum 4 for the full table). So, unlike the
+    version of this test that first existed, **``torch`` is now asserted
+    absent for both linearizers** -- measured first-call cost dropped from
+    ~7.6-7.9s to ~0.01s for both.
+
+    Run in a subprocess: in-process, some other test collected earlier in
+    the same session may have already imported these modules.
+    """
+    code = (
+        "import sys\n"
+        "import numpy as np\n"
+        "from dataclasses import dataclass\n"
+        "from yoshidacomp.compensation.pipeline import generate_projection_image\n"
+        "\n"
+        "@dataclass(frozen=True)\n"
+        "class Projector:\n"
+        "    width: int = 4\n"
+        "    height: int = 4\n"
+        "    gamma: float = 2.2\n"
+        "\n"
+        "matrices = np.zeros((4, 4, 4, 3), dtype=np.float32)\n"
+        "for c in range(3):\n"
+        "    matrices[:, :, c, c] = 1.0\n"
+        "target = np.full((4, 4, 3), 200, dtype=np.uint8)\n"
+        "generate_projection_image(\n"
+        "    target, matrices, projector=Projector(), active_region=(0, 0, 4, 4),\n"
+        f"    linearizer={linearizer!r}, target_decode='none',\n"
+        ")\n"
+        "mods = sys.modules\n"
+        "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods))\n"
+        "print('psutil=%s' % ('psutil' in mods))\n"
+        "print('scipy=%s' % any('scipy' in m for m in mods))\n"
+        "print('torch=%s' % ('torch' in mods))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    )
+    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+
+    assert reported["color_mixing_matrix"] == "False", out.stdout
+    assert reported["psutil"] == "False", out.stdout
+    assert reported["scipy"] == "False", out.stdout
+    assert reported["torch"] == "False", out.stdout
+
+
+def test_prepare_target_image_for_compensation_still_pulls_torch() -> None:
+    """既知の状態を固定する: ``prepare_target_image_for_compensation`` の
+    初回呼び出しは torch を引く（``generate_projection_image`` とは違う）。
+
+    This is not a guard against a regression -- it is the opposite: a
+    pin on a **known, currently-accepted** cost, so that a future change
+    to this function (numpy rewrite, pre-warming, or simply someone
+    generalizing ``generate_projection_image``'s "torch-free" claim to all
+    of ``pipeline.py`` without checking) is forced to touch this test and
+    its docstring rather than silently drifting the way
+    ``test_importing_pipeline_does_not_pull_torch``'s docstring already did
+    once (see that test's history section above, and
+    ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md``,
+    Important 2).
+
+    ``target_image_space="projector"`` with ``warp_method="c2p"`` makes the
+    compensation space "camera" (see ``compensation_space_from_warp_method``),
+    so this reaches the ``invwarp_image`` branch. A nonexistent pixel-map
+    path is deliberate: the call is expected to fail (missing file /
+    missing GrayCode resolution) *after* torch has already been imported,
+    which is exactly what makes the measurement meaningful -- torch loads
+    before this function does anything else. The failure itself is not
+    asserted on since it is incidental to what this test checks; only that
+    it raises (so the call really executed) and what it left in
+    ``sys.modules``.
+
+    Run in a subprocess for the same reason as the tests above.
+    """
+    code = (
+        "import sys\n"
+        "import numpy as np\n"
+        "from yoshidacomp.compensation.pipeline import prepare_target_image_for_compensation\n"
+        "\n"
+        "try:\n"
+        "    prepare_target_image_for_compensation(\n"
+        "        np.zeros((4, 4, 3), dtype=np.uint8),\n"
+        "        'projector',\n"
+        "        'nonexistent_pixel_map.npy',\n"
+        "        4, 4, 4, 4,\n"
+        "        warp_method='c2p',\n"
+        "    )\n"
+        "except Exception:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('expected this call to fail on a missing pixel map')\n"
+        "print('torch=%s' % ('torch' in sys.modules))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    )
+    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+    # This is the pinned KNOWN state, not a guarantee -- see the docstring.
+    assert reported["torch"] == "True", out.stdout

@@ -29,9 +29,13 @@
 // ホバー画素の「行列の係数」は `surface` のようなビューではこの配列に無いので、
 // 1画素ずつ取りに行く（読み取りの節を参照）。
 
-import { loadMatrix, listViews, fetchView, probeMatrix } from "./api.js";
+import {
+  loadMatrix, listViews, fetchView, probeMatrix,
+  loadTarget, loadLut, fetchLutCurve,
+} from "./api.js";
 import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
 import { LAYOUT_PLANAR, requireSupportedKind, traitsFor } from "./contract.js";
+import { drawLutCurve } from "./plot.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -156,7 +160,40 @@ const state = {
   probeSeq: 0,        // monotonic; a response older than this is dropped
   probeInFlight: false,
   probeWanted: null,  // { col, row, seq } claimed while a fetch was in flight
+  // The runtime ids the two sidebar loaders have obtained, and what they
+  // loaded. Kept here rather than only in the `sp-*` boxes because those are
+  // rebuilt from scratch on every view switch: without this, loading a target
+  // and then looking at `surface` and back would silently empty the ターゲットID
+  // box, and the `compensation` view would answer "needs a target image" about
+  // one that is loaded and still in the store.
+  // 2つの読み込み欄が得たIDと、その出所。`sp-*` はビュー切替のたびに作り直され
+  // るので、ここに残さないと「読み込んだのに欄が空に戻る」ことになる。
+  targetId: null,
+  targetMeta: null,   // the POST /api/target meta: path, images, index, shape
+  lutId: null,
+  lutCurve: null,     // the GET /api/lut/{id}/curve body, kept for redraws
 };
+
+// What `drawLutCurve` last returned: the data rectangle and the mapping from
+// LUT values into it.
+//
+// Not in `state`. Nothing in this file reads it -- the plot is redrawn from
+// `state.lutCurve`, never from this -- and its only consumer is
+// tests/js/frontend_harness.mjs, which needs the mapping to say *where* a
+// value should have been drawn. `state` is what the viewer runs on, so a
+// field there that no code path reads is an invitation to wire something to
+// it; the automation handle `window.__viewer` is already the declared place
+// for things that exist for a driver rather than for the page.
+// `state` には置かない。このファイルのどこもこれを読まない（描き直しは
+// `state.lutCurve` から行う）。読み手はハーネスだけであり、そういうものの
+// 置き場は既に `window.__viewer` と決まっている。
+let lastLutPlot = null;
+
+// Which runtime-id parameter each loader fills. Read by buildServerParams so a
+// view switch does not throw away an id that is still loaded.
+// どの読み込み欄がどのパラメータを埋めるか。ビュー切替でIDを捨てないため
+// buildServerParams が読む。
+const LOADED_ID_FOR_PARAM = { target: "targetId", lut: "lutId" };
 
 // Uniform-only display parameters. Changing any of these must not fetch.
 const display = {
@@ -905,6 +942,16 @@ function buildServerParams(spec) {
     }
     el.id = `sp-${p.name}`;
     el.value = p.default;
+    // A runtime id the sidebar has already loaded wins over the declared
+    // default, which for these is the empty string. The controls are rebuilt
+    // on every view switch, so without this the ターゲットID box would come
+    // back empty for a target that is still loaded, and the view would refuse
+    // a request the user has no reason to think incomplete.
+    // 既に読み込まれている実行時IDは宣言側の既定（空文字）より優先する。
+    // コントロールはビュー切替のたびに作り直されるため、これが無いと
+    // 読み込み済みのターゲットについて欄だけが空に戻る。
+    const loadedId = state[LOADED_ID_FOR_PARAM[p.name]];
+    if (loadedId) el.value = loadedId;
     // Stages the value; it does not fetch. See refreshParamsPending above.
     // 値を置くだけでフェッチはしない。
     el.addEventListener("change", () => { refreshParamsPending(); });
@@ -924,6 +971,194 @@ function buildServerParams(spec) {
   apply.textContent = "適用";
   apply.addEventListener("click", () => { applyServerParams(); });
   host.appendChild(apply);
+}
+
+// -------------------------------------------------- target and LUT loaders
+//
+// The `compensation` view needs two ids that only exist at runtime, and until
+// these controls existed there was no way to obtain one from a browser: the
+// view shipped complete and reachable only by POSTing to /api/target with curl.
+// These load a path, and write the id the server hands back straight into the
+// matching `sp-*` box -- the id is never something to copy by hand.
+//
+// **They stage; they do not render.** The one rule of the server-parameter
+// group is that only 適用 hits the view endpoint (see refreshParamsPending's
+// note and the cost measurement above it), and a loader that re-rendered on
+// its own would be a second way in. So a load fills the box, lights 適用, and
+// stops. The user presses 適用 once, for the target and the LUT together,
+// instead of paying for a full compensation render per loaded file.
+//
+// The loaders themselves *do* fetch, and that is not the same thing: they are
+// 読み込み buttons like the matrix's, not parameter controls.
+//
+// ターゲットとLUTの読み込み欄。`compensation` は実行時にしか存在しない2つの
+// IDを必要とし、これらが無い間はブラウザから取得する手段が無かった。読み込む
+// と返ってきたIDを対応する `sp-*` 欄へ自分で書き込む（手でコピーさせない）。
+// **置くだけで再描画はしない。** ビュー取得へ行ってよいのは 適用 だけという
+// 規則があり、読み込みが独自に再描画すると2つ目の入口になる。ターゲットとLUT
+// をまとめて 適用 1回で反映させる。読み込み自体がフェッチするのは別の話で、
+// これらは行列と同じ「読み込み」ボタンであってパラメータ欄ではない。
+
+// Write a value into a server-parameter box, if the active view has one.
+//
+// Returns whether it did. A view that does not declare the parameter is not an
+// error -- `surface` has no ターゲットID -- and the id is still remembered in
+// `state`, so switching to `compensation` afterwards picks it up through
+// buildServerParams.
+// 値をサーバ側パラメータ欄へ書く。宣言していないビューでは書けないが、それは
+// 誤りではない（`state` に残るので切替時に反映される）。
+function setServerParam(name, value) {
+  const el = $(`sp-${name}`);
+  if (!el) return false;
+  el.value = value;
+  refreshParamsPending();
+  return true;
+}
+
+// Counted, not a boolean, for the same reason setLoadBusy is: two loads can
+// overlap (the button and the image dropdown), and a boolean would be cleared
+// by whichever finished first.
+// 真偽値ではなく数える（ボタンと一覧の2経路が重なりうる）。
+let targetLoadsInFlight = 0;
+let lutLoadsInFlight = 0;
+
+function setTargetBusy(busy) {
+  targetLoadsInFlight += busy ? 1 : -1;
+  const disabled = targetLoadsInFlight > 0;
+  $("btn-load-target").disabled = disabled;
+  $("target-images").disabled = disabled;
+}
+
+function setLutBusy(busy) {
+  lutLoadsInFlight += busy ? 1 : -1;
+  $("btn-load-lut").disabled = lutLoadsInFlight > 0;
+}
+
+// The image picker for a directory of targets.
+//
+// Hidden for a single file, which has exactly one selectable entry: a dropdown
+// offering one option is a control that cannot do anything, and this sidebar
+// already argues elsewhere against showing those.
+// ディレクトリのときだけ出す。単一ファイルには選択肢が1つしか無く、何もでき
+// ないコントロールを見せることになる。
+function showTargetImages(meta) {
+  const select = $("target-images");
+  select.textContent = "";
+  const names = meta.images || [];
+  select.hidden = !meta.is_directory;
+  for (let i = 0; i < names.length; i++) {
+    const opt = document.createElement("option");
+    opt.value = String(i);
+    opt.textContent = names[i];
+    select.appendChild(opt);
+  }
+  select.value = String(meta.index ?? 0);
+}
+
+// Load one target image (or one entry of a directory of them).
+//
+// `path` is passed in rather than read from the box here, because the two
+// callers mean different things by it: the button means "whatever is typed
+// now", and the image dropdown means "the directory this listing came from".
+// Reading the box in both would let an edited path be combined with an index
+// chosen from the previous directory's listing -- a request that succeeds and
+// loads the wrong image.
+// `path` を引数で受けるのは、呼び出し側2つの意味が違うため。ボタンは「今
+// 入力されているパス」、一覧は「この一覧の出所であるディレクトリ」を指す。
+// 両方が入力欄を読むと、編集後のパスと前の一覧のindexが組み合わさり、成功
+// するが別の画像を読む要求になる。
+async function loadTargetImage(path, index = 0) {
+  if (!path) { status("ターゲット画像のパスを入力してください", true); return; }
+  setTargetBusy(true);
+  try {
+    status(`ターゲットを読み込み中: ${path}`);
+    const res = await loadTarget(path, index);
+    state.targetId = res.id;
+    state.targetMeta = res.meta;
+    showTargetImages(res.meta);
+    setServerParam("target", res.id);
+    const [height, width] = res.meta.shape;
+    const name = (res.meta.images || [])[res.meta.index] ?? res.meta.path;
+    $("target-info").textContent = `${res.id} / ${width}×${height}`;
+    status(`ターゲット ${res.id}（${name}, ${width}×${height}）— 適用 で反映`);
+  } finally {
+    setTargetBusy(false);
+  }
+}
+
+// Load a measured inverse LUT and plot it.
+//
+// Two requests, and both are needed before anything is published: the POST
+// registers the file and the GET brings back the samples to draw. `state.lutId`
+// is written only after the curve is in hand, so a LUT whose curve could not be
+// fetched does not end up named in the LUT ID box as though it were ready to
+// use.
+// POST で登録し、GET でカーブを取る。`state.lutId` を書くのはカーブが手元に
+// 来てからで、カーブを取れなかったLUTが「使える」顔で欄に入ることはない。
+async function loadInverseLut() {
+  const path = $("lut-path").value.trim();
+  if (!path) { status("逆LUTのパスを入力してください", true); return; }
+  setLutBusy(true);
+  try {
+    status(`逆LUTを読み込み中: ${path}`);
+    const res = await loadLut(path);
+    const curve = await fetchLutCurve(res.id);
+    state.lutId = res.id;
+    state.lutCurve = curve;
+    setServerParam("lut", res.id);
+    $("lut-gamma-value").textContent = `γ=${curve.gamma}`;
+    redrawLutCurve();
+    const source = (curve.meta && curve.meta.source) || "?";
+    const [channels, samples] = res.meta.shape;
+    $("lut-info").textContent = `${res.id} / ${channels}×${samples} / ${source}`;
+    status(`逆LUT ${res.id}（source=${source}, ${channels}×${samples}）— 適用 で反映`);
+  } finally {
+    setLutBusy(false);
+  }
+}
+
+// Redraw from the curve already in hand. Called on load, on the overlay
+// toggle, and on a window resize -- the canvas is sized by CSS, so its backing
+// store has to be re-established whenever the box changes size or the display
+// changes DPR.
+// 手元のカーブから描き直す。読み込み時・重ね描きの切替時・窓のリサイズ時に
+// 呼ぶ（canvasはCSSで伸縮するので、そのたびにバッキングストアを取り直す）。
+function redrawLutCurve() {
+  if (!state.lutCurve) return;
+  const overlay = $("lut-gamma-overlay").checked;
+  lastLutPlot = drawLutCurve($("lut-curve"), state.lutCurve, {
+    gamma: overlay ? state.lutCurve.gamma : null,
+  });
+}
+
+function wireLoaders() {
+  $("btn-load-target").addEventListener("click", () => {
+    loadTargetImage($("target-path").value.trim())
+      .catch((e) => status(errorText(e), true));
+  });
+  $("target-path").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("btn-load-target").click();
+  });
+  // Selecting an image re-loads *that* index from the directory the current
+  // listing came from, so `meta.index` on the server and the id in the box
+  // stay the same fact. Nothing is derived locally from the previous response.
+  // 一覧から選ぶと、その一覧の出所のディレクトリからその index を読み直す。
+  // ローカルで前の応答から導かない。
+  $("target-images").addEventListener("change", () => {
+    const meta = state.targetMeta;
+    if (!meta) return;
+    loadTargetImage(meta.path, Number($("target-images").value) || 0)
+      .catch((e) => status(errorText(e), true));
+  });
+
+  $("btn-load-lut").addEventListener("click", () => {
+    loadInverseLut().catch((e) => status(errorText(e), true));
+  });
+  $("lut-path").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("btn-load-lut").click();
+  });
+  $("lut-gamma-overlay").addEventListener("change", () => { redrawLutCurve(); });
+  window.addEventListener("resize", () => { redrawLutCurve(); });
 }
 
 // ------------------------------------------------------------- rendering
@@ -1379,7 +1614,13 @@ async function main() {
   // Debug/automation handle. The smoke test and any CDP-driven measurement need
   // to reach the views without going through synthetic input events.
   // スモークテストや自動計測から views へ触るためのハンドル。
-  window.__viewer = { state, views, display, applyDisplay, reload };
+  // `lutPlot` is a getter, not a copy: it is read after a redraw the driver
+  // itself triggered, and a snapshot taken here would describe the first draw
+  // forever.
+  window.__viewer = {
+    state, views, display, applyDisplay, reload,
+    get lutPlot() { return lastLutPlot; },
+  };
 
   // Derive the legend swatch from the shader's own mask colour rather than
   // restating it in CSS. See NAN_COLOR in glview.js.
@@ -1387,6 +1628,7 @@ async function main() {
   document.documentElement.style.setProperty("--nan", nanColorCss());
 
   wireDisplayControls();
+  wireLoaders();
   try {
     const specs = await listViews();
     if (!specs.length) { status("ビューが登録されていません", true); return; }
