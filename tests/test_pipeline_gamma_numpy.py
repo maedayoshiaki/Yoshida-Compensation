@@ -177,8 +177,8 @@ def test_gamma_direction_is_not_inverted_by_the_numpy_version() -> None:
 
 
 def test_importing_pipeline_does_not_pull_torch() -> None:
-    """``pipeline`` の import だけでは torch (および color_mixing_matrix、
-    psutil) を引かないこと。
+    """``pipeline`` の import だけでは torch / psutil / color_mixing_matrix /
+    scipy を引かないこと。
 
     This started out weaker -- only asserting ``color_mixing_matrix`` and
     ``psutil`` were absent -- because ``yoshidacomp.geometry.warp`` (also
@@ -189,30 +189,42 @@ def test_importing_pipeline_does_not_pull_torch() -> None:
     importing ``pipeline`` took ~9.4-13.0s wall time (three trials) and put
     ``torch`` in ``sys.modules``.
 
-    That has since been fixed *in ``warp.py`` itself*: its two ``import
-    torch`` use sites (inside ``warp_camera_array_to_projector`` and
-    ``invwarp_image``) are now local imports, following the exact pattern
-    that module's own docstring already used for the ``graycode`` git
-    submodule. Because the fix lives inside those function bodies, it
-    changes no module-level attribute of ``warp`` or of ``pipeline`` --
-    ``tests/test_sample_mocked.py``'s ``_patch_warp_helper``, which
-    monkeypatches ``warp_image``/``invwarp_image`` as attributes on the
-    ``pipeline`` module (~10 call sites), keeps working untouched, since
-    ``pipeline.py`` still imports those two names at its own module scope
-    from ``warp`` (only ``warp``'s *internal* torch import moved).
+    That was fixed *in ``warp.py`` itself*: its two ``import torch`` use
+    sites (inside ``warp_camera_array_to_projector`` and ``invwarp_image``)
+    are local imports, following the exact pattern that module's own
+    docstring already used for the ``graycode`` git submodule. Because the
+    fix lives inside those function bodies, it changes no module-level
+    attribute of ``warp`` or of ``pipeline`` -- ``tests/test_sample_mocked.py``'s
+    ``_patch_warp_helper``, which monkeypatches
+    ``warp_image``/``invwarp_image`` as attributes on the ``pipeline``
+    module (~10 call sites), keeps working untouched, since ``pipeline.py``
+    still imports those two names at its own module scope from ``warp``
+    (only ``warp``'s *internal* torch import moved). That got the wall time
+    to ~2.0s (three trials, versus ~9.4-13.0s before).
 
-    Measured after: importing ``pipeline`` takes ~2.0s wall time (three
-    trials, versus ~9.4-13.0s before) and ``torch`` is absent from
-    ``sys.modules``. ``yoshidacomp.geometry.warp`` itself is still
-    imported (it has to be -- ``pipeline.py`` still imports
+    A profile of that remaining ~2.0s showed 73% of it (~1.5s) was
+    ``scipy.interpolate``, pulled in by this module's own
+    ``from scipy.interpolate import PchipInterpolator`` at module scope.
+    Checked before moving it: ``PchipInterpolator`` has exactly one call
+    site in the whole file, inside ``_build_channel_lut`` (LUT
+    *construction*, called only from ``build_inverse_lut``, which
+    ``pipeline.py`` does not even import). ``apply_inverse_lut`` -- the
+    function every ``LINEARIZERS["inverse_lut"]`` call actually goes
+    through -- uses only ``np.interp``. So the same treatment applied:
+    the import moved into ``_build_channel_lut``. Measured after: ~0.55s
+    (three trials), with ``scipy.interpolate`` absent from ``sys.modules``.
+
+    ``yoshidacomp.geometry.warp`` and ``cv2`` are both still imported (the
+    former because ``pipeline.py`` still imports
     ``WarpMethod``/``invwarp_image``/``warp_image`` from it at module
-    scope, unchanged), but importing that module no longer drags torch in
-    with it.
+    scope; the latter is an existing, accepted dependency of the view
+    layer), but neither drags torch, psutil, or scipy along with it
+    anymore.
 
     Run in a subprocess: in-process, some other test collected earlier in
     the same session may have already imported these modules, which would
     make the assertion pass regardless of whether ``pipeline.py`` (or
-    ``warp.py``) is actually responsible.
+    ``warp.py``/``inverse_lut.py``) is actually responsible.
     """
     import subprocess
     import sys
@@ -223,7 +235,9 @@ def test_importing_pipeline_does_not_pull_torch() -> None:
         "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods)); "
         "print('psutil=%s' % ('psutil' in mods)); "
         "print('geometry.warp=%s' % ('yoshidacomp.geometry.warp' in mods)); "
-        "print('torch=%s' % ('torch' in mods))"
+        "print('torch=%s' % ('torch' in mods)); "
+        "print('scipy=%s' % any('scipy' in m for m in mods)); "
+        "print('cv2=%s' % ('cv2' in mods))"
     )
     out = subprocess.run(
         [sys.executable, "-c", code], capture_output=True, text=True, check=True
@@ -232,8 +246,11 @@ def test_importing_pipeline_does_not_pull_torch() -> None:
 
     assert reported["color_mixing_matrix"] == "False", out.stdout
     assert reported["psutil"] == "False", out.stdout
-    # geometry.warp is legitimately still imported -- pipeline.py needs
-    # WarpMethod/invwarp_image/warp_image from it -- but it must no longer
-    # bring torch along for the ride.
-    assert reported["geometry.warp"] == "True", out.stdout
     assert reported["torch"] == "False", out.stdout
+    assert reported["scipy"] == "False", out.stdout
+    # geometry.warp and cv2 are legitimately still imported -- pipeline.py
+    # needs WarpMethod/invwarp_image/warp_image from warp, and cv2 is an
+    # existing, accepted dependency -- but none of them may bring torch,
+    # psutil, or scipy along for the ride.
+    assert reported["geometry.warp"] == "True", out.stdout
+    assert reported["cv2"] == "True", out.stdout
