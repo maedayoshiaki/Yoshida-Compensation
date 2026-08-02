@@ -176,46 +176,43 @@ def test_gamma_direction_is_not_inverted_by_the_numpy_version() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_importing_pipeline_does_not_pull_color_mixing_matrix_or_psutil() -> None:
-    """``pipeline`` の import だけでは ``color_mixing_matrix`` と ``psutil`` を
-    引かないこと。
+def test_importing_pipeline_does_not_pull_torch() -> None:
+    """``pipeline`` の import だけでは torch (および color_mixing_matrix、
+    psutil) を引かないこと。
 
-    The Global Constraint this task exists to satisfy is specifically
-    "web層は ``yoshidacomp.compensation.color_mixing_matrix`` を import
-    しない" (stated three times across the plan and brief) -- not a blanket
-    "no torch anywhere". That distinction turned out to matter: this
-    module also imports ``yoshidacomp.compensation.photometric_compensation``
-    (fixed in this task, same lazy-import treatment) and
-    ``yoshidacomp.geometry.warp`` (NOT fixed here -- see below) for
-    ``prepare_target_image_for_compensation()``'s warp calls, and
-    ``geometry.warp`` itself does an unconditional ``import torch`` at
-    module scope. So ``'torch' in sys.modules`` is actually still ``True``
-    after importing ``pipeline`` alone, even after this task's fix -- only
-    ``color_mixing_matrix`` (and, as a consequence, ``psutil``, which only
-    ``color_mixing_matrix`` imports in this codebase) are gone.
+    This started out weaker -- only asserting ``color_mixing_matrix`` and
+    ``psutil`` were absent -- because ``yoshidacomp.geometry.warp`` (also
+    imported by this module, for ``prepare_target_image_for_compensation()``)
+    used to do an unconditional ``import torch`` at its own module scope,
+    which made the blanket "no torch" claim genuinely false regardless of
+    what this task did to ``pipeline.py``. Measured before that was fixed:
+    importing ``pipeline`` took ~9.4-13.0s wall time (three trials) and put
+    ``torch`` in ``sys.modules``.
 
-    ``geometry.warp``'s import was deliberately left as a module-scope,
-    eager import rather than moved inside
-    ``prepare_target_image_for_compensation()`` (which would fully remove
-    torch from this module's import chain): ``tests/test_sample_mocked.py``
+    That has since been fixed *in ``warp.py`` itself*: its two ``import
+    torch`` use sites (inside ``warp_camera_array_to_projector`` and
+    ``invwarp_image``) are now local imports, following the exact pattern
+    that module's own docstring already used for the ``graycode`` git
+    submodule. Because the fix lives inside those function bodies, it
+    changes no module-level attribute of ``warp`` or of ``pipeline`` --
+    ``tests/test_sample_mocked.py``'s ``_patch_warp_helper``, which
     monkeypatches ``warp_image``/``invwarp_image`` as attributes on the
-    ``pipeline`` module itself (``_patch_warp_helper``, ~10 call sites), a
-    pattern that relies on those names living in this module's global
-    namespace at call time. A function-local import would read fresh
-    names from ``yoshidacomp.geometry.warp`` on every call instead,
-    silently breaking every one of those mocks. Fixing that -- either by
-    having ``geometry/warp.py`` lazily import torch internally (mirroring
-    how it already lazily imports the ``graycode`` submodule) or by
-    repointing the test mocks at ``yoshidacomp.geometry.warp`` directly --
-    is out of this task's stated file scope (``pipeline.py`` and this test
-    file only) and is called out in the task report as unfinished
-    business for whichever later task actually needs the web layer to
-    import ``pipeline`` with zero torch cost.
+    ``pipeline`` module (~10 call sites), keeps working untouched, since
+    ``pipeline.py`` still imports those two names at its own module scope
+    from ``warp`` (only ``warp``'s *internal* torch import moved).
+
+    Measured after: importing ``pipeline`` takes ~2.0s wall time (three
+    trials, versus ~9.4-13.0s before) and ``torch`` is absent from
+    ``sys.modules``. ``yoshidacomp.geometry.warp`` itself is still
+    imported (it has to be -- ``pipeline.py`` still imports
+    ``WarpMethod``/``invwarp_image``/``warp_image`` from it at module
+    scope, unchanged), but importing that module no longer drags torch in
+    with it.
 
     Run in a subprocess: in-process, some other test collected earlier in
     the same session may have already imported these modules, which would
-    make the assertion pass regardless of whether ``pipeline.py`` itself
-    is responsible.
+    make the assertion pass regardless of whether ``pipeline.py`` (or
+    ``warp.py``) is actually responsible.
     """
     import subprocess
     import sys
@@ -235,8 +232,8 @@ def test_importing_pipeline_does_not_pull_color_mixing_matrix_or_psutil() -> Non
 
     assert reported["color_mixing_matrix"] == "False", out.stdout
     assert reported["psutil"] == "False", out.stdout
-    # Documented, not enforced as an invariant to fix: geometry.warp (and
-    # torch through it) is still pulled in -- see the docstring above for
-    # why, and the task report for what would need to change to remove it.
+    # geometry.warp is legitimately still imported -- pipeline.py needs
+    # WarpMethod/invwarp_image/warp_image from it -- but it must no longer
+    # bring torch along for the ride.
     assert reported["geometry.warp"] == "True", out.stdout
-    assert reported["torch"] == "True", out.stdout
+    assert reported["torch"] == "False", out.stdout

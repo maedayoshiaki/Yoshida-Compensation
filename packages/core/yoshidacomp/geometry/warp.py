@@ -6,6 +6,12 @@ GrayCode (``graycode``) は git submodule であり、インストール済み�
 ではない。``external/GrayCode/src`` を ``sys.path`` へ挿入した文脈でしか
 import できないため、このモジュールでは GrayCode の import を各関数の内部に
 閉じ込め、``import yoshidacomp.geometry.warp`` 自体は GrayCode 非依存に保つ。
+
+同じ理由で ``torch`` も各関数の内部で import する。``torch`` はインストール
+済みだが、import 自体に非trivialなコストがかかり（計測: 単体で ``import
+yoshidacomp.compensation.pipeline`` が 9.68 秒）、web層が座標変換を一切
+行わずに ``pipeline`` を import できることを妨げていた
+（``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md`` 参照）。
 """
 
 from __future__ import annotations
@@ -13,9 +19,11 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, Tuple
 
 import numpy as np
-import torch
 
 if TYPE_CHECKING:
+    # torch itself has no type-annotation use in this file (only
+    # torch.from_numpy() calls inside function bodies, imported locally
+    # there), so it does not need a TYPE_CHECKING import here.
     from graycode.warp_image import PixelMapWarperTorch
 
 
@@ -83,6 +91,7 @@ def warp_camera_array_to_projector(
     warp_method: WarpMethod,
 ) -> np.ndarray:
     """Warp an array from camera coordinates into projector coordinates."""
+    import torch
     from graycode.warp_image import AggregationMethod, InpaintMethod, SplatMethod
 
     if src_array.ndim < 3:
@@ -245,6 +254,7 @@ def invwarp_image(
         形状 ``(cam_height, cam_width, 3)`` のカメラ座標系の
         逆ワーピング済み画像。
     """
+    import torch
     from graycode.warp_image import (
         AggregationMethod,
         InpaintMethod,

@@ -279,17 +279,21 @@ def _apply_inverse_gamma_numpy(
 
     **Not wired into ``LINEARIZERS["gamma"]``.** Measured against the torch
     implementation (see ``.superpowers/sdd/2026-08-02-target-and-lut/
-    task-1-report.md`` for the full numbers): uint8 output matches
-    byte-for-byte over all 256 input values in both directions, on both the
-    CPU and CUDA torch backends. Float32 output does **not** match
-    bit-for-bit -- ``np.power`` and ``torch.pow`` disagree by up to 1 ULP
-    (~5.96e-8 in this range) on roughly 6% of a fine [0, 1] grid; torch's own
-    CUDA and CPU backends disagree with *each other* by the same margin, so
-    this is intrinsic to differing ``powf`` implementations, not a bug in
-    either version. An exhaustive uint16 sweep also turned up a handful of
-    1-LSB disagreements (45/196608 brightening, 21/196608 darkening) that a
-    coarser sample would have missed. Because the web layer this task exists
-    to unblock specifically wants float output (an unquantized preview, per
+    task-1-report.md`` for the full table): uint8 output matches
+    byte-for-byte over all 256 input values in both directions (768/768
+    elements exhaustively), on both the CPU and CUDA torch backends.
+    Float32 output does **not** match bit-for-bit -- on a 4001-point [0, 1]
+    grid (12003 elements across 3 channels) at gamma=1/2.2, **774/12003**
+    disagreed between ``np.power`` and ``torch.pow`` (CPU), by up to 1 ULP
+    (5.96e-8 at this magnitude); torch's own CUDA and CPU backends disagree
+    with *each other* by the same 1-ULP margin on 411/12003 of the same
+    grid, so this is intrinsic to differing ``powf`` implementations, not a
+    bug in either version. An exhaustive uint16 sweep (all 65536 values x 3
+    channels = 196608) also turned up 1-LSB disagreements: **45/196608**
+    brightening (gamma=1/2.2), **21/196608** darkening (gamma=2.2) -- both
+    small fractions (~0.02%) that a coarser sample would have missed.
+    Because the web layer this task exists to unblock specifically wants
+    float output (an unquantized preview, per
     :func:`generate_projection_image`'s *dtype* docs), ``_linearize_gamma``
     keeps calling the torch implementation (lazily imported so it stays out
     of this module's import chain) rather than switching to this function.
@@ -297,19 +301,23 @@ def _apply_inverse_gamma_numpy(
     sub-ULP difference from what torch would have produced is immaterial.
 
     ``LINEARIZERS["gamma"]`` には配線していない。torch 版との実測比較
-    （詳細は上記レポート）では、uint8 出力は 256 値×両方向×CPU/CUDA
-    いずれでもバイト単位で一致した。しかし float32 出力はビット単位で
-    一致しない -- ``np.power`` と ``torch.pow`` は [0, 1] を細かく刻んだ
-    グリッドの約6%で最大1ULP（このレンジで ~5.96e-8）ずれる。torch の
-    CUDA版とCPU版同士でさえ同程度ずれるため、これはどちらかの実装の
-    バグではなく ``powf`` 実装差に起因する。uint16 を全数検査すると
-    1LSB の相違が明方向45/196608・暗方向21/196608件見つかり、粗いサンプル
-    では見逃していた。このタスクが解放しようとしているweb層はまさに
-    float 出力（量子化前のプレビュー、:func:`generate_projection_image`
-    の *dtype* 説明を参照）を必要とするため、``_linearize_gamma`` は
-    torch 実装を呼び続ける（遅延importでこのモジュールの import 連鎖
-    からは外す）。この関数は web 層が直接使う用途として残す -- そこでは
-    torch が出したはずの値とのサブULPの差は無視できる。
+    （詳細は上記レポートの表）では、uint8 出力は 256 値×両方向×CPU/CUDA
+    いずれでもバイト単位で一致した（768/768要素、全数検査）。しかし
+    float32 出力はビット単位で一致しない -- [0, 1] を4001点で刻んだ
+    グリッド（3チャンネルで12003要素）、gamma=1/2.2 で **774/12003** が
+    ``np.power`` と ``torch.pow``（CPU）の間で最大1ULP（このレンジで
+    5.96e-8）ずれた。torch の CUDA版とCPU版同士でも同じグリッドの
+    411/12003 で同じ1ULP幅のずれがあり、これはどちらかの実装のバグでは
+    なく ``powf`` 実装差に起因する。uint16 を全数検査（65536値×3ch=
+    196608）すると、1LSB の相違が明方向（gamma=1/2.2）**45/196608**・
+    暗方向（gamma=2.2）**21/196608** 件見つかり、いずれも約0.02%と小さい
+    ものの、粗いサンプルでは見逃していた。このタスクが解放しようとして
+    いるweb層はまさに float 出力（量子化前のプレビュー、
+    :func:`generate_projection_image` の *dtype* 説明を参照）を必要と
+    するため、``_linearize_gamma`` は torch 実装を呼び続ける（遅延import
+    でこのモジュールの import 連鎖からは外す）。この関数は web 層が
+    直接使う用途として残す -- そこでは torch が出したはずの値との
+    サブULPの差は無視できる。
 
     Args:
         image: RGB image, shape ``(H, W, 3)``. uint8 in [0, 255], uint16 in
