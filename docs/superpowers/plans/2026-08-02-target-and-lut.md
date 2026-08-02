@@ -39,8 +39,16 @@
   読み取り欄の「ビュー値」パネルの出し分けに使う。
 - **`apply_inverse_gamma_correction`（および Task 1 が追加した numpy版
   `pipeline._apply_inverse_gamma_numpy`）は渡した指数をそのまま `pow` に使う。**
-  明るくするには `gamma=1/projector.gamma`（≈0.4545）を渡す。省略すると 2.2 が
-  適用され逆方向に暗くなる。**web層からの呼び出しは
+  明るくするには `gamma=1/projector.gamma`（≈0.4545）を渡す。
+  **訂正（測定した）: 「省略すると 2.2 が適用され逆方向に暗くなる」は偽。**
+  `gamma` は既定値を持たない必須引数で、省略は `TypeError:
+  … missing 1 required positional argument: 'gamma'` である（両実装で
+  `inspect.signature` の default が `inspect._empty` であることと、実際の
+  省略呼び出しが送出することを実測）。暗黙既定は commit `9dca136` が
+  意図的に除去済みで、本計画の分岐点 d682917 より前である。
+  **`gamma = gamma or 2.2` のような防御的既定を足さないこと**（`9dca136` が
+  取り除いたものを戻す変更になる）。実在する罠は反転し忘れだけ。
+  **web層からの呼び出しは
   `pipeline.LINEARIZERS["gamma"]` 経由とし、`color_mixing_matrix.
   apply_inverse_gamma_correction` を直接importしないこと**（Global Constraint
   1つ目を参照）。この罠自体はどちらの実装でも同じ。

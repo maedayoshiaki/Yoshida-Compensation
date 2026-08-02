@@ -258,7 +258,23 @@ C = (P − b) · A⁻¹
   **指数の罠は変わらず正しい:** この関数（`_apply_inverse_gamma_numpy` も
   `apply_inverse_gamma_correction` と同じく）渡された指数をそのまま `pow` に
   使うため、明るくするには `gamma=1/projector.gamma`（≈0.4545）を渡す必要がある。
-  引数を省略すると 2.2 が適用され逆方向に暗くなる。GUIからは必ず明示的に渡す。
+  **訂正（測定した）: 「引数を省略すると 2.2 が適用され逆方向に暗くなる」は偽。**
+  `gamma` は**既定値を持たない必須引数**であり、省略は `TypeError` である。
+  実測（`inspect.signature` と実呼び出し、両実装）:
+  `apply_inverse_gamma_correction(image: ndarray | torch.Tensor, gamma: float,
+  device: str | torch.device = "cuda")` / `_apply_inverse_gamma_numpy(image:
+  np.ndarray, gamma: float)` — どちらも `gamma` の default は `inspect._empty`、
+  省略呼び出しは
+  `TypeError: … missing 1 required positional argument: 'gamma'` を返す。
+  暗黙既定（config 由来の `projector.gamma`）は commit `9dca136`
+  「fix: ライブラリAPIの暗黙既定と暗黙依存を解消」が意図的に除去したもので、
+  本ブランチの分岐点 d682917 より前である（`git merge-base --is-ancestor` で確認）。
+  関数自身の docstring が理由を述べている — "Required: there is no default,
+  because … a config-sourced `projector.gamma` default would silently darken"。
+  したがって `gamma = gamma or 2.2` のような防御的既定を足してはならない。
+  それは `9dca136` が取り除いた暗黙既定を戻す変更である。
+  **実在する罠は反転し忘れだけ**（`projector.gamma` をそのまま渡すと暗くなる）。
+  GUIからは必ず `1/projector.gamma` を明示的に渡す。
 - `inverse_lut` は `yoshidacomp.compensation.inverse_lut.apply_inverse_lut` を使う。
   純NumPy実装で `np.interp` をチャンネルごとに適用する。
 - LUTは `.npz` に `lut` `(3, 256) float32`、`t_grid` `(256,) float32`、`meta`（JSON文字列）
