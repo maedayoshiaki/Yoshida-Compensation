@@ -19,7 +19,12 @@ test_view_matches_generate_projection_image_exactly`` が、ビューの画素�
 ``pipeline`` を import してよい理由（と、してはならないこと）:
 計画B3 Task 1 が ``_linearize_gamma`` と ``calc_compensation_image`` を
 numpy 実装へ切り替えたため、``generate_projection_image`` の呼び出しグラフ
-全体が torch を引かない（import 0.29s、初回呼び出し 0.015s）。ただし
+全体が torch を引かない。**担保しているのは所要時間ではなく依存の不在**で
+ある（``sys.modules`` に ``torch``/``psutil``/``color_mixing_matrix`` が
+現れないこと）。所要時間はファイルキャッシュ次第で動くので数値は参考値と
+して扱うこと -- 計画B3 当時の実測は ``import pipeline`` 0.29s、計画B4 で
+測り直すと同じものが 0.45〜0.54s だった（初回呼び出しは 0.015s のまま）。
+ただし
 ``pipeline.prepare_target_image_for_compensation`` は今も ``geometry.warp``
 経由で torch を引き初回に約7秒かかる。このビューはそれを呼ばない
 （ターゲットは ``embed_in_active_region`` で投影フレームへ収まるだけで、
@@ -57,7 +62,7 @@ from yoshidacomp.compensation.pipeline import (
 )
 from yoshidacomp.config import get_config
 
-from ..matrix import MatrixContext, classify_space
+from ..matrix import MatrixContext
 from ..store import luts
 from . import target_view
 from .base import ParamSpec, ViewNotApplicable, ViewResult, ViewSpec, register
@@ -107,8 +112,6 @@ _DEFAULTS: dict[str, object] = {
 # end; ``lut`` borrows only its id reader (``_require_lut`` below writes its
 # own refusals, which talk about a LUT -- something ``gamut`` does not have).
 _PARAMS = target_view.ViewParams("compensation", _DEFAULTS)
-
-_CAMERA_SPACE_REFUSAL = target_view.camera_space_refusal("compensation")
 
 
 def _require_lut(params: dict) -> InverseLut:
@@ -173,40 +176,11 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
             bugs; those must stay 500s.
     """
     projector = get_config().projector
-    height, width = int(context.array.shape[0]), int(context.array.shape[1])
-    region = context.active_region
-    # Two clauses, both load-bearing, and deliberately not three.
-    #
-    # ``region is None`` *is* "the matrix is in camera space": ``matrix.py``
-    # sets ``active_region`` from ``resolve_active_region`` only when the space
-    # is ``"projector"``, and to ``None`` otherwise, so testing
-    # ``context.space == "camera"`` as well says the same thing a second time.
-    # This condition used to carry that third clause; it was removed after a
-    # review measured that reducing the whole condition to ``region is None``
-    # left every test green. ``region is None`` is the clause kept because it
-    # is also what narrows ``region`` to a tuple for everything below.
-    #
-    # The ``classify_space`` call is the one that adds behaviour, and it is a
-    # *different* question: ``context.space`` was decided when the matrix was
-    # loaded, against the config in force **then**. Re-deciding it against the
-    # config in force **now** is what keeps a mismatched frame from reaching
-    # ``calc_compensation_image`` as a numpy shape ``ValueError`` -- a 500
-    # blaming the server for a configuration the user changed under a matrix id
-    # that is still perfectly valid. ``reload_config`` is a public API and this
-    # repository's ``config.toml`` has eight sibling variants in the working
-    # tree right now. Pinned by
-    # ``test_a_matrix_loaded_under_another_projector_config_is_refused_not_500``.
-    #
-    # 2条件であって3条件ではない。``region is None`` は「カメラ座標である」
-    # ことそのもの（``matrix.py`` がプロジェクタ座標のときだけ領域を入れる）
-    # なので、``context.space == "camera"`` を併記しても同じことを2度言うだけ
-    # である。実際レビューが「全条件を ``region is None`` だけに縮めても
-    # 全テストが通る」ことを実測したため削除した。``classify_space`` の方は
-    # 別の問いで、読み込み時ではなく**現在の** config との一致を見る。
-    # 食い違ったまま進むと numpy の形状 ``ValueError``（＝500）になるが、
-    # それはサーバのバグではない。
-    if region is None or classify_space(height, width, projector) == "camera":
-        raise ViewNotApplicable(_CAMERA_SPACE_REFUSAL)
+    # The camera-space refusal, its two-clause condition and the ~20 lines of
+    # reasoning behind it live in ``target_view`` -- ``gamut`` asks the same
+    # question for the same reasons, and this module's copy of that reasoning
+    # was verbatim. See ``ViewParams.require_projector_space``.
+    height, width, region = _PARAMS.require_projector_space(context, projector)
 
     target_image = _PARAMS.require_target(params)
     linearizer = str(_PARAMS.value(params, "linearizer"))

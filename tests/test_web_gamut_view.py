@@ -134,6 +134,30 @@ _EXPECTED_COUNTS = {0: 24, 1: 4, 2: 5, 3: 2}
 
 _EXPECTED_LABELS = ["範囲内", "負クリップ", "1超クリップ", "両方"]
 
+# The fixture's shape constraints, checked once at import rather than inside a
+# test. These compare constants against constants -- they can never fail
+# because of anything the view does, so asserting them inside a behaviour test
+# only inflates the count of tests that "cover" the view. They belong with the
+# fixture they constrain.
+# 定数どうしの比較なので、ビューの振る舞いでは絶対に落ちない。振る舞いの
+# テストの中に置くと「ビューを検証しているテスト」の数だけが水増しされる。
+assert _TARGET_HEIGHT != _TARGET_WIDTH, "a square target hides a transpose"
+assert (_FRAME_HEIGHT, _FRAME_WIDTH) != (_TARGET_HEIGHT, _TARGET_WIDTH), (
+    "the frame and the target must differ or the resize is an identity"
+)
+assert (_FRAME_HEIGHT, _FRAME_WIDTH) != (_REGION[3], _REGION[2]), (
+    "the frame and the active region must differ or the mask covers everything"
+)
+assert (_REGION[3], _REGION[2]) != (_TARGET_HEIGHT, _TARGET_WIDTH), (
+    "the region and the target must differ or embed_in_active_region's resize "
+    "never runs"
+)
+assert sum(_EXPECTED_COUNTS.values()) == _REGION[2] * _REGION[3]
+assert len(set(_EXPECTED_COUNTS.values())) == 4, (
+    "two classes have the same pixel count -- swapping them would be invisible "
+    "to a histogram"
+)
+
 
 def _matrices(height: int, width: int) -> np.ndarray:
     """A per-pixel-varying, non-symmetric ``(H, W, 4, 3)`` matrix.
@@ -301,15 +325,13 @@ def test_every_pixel_is_classified_from_the_unclipped_compensation(
     np.testing.assert_array_equal(data[inside], expected[inside])
 
     # --- all four classes are present, and no two of them are the same size.
+    # (That the four *expected* counts differ is asserted at import; this is
+    # the claim that the view actually produced them.)
     counts = {c: int(((data == c) & inside).sum()) for c in range(4)}
     assert counts == _EXPECTED_COUNTS, counts
     assert all(n > 0 for n in counts.values()), counts
-    assert len(set(counts.values())) == 4, (
-        f"two classes have the same pixel count {counts} -- swapping them "
-        "would be invisible to anything but the pixel-wise comparison"
-    )
 
-    # --- the fixture's own discriminating power, asserted rather than assumed.
+    # --- the fixture's own discriminating power, measured rather than assumed.
     a_mat = matrices[3, 3, :3, :]
     asymmetry = float(
         np.max(np.abs(a_mat - np.diag(np.diag(a_mat))))
@@ -319,7 +341,6 @@ def test_every_pixel_is_classified_from_the_unclipped_compensation(
         f"A is too close to diagonal ({asymmetry:.3f}) for this file to tell a "
         "transposed matrix from the real one; real matrices sit near 0.25"
     )
-    assert _TARGET_HEIGHT != _TARGET_WIDTH, "a square target hides a transpose"
     assert not np.array_equal(image[:, :, 0], image[:, :, 1]), (
         "the target's channels must differ or a channel swap is invisible"
     )
@@ -356,8 +377,16 @@ def test_the_class_map_depends_on_the_target_image_itself(
 def _assert_boundary_pixels_exist(linear: np.ndarray, inside: np.ndarray) -> None:
     """Fail unless the fixture really puts a channel on each closed bound.
 
-    このアサートが無いと、境界を一度も踏まないフィクスチャに縮退したことに
-    誰も気付けない。「境界の検査」は境界の画素が実在して初めて検査になる。
+    This is the single most load-bearing assertion in the file, because
+    **nothing outside this fixture ever reaches the boundary.** See
+    ``test_pixels_at_exactly_zero_and_exactly_one_are_in_range`` for the
+    measurement. If the fixture ever stops constructing the bounds exactly,
+    the boundary test does not start failing -- it starts passing vacuously,
+    and the closed-interval rule loses its only check anywhere.
+
+    このアサートが無いと、境界を一度も踏まないフィクスチャに縮退しても
+    誰も気付けない（境界テストは落ちるのではなく、空虚に通るようになる）。
+    実データは境界を踏まないので、本番でも気付けない。
     """
     assert int((linear[inside] == 0.0).sum()) > 0, (
         "no channel is exactly 0.0 inside the region: this file's boundary "
@@ -374,8 +403,26 @@ def test_pixels_at_exactly_zero_and_exactly_one_are_in_range(
 ) -> None:
     """境界は閉区間。ちょうど 0.0 とちょうど 1.0 は ``範囲内``（クラス0）。
 
-    実データでは白飛び付近が 1.0 ちょうどに張り付くため、``<`` と ``<=`` の
-    取り違えは「もっともらしく連続した広い領域」を丸ごと誤分類する。
+    **この1件が落ちなければ、閉区間の規則はどこでも検査されていない。**
+    直感に反するが、実データはこのビューの経路で境界を踏まない。「白飛びが
+    1.0 に張り付く」現象を作っているのは ``calc_compensation_image`` の
+    クリップであり、``gamut`` は ``clip=False`` でそれを止めているからである。
+    実測（実行列4種 × 実写ターゲット3枚 = 12組、1組あたり2,764,800
+    チャンネル値。``data/comp_test_20260724`` と ``data/comp_test_targets``）:
+
+    | | ちょうど 0.0 | ちょうど 1.0 |
+    | --- | ---: | ---: |
+    | ``clip=True``（``compensation`` の経路） | 1,149,991 | 649,022 |
+    | ``clip=False``（**このビューの経路**） | **0** | **0**（12組中1組だけ1件） |
+
+    つまり ``<`` を ``<=`` に取り違えても実データでは1画素も誤分類されず、
+    GUI を眺めても永久に気付けない。境界を踏ませているのは
+    ``_BIAS_OVERRIDES`` の3画素だけである。フィクスチャを緩めてはならない
+    （``_assert_boundary_pixels_exist`` がその番人）。
+
+    規則自体は正しい。0.0 と 1.0 はプロジェクタが厳密に再現できる2つの値で
+    あり、定義により色域内である。``<=`` にすると「最も暗い／最も明るい
+    再現可能な画素」を「再現不能」と報告することになる。
 
     ここは ``_classify`` を**使わない**。同じ ``np.where`` 連鎖を写すと、
     実装が ``<=`` になったときに期待値も一緒に ``<=`` になり、この1件が
@@ -396,6 +443,14 @@ def test_pixels_at_exactly_zero_and_exactly_one_are_in_range(
     within = ((linear >= 0.0) & (linear <= 1.0)).all(axis=2)
     at_zero = (linear == 0.0).any(axis=2) & within & inside
     at_one = (linear == 1.0).any(axis=2) & within & inside
+    # Not a restatement of ``_assert_boundary_pixels_exist``: that one allows
+    # the boundary channel to sit in a pixel whose *other* channels are out of
+    # range, and such a pixel is legitimately class 1/2/3. This is the guard
+    # against the two assertions below being vacuously true over an empty
+    # selection, which is how a boundary test stops testing the boundary
+    # without ever going red.
+    # 上の存在確認とは別物。こちらは下の2つが空集合に対して空虚に真になるのを
+    # 防ぐためのもので、境界テストが「赤くならないまま検査をやめる」経路を塞ぐ。
     assert at_zero.any() and at_one.any()
 
     assert (data[at_zero] == 0.0).all(), (
@@ -416,8 +471,9 @@ def test_pixels_at_exactly_zero_and_exactly_one_are_in_range(
     ):
         assert linear[y, x, 0] == expected_value, (linear[y, x], (y, x))
         assert data[y, x] == 0.0, ((y, x), data[y, x])
-    both = _linear(image, matrices)[1, 4]
-    assert both[0] == 0.0 and both[1] == 1.0, both
+    # The pixel that sits on both bounds at once: one `<`/`<=` slip either way
+    # moves it out of 範囲内.
+    assert linear[1, 4, 0] == 0.0 and linear[1, 4, 1] == 1.0, linear[1, 4]
     assert data[1, 4] == 0.0
 
 
@@ -500,21 +556,93 @@ def test_outside_the_active_region_is_nan_not_class_zero(
     assert (_classify(linear)[~inside] == 0.0).all()
 
 
+def test_a_non_finite_compensation_inside_the_region_is_nan_not_in_range(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """有効領域の**内側**の非有限値もクラス0にしてはならない。
+
+    領域外について同ファイルが名指しで警戒している「最も安心できる誤答」は、
+    領域内でも同じ形で起こる: NaN との比較はすべて False なので、``< 0`` も
+    ``> 1`` も成立せず、そのまま ``範囲内``（＝補償できている）と描かれる。
+
+    経路は実在する。``calc_compensation_image`` は前進積なので有限入力から
+    NaN を作れないが、行列は ``POST /api/session/matrix`` が指した
+    ``.npy`` そのものであり、係数の NaN/inf はそのまま伝播する。
+
+    ``+inf`` も NaN と同じ扱いにする。``+inf > 1`` は「1超クリップ」に落ちる
+    が、それは測定値の無い画素の測定値であり、``surface`` が特異な画素を NaN
+    にするのと同じ理由で答えにしてはならない。
+
+    黒帯の画素を使うのは、そこでは補償値がバイアス行そのものになり、
+    どの画素が汚染されるかを厳密に決められるからである。
+    """
+    store.clear()
+    targets.clear()
+    x, y, w, h = _REGION
+    stand_in_projector_config(
+        width=_FRAME_WIDTH,
+        height=_FRAME_HEIGHT,
+        active_x=x,
+        active_y=y,
+        active_width=w,
+        active_height=h,
+    )
+    client = TestClient(create_app())
+    matrices = _matrices(_FRAME_HEIGHT, _FRAME_WIDTH)
+    # (1, 2) was the exactly-0.0 boundary pixel and (1, 7) was class 2.
+    matrices[1, 2, 3, 0] = np.nan
+    matrices[1, 7, 3, 1] = np.inf
+    image = _target_image(_TARGET_HEIGHT, _TARGET_WIDTH)
+    matrix_id = _load_matrix(client, tmp_path, matrices, name="non_finite.npy")
+    target_id = _load_target(client, _write_target(tmp_path, image))
+
+    response = client.get(_url(matrix_id, target=target_id))
+    assert response.status_code == 200, response.text
+    data = _hwc(response)[:, :, 0]
+
+    # The contamination really did reach the compensation, and only there.
+    linear = _linear(image, matrices)
+    assert np.isnan(linear[1, 2, 0]), linear[1, 2]
+    assert np.isinf(linear[1, 7, 1]), linear[1, 7]
+
+    assert np.isnan(data[1, 2]), (
+        "a NaN compensation was classified as 範囲内 -- every comparison "
+        "against NaN is False, so it fell through to class 0"
+    )
+    assert np.isnan(data[1, 7]), (
+        "an infinite compensation was classified as 1超クリップ -- inf > 1 is "
+        "True, so it reads as a measurement of a pixel that has none"
+    )
+
+    # Every other in-region pixel is still classified normally: the guard must
+    # narrow to the contaminated pixels, not blank the region.
+    inside = _inside_mask()
+    untouched = inside.copy()
+    untouched[1, 2] = False
+    untouched[1, 7] = False
+    assert np.isfinite(data[untouched]).all()
+    assert int((data[untouched] != 0.0).sum()) > 0
+
+
 # --------------------------------------------------------------------------
 # 4. clip=False is the whole point.
 # --------------------------------------------------------------------------
 
 
-def test_clipping_the_compensation_would_erase_every_out_of_gamut_class(
+def test_the_view_classifies_the_unclipped_values_not_the_clipped_ones(
     tmp_path, stand_in_projector_config
 ) -> None:
-    """``clip=True`` では色域外が1画素も残らないこと。
+    """``clip=True`` なら色域外は1画素も残らない。ビューはそちらではない。
 
     ``generate_projection_image`` の既定は ``clip=True`` であり、それは
-    このビューが見せようとしている情報そのものを消す。ここが落ちない
-    フィクスチャは、そもそも色域外を検出していない。
+    このビューが見せようとしている情報そのものを消す。前半はフィクスチャの
+    性質（クリップすれば全画素がクラス0になる）を、後半はビューが実際に
+    どちらを見ているかを固定する。名前のとおりビューを呼ぶ -- 呼ばないと
+    ``clip`` を冠したテストが ``clip`` の変異で落ちないことになる。
     """
-    _, _, _, matrices, image = _prepared(tmp_path, stand_in_projector_config)
+    client, matrix_id, target_id, matrices, image = _prepared(
+        tmp_path, stand_in_projector_config
+    )
     inside = _inside_mask()
 
     clipped = _classify(_linear(image, matrices, clip=True))
@@ -527,6 +655,108 @@ def test_clipping_the_compensation_would_erase_every_out_of_gamut_class(
     assert int((unclipped[inside] != 0.0).sum()) == sum(
         _EXPECTED_COUNTS[c] for c in (1, 2, 3)
     )
+
+    # ...and the view agrees with the unclipped one, not the clipped one.
+    response = client.get(_url(matrix_id, target=target_id))
+    assert response.status_code == 200, response.text
+    data = _hwc(response)[:, :, 0]
+    np.testing.assert_array_equal(data[inside], unclipped[inside])
+    assert not np.array_equal(data[inside], clipped[inside]), (
+        "the view returned the clipped classification: every out-of-gamut "
+        "pixel it exists to show has been rounded away"
+    )
+
+
+def _uniform_class_matrices(height: int, width: int, bias) -> np.ndarray:
+    """A matrix mild enough that *bias* alone decides the class, everywhere.
+
+    ``_matrices`` に対する第2・第3のフィクスチャ。``_A`` を 0.4 倍に縮めて
+    ``_BIAS_OVERRIDES`` を適用しないので、有効領域35画素すべてが同じクラスに
+    なる。どのクラスになるかは *bias* だけで決まる。
+    """
+    rows = np.arange(height, dtype=np.float32)[:, None]
+    cols = np.arange(width, dtype=np.float32)[None, :]
+    modulation = (1.0 + 0.004 * (rows + 2.0 * cols)).astype(np.float32)
+
+    matrices = np.zeros((height, width, 4, 3), dtype=np.float32)
+    matrices[:, :, :3, :] = (_A * 0.4) * modulation[:, :, None, None]
+    matrices[:, :, 3, :] = np.array(bias, dtype=np.float32)
+    return matrices
+
+
+# ``(name, bias, the single class every in-region pixel gets)``.
+#
+# 2枚要る理由は下のテストの docstring にある。片方だけでは、レンジの片端しか
+# データ由来の実装と区別できない。
+_UNIFORM_FRAMES = [
+    ("in_gamut", (0.20, 0.30, 0.25), 0.0),
+    ("all_below_zero", (-0.60, 0.20, 0.25), 1.0),
+]
+
+
+@pytest.mark.parametrize("name, bias, expected_class", _UNIFORM_FRAMES)
+def test_the_display_range_is_the_class_range_not_the_frame_s_own(
+    tmp_path, stand_in_projector_config, name: str, bias, expected_class: float
+) -> None:
+    """1クラスしか出ないフレームでも ``vmin``/``vmax`` は 0.0/3.0 のまま。
+
+    **主フィクスチャではこの主張を検証できない。** あちらは有効領域35画素に
+    4クラス全部を含むため ``nanmin(data) == 0.0``、``nanmax(data) == 3.0``、
+    ``nanpercentile(data, [1, 99]) == [0.0, 3.0]`` となり、クラス番号の範囲と
+    データ自身の min/max が**たまたま一致する**。実装をデータ由来のレンジに
+    変えても主フィクスチャは1件も落ちない（レビューが実測した「23件目」）。
+
+    2枚とも要る。片方では片端しか動かない:
+
+    - ``in_gamut``（全画素クラス0）: データ由来だと ``vmax`` が 0.0 に潰れる。
+      これが実際に危ないケースで、``routers/view.py`` の categorical 規則が
+      ``vmin == vmax`` を 500 で弾くため、「全部表現できています」という最も
+      出したい答えのときだけビューが壊れる。ただし ``vmin`` の側は 0.0 の
+      ままなので、``vmin`` だけをデータ由来にする退行はここでは見えない。
+    - ``all_below_zero``（全画素クラス1）: ``nanmin`` が 1.0 になるので
+      ``vmin`` 側の退行がここで見える。``vmax`` も 1.0 に潰れる。
+
+    どちらのフレームも特殊ではない。暗めのターゲットは前者を、環境光の強い
+    実測行列は後者に近いものを普通に生む（実データ12組で色域外は47〜85%で
+    あり、「全部範囲内が普通」も「全部色域外が普通」も正しくない）。
+    """
+    store.clear()
+    targets.clear()
+    x, y, w, h = _REGION
+    stand_in_projector_config(
+        width=_FRAME_WIDTH,
+        height=_FRAME_HEIGHT,
+        active_x=x,
+        active_y=y,
+        active_width=w,
+        active_height=h,
+    )
+    client = TestClient(create_app())
+    matrices = _uniform_class_matrices(_FRAME_HEIGHT, _FRAME_WIDTH, bias)
+    image = _target_image(_TARGET_HEIGHT, _TARGET_WIDTH)
+    matrix_id = _load_matrix(client, tmp_path, matrices, name=f"{name}.npy")
+    target_id = _load_target(client, _write_target(tmp_path, image))
+
+    response = client.get(_url(matrix_id, target=target_id))
+    assert response.status_code == 200, response.text
+    data = _hwc(response)[:, :, 0]
+    inside = _inside_mask()
+
+    # The frame really is uniform -- measured from the view's own output, not
+    # assumed, because a fixture that quietly grew a second class would make
+    # the range assertions below coincidental again.
+    assert (data[inside] == expected_class).all(), (
+        f"{name} is meant to be entirely class {expected_class}, got "
+        f"{sorted(set(data[inside].tolist()))}"
+    )
+
+    # ...so the data's own extent is a single point, and is not the class range.
+    assert float(np.nanmin(data)) == expected_class
+    assert float(np.nanmax(data)) == expected_class
+
+    assert float(response.headers["X-Vmin"]) == 0.0
+    assert float(response.headers["X-Vmax"]) == 3.0
+    assert float(response.headers["X-Vmax"]) == len(_EXPECTED_LABELS) - 1
 
 
 # --------------------------------------------------------------------------
@@ -618,6 +848,7 @@ def test_the_view_is_listed_with_its_params_and_without_the_others() -> None:
     それらを持たせると「LUTを変えると色域外が変わる」という誤った印象を与える。
     """
     store.clear()
+    targets.clear()  # every other test in this file clears both, via _prepared
     client = TestClient(create_app())
     views = client.get("/api/views").json()["views"]
     spec = next(v for v in views if v["key"] == "gamut")
@@ -778,11 +1009,19 @@ def test_the_four_labels_are_in_class_order(
 def test_the_display_range_is_the_class_index_range(
     tmp_path, stand_in_projector_config
 ) -> None:
-    """``vmin``/``vmax`` はクラス番号の範囲（0 と 3）。
+    """主フィクスチャでの ``vmin``/``vmax`` が 0.0/3.0 であること。
 
-    ``compensation``/``surface`` のようなパーセンタイルではない。クラス番号に
-    パーセンタイルを当てると、色域外がほとんど無いフレームでレンジが潰れ、
-    ``範囲内`` と ``両方`` が同じ色になる。
+    **この1件は「レンジがデータ由来でない」ことを検証していない。** 主
+    フィクスチャは4クラス全部を含むので ``nanmin``/``nanmax``/1-99パーセンタイル
+    のいずれもちょうど 0.0/3.0 になり、データ由来の実装と直書きの実装を
+    区別できない（レビューが3種の変異で実測し、いずれも全件緑だった）。
+    区別しているのは
+    ``test_the_display_range_is_the_class_range_not_the_frame_s_own`` の
+    1クラスだけのフレーム2枚である。
+
+    ここに残す価値は2つある: 主フィクスチャ（＝このファイルの他のすべての
+    テストが使う経路）でヘッダが実際に 0.0/3.0 で出ること、そして ``LABELS``
+    の要素数とレンジの結合（4→3 に減らすとここも落ちる）。
     """
     client, matrix_id, target_id, _, _ = _prepared(tmp_path, stand_in_projector_config)
     response = client.get(_url(matrix_id, target=target_id))

@@ -401,6 +401,47 @@ def test_a_categorical_view_labels_its_classes_not_its_channels(
         assert "categorical" in detail
         assert "3.0" in detail
 
+    # A categorical view is one plane of class indices. Dropping
+    # ``len(labels) == channels`` for this kind gave up that guarantee too, and
+    # it is a separate one: three planes with four class names is not a
+    # classification, and the frontend -- which draws categorical as a single
+    # tile -- would index ``labels[c]`` along the channel axis and caption
+    # three planes with three of the four class names. The old rule made this a
+    # 500; ``channels == 1`` is what keeps it one.
+    # categorical は「クラス番号1枚」である。3チャンネル×4クラス名は分類では
+    # なく、フロントは ``labels[c]`` をチャンネル軸に当ててしまう。
+    with _temporary_view(
+        "_test_categorical_multichannel",
+        labels,
+        channels=3,
+        kind="categorical",
+        rendered_channels=3,
+        vmax=3.0,
+    ):
+        response = client.get(
+            f"/api/matrix/{matrix_id}/view/_test_categorical_multichannel"
+        )
+        assert response.status_code == 500
+        assert "1 channel" in response.json()["detail"]
+
+    # And the range clause must not be satisfiable by having no classes:
+    # ``labels=[]`` with ``vmax=-1`` passes ``vmax == len(labels) - 1``
+    # vacuously. A classification needs at least two classes to be one.
+    # ラベル0個＋``vmax=-1`` はレンジ条件を空虚に満たす。分類には最低2クラス要る。
+    with _temporary_view(
+        "_test_categorical_no_classes",
+        [],
+        channels=1,
+        kind="categorical",
+        rendered_channels=1,
+        vmax=-1.0,
+    ):
+        response = client.get(
+            f"/api/matrix/{matrix_id}/view/_test_categorical_no_classes"
+        )
+        assert response.status_code == 500
+        assert "2 labels" in response.json()["detail"]
+
     # The per-channel rule still holds for every other kind.
     with _temporary_view(
         "_test_scalar_label_count",

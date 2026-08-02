@@ -6,8 +6,9 @@
 ``gamut`` はそれを4クラスに分ける。
 
 ここに集めるのは、二重に書けば静かにずれるものに限る -- 既定値、パラメータ
-宣言、断り文、有効領域のマスク。**数式は1つも無い**（補償の計算は
-``pipeline.generate_projection_image()`` が持つ）。
+宣言、断り文、座標空間の判定（``require_projector_space``）、有効領域のマスク。
+**数式は1つも無い**（補償の計算は ``pipeline.generate_projection_image()`` が
+持つ）。
 
 なぜ写しではなく共有なのか: このリポジトリは同じ値を2箇所に書いた結果ずれる
 欠陥を繰り返し記録している（``views/compensation.py`` の ``_DEFAULTS``、
@@ -31,7 +32,9 @@ from typing import get_args
 import numpy as np
 
 from yoshidacomp.compensation.pipeline import TargetDecodeMode
+from yoshidacomp.config import ProjectorConfig
 
+from ..matrix import MatrixContext, classify_space
 from ..store import targets
 from .base import ParamSpec, ViewNotApplicable
 
@@ -57,7 +60,7 @@ TARGET_DEFAULTS: dict[str, object] = {
 }
 
 
-def camera_space_refusal(view: str) -> str:
+def _camera_space_refusal(view: str) -> str:
     """Why *view* will not answer for a camera-space matrix.
 
     Correctness first, unlike ``views/surface.py`` where cost came first:
@@ -149,7 +152,19 @@ def target_gamma_spec(defaults: dict[str, object]) -> ParamSpec:
     )
 
 
-@dataclass(frozen=True)
+# ``eq=False`` so that no ``__hash__`` is synthesised and ``object.__hash__``
+# is inherited instead. ``frozen=True`` with ``eq=True`` synthesises a
+# ``__hash__`` that hashes every field, and one of the fields is a ``dict`` --
+# so the synthesised one raises ``TypeError: unhashable type: 'dict'`` for
+# every instance this module creates. A method that cannot be called on any
+# instance is not a guarantee, it is a trap left for the first caller who puts
+# a ``ViewParams`` in a set. Identity equality is also the right semantics
+# here: two ``ViewParams`` for the same view are the same reader, and nothing
+# compares them.
+# ``frozen=True`` かつ ``eq=True`` だと全フィールドを見る ``__hash__`` が
+# 生成されるが、フィールドに ``dict`` があるため生成された ``__hash__`` は
+# どのインスタンスでも ``TypeError`` になる。呼べないメソッドは保証ではなく罠。
+@dataclass(frozen=True, eq=False)
 class ViewParams:
     """Reads one view's parameters, and refuses in that view's name.
 
@@ -163,6 +178,55 @@ class ViewParams:
 
     view: str
     defaults: dict[str, object]
+
+    def require_projector_space(
+        self, context: MatrixContext, projector: ProjectorConfig
+    ) -> tuple[int, int, tuple[int, int, int, int]]:
+        """Return ``(height, width, active_region)``, or refuse.
+
+        Two clauses, both load-bearing, and deliberately not three.
+
+        ``region is None`` *is* "the matrix is in camera space": ``matrix.py``
+        sets ``active_region`` from ``resolve_active_region`` only when the
+        space is ``"projector"``, and to ``None`` otherwise, so testing
+        ``context.space == "camera"`` as well says the same thing a second
+        time. This condition used to carry that third clause; it was removed
+        after a review measured that reducing the whole condition to ``region
+        is None`` left every test green. ``region is None`` is the clause kept
+        because it is also what narrows ``region`` to a tuple for the callers.
+
+        The ``classify_space`` call is the one that adds behaviour, and it is a
+        *different* question: ``context.space`` was decided when the matrix was
+        loaded, against the config in force **then**. Re-deciding it against
+        the config in force **now** is what keeps a mismatched frame from
+        reaching ``calc_compensation_image`` as a numpy shape ``ValueError`` --
+        a 500 blaming the server for a configuration the user changed under a
+        matrix id that is still perfectly valid. ``reload_config`` is a public
+        API and this repository's ``config.toml`` has eight sibling variants in
+        the working tree right now. Pinned by
+        ``test_a_matrix_loaded_under_another_projector_config_is_refused_not_500``
+        in *both* views' test files; dropping the ``classify_space`` clause
+        fails one in each.
+
+        This lives here rather than in each view because the two copies were
+        verbatim, comment included, and this module exists for exactly that.
+
+        2条件であって3条件ではない。``region is None`` は「カメラ座標である」
+        ことそのもの（``matrix.py`` がプロジェクタ座標のときだけ領域を入れる）
+        なので、``context.space == "camera"`` を併記しても同じことを2度言う
+        だけである。``classify_space`` の方は別の問いで、読み込み時ではなく
+        **現在の** config との一致を見る。食い違ったまま進むと numpy の形状
+        ``ValueError``（＝500）になるが、それはサーバのバグではない。
+
+        Raises:
+            ViewNotApplicable: the matrix is in camera space, or its frame no
+                longer matches the configured projector.
+        """
+        height, width = int(context.array.shape[0]), int(context.array.shape[1])
+        region = context.active_region
+        if region is None or classify_space(height, width, projector) == "camera":
+            raise ViewNotApplicable(_camera_space_refusal(self.view))
+        return height, width, region
 
     def value(self, params: dict, name: str) -> object:
         """Read *name* from *params*, falling back to its declared default."""
