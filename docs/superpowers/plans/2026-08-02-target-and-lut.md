@@ -1,0 +1,515 @@
+# ターゲット画像入力・線形化・LUTカーブ 実装計画（計画B3）
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 画像を受け付け、行列を適用した補償結果をGUIで見られるようにし、線形化方式（解析ガンマ / 実測逆LUT）を切り替えて比較できるようにする。LUTカーブも表示する。
+
+**Architecture:** 計算は `yoshidacomp.compensation.pipeline` の既存関数を通す。CLIと同じ経路にすることが要点で、web層に補償の数式を再実装しない。ターゲット画像とLUTは行列と同じく `store.py` にIDで保持する。LUTカーブは画素データではないので JSON で返し、2D canvas（`plot.js`）で描く。
+
+**Tech Stack:** FastAPI / numpy / OpenCV / 素の ES モジュール / Canvas 2D
+
+## Global Constraints
+
+- **web層は `yoshidacomp.compensation.color_mixing_matrix` を import しない。**
+  module scope で `torch` と `psutil` を引く。Task 1 がこの制約と `pipeline.py` の
+  衝突を解消するまで、web層は `pipeline.py` も import できない。
+- 画素データは `application/octet-stream` の float32 リトルエンディアンで送る。
+  JSON に載せない。LUTカーブは画素データではないので JSON でよい。
+- ビューの本体は **planar `(C, H, W)`**。`X-Layout: planar` を必ず送る。
+  クライアントはヘッダが無ければ拒否する（計画Cで必須化済み）。
+- ラベルは `X-Labels-B64`（UTF-8 JSON配列のbase64）。HTTPヘッダは latin-1 なので
+  和文ラベルを生で置くと 500 になる。
+- ビューが入力を扱えない場合は `ViewNotApplicable` を投げる。router が 400 に写す。
+  numpy の `ValueError` は 500 のままにする（計画Cで分離済み）。
+- 新しい `ViewSpec` には `values_are_matrix` を宣言する。既定は *表示*。
+  読み取り欄の「ビュー値」パネルの出し分けに使う。
+- **`apply_inverse_gamma_correction` は渡した指数をそのまま `pow` に使う。**
+  明るくするには `gamma=1/projector.gamma`（≈0.4545）を渡す。省略すると 2.2 が
+  適用され逆方向に暗くなる。
+- 実測LUTの終端は 1.0 とは限らない（ISO400実測でチャンネルランプが
+  約 0.876/0.876/0.688）。縦軸を 1.0 で固定しないこと。
+- テストは `node` が無ければ skip する既存の仕組みを壊さない。
+- ハーネスは**出荷される** `main.js`/`api.js`/`glview.js` を駆動する。写しを作らない。
+
+## テストについて（このリポジトリ固有の事情）
+
+**「通るが落ちることができないテスト」がこれまでに12件出ている。** 直近4件は
+直前の計画Cで出たもので、内訳は「有効領域の境界テストが幅と高さの入れ替えでも通る」
+「太字で指定した唯一の性質を何も検証していない」「コメントで明言した性質を
+何も検証していない」「レビュー指摘に対応して追加しコメント3つで守ったフラグの
+読み方を何も検証していない」。
+
+共通の形は**フィクスチャが検証対象の次元について対称**であること、および
+**性質を散文で自信を持って述べたことで検証済みに見える**ことである。
+
+各タスクで、書いた各テストについて「どの誤実装なら通ってしまうか」を問うこと。
+Step の変異試験は形式ではない。実際に壊して、名前の付いたテストが落ちることを
+確認し、落ちなければテストの方を直すこと。
+
+---
+
+## File Structure
+
+| ファイル | 責任 |
+| --- | --- |
+| `packages/core/yoshidacomp/compensation/pipeline.py` | ガンマ線形化から torch を外す |
+| `tests/test_pipeline_gamma_numpy.py` | numpy版とtorch版の一致検証（新規） |
+| `packages/web/yoshidacomp_web/target.py` | ターゲット画像の読み込みと保持（新規） |
+| `packages/web/yoshidacomp_web/routers/target.py` | `POST /api/target`（新規） |
+| `packages/web/yoshidacomp_web/lut.py` | 逆LUTの読み込みとカーブ抽出（新規） |
+| `packages/web/yoshidacomp_web/routers/lut.py` | `POST /api/lut` / `GET /api/lut/{id}/curve`（新規） |
+| `packages/web/yoshidacomp_web/views/compensation.py` | `compensation` ビュー（新規） |
+| `packages/web/yoshidacomp_web/store.py` | ターゲットとLUTのストアを追加 |
+| `packages/web/yoshidacomp_web/static/js/plot.js` | LUTカーブの2D canvas（新規） |
+| `packages/web/yoshidacomp_web/static/js/main.js` | ターゲット/LUT の選択UIとカーブ表示 |
+| `packages/web/yoshidacomp_web/static/index.html` | 入力欄とカーブ領域 |
+
+---
+
+### Task 1: ガンマ線形化から torch を外す
+
+**Files:**
+- Modify: `packages/core/yoshidacomp/compensation/pipeline.py`
+- Test: `tests/test_pipeline_gamma_numpy.py`（新規）
+
+**Interfaces:**
+- Consumes: `yoshidacomp.compensation.color_mixing_matrix.apply_inverse_gamma_correction(image, gamma, device)` —
+  torch実装。`clamp(in ** gamma, 0, 1)` を正規化値に対して計算し、入力の dtype を保つ。
+- Produces: `pipeline.py` が module scope で `color_mixing_matrix` を import しなくなる。
+  `LINEARIZERS["gamma"]` の呼び出し規約（引数・戻り値の dtype と形状）は不変。
+
+**なぜこれが最初か**
+
+`pipeline.py` は `apply_inverse_gamma_correction` を module scope で import しており、
+それが `torch` と `psutil` を引く。web層は `color_mixing_matrix` を import しない
+規約なので、この連鎖のせいで web層は `pipeline.py` 全体を使えない。以降の全タスクが
+`pipeline.py` の関数を必要とする。
+
+加えて、関数の中身は正規化値に対する `clamp(x ** gamma, 0, 1)` であり、
+1920×1080×3 の冪乗のために CUDA を初期化するのは対話的GUIでは割に合わない
+（初回に数秒止まり、プロジェクタを駆動している同じGPUのメモリを取る）。
+
+**この Task は「numpy に置き換える」ではなく「一致するかを測ってから決める」ものである。**
+
+- [ ] **Step 1: 一致を測るテストを書く**
+
+`tests/test_pipeline_gamma_numpy.py` を新規作成する。既存のテストの作法
+（フィクスチャ名・`stand_in_projector_config` のような既存ヘルパの有無）を先に確認し、
+それに合わせること。
+
+検証すること:
+
+1. `uint8` の全256値に対し、numpy版と torch版が**バイト単位で一致する**こと。
+   `np.arange(256, dtype=np.uint8).reshape(...)` を使い、丸めの境界を全部踏むこと。
+2. `float32` について、`[0, 1]` を細かく刻んだ値と、範囲外の値
+   （負値、1超）でも一致すること。**clamp の効き方が違うと危ない箇所である。**
+3. `uint16` を扱う経路があるなら同様に確認する（無ければテストも書かない）。
+4. `gamma` に `1/2.2` と `2.2` の両方を渡し、**方向が逆になること**を確認する。
+   これは規約の罠（指数をそのまま使う）を固定するためのテストであり、
+   一致検証とは別の目的を持つ。
+
+torch が入っていない環境では 1〜3 を skip すること（`pytest.importorskip("torch")`)。
+4 は numpy 版だけで成立するので skip しない。
+
+**判別力について**: 全部を `[0,1]` の内側の float だけで測ると、clamp の違いも
+uint8 の丸めの違いも見えない。範囲外と整数境界を必ず含めること。
+
+- [ ] **Step 2: 落ちることを確認**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_pipeline_gamma_numpy.py -v`
+Expected: FAIL（numpy版がまだ無い）
+
+- [ ] **Step 3: numpy 版を書き、一致を実測する**
+
+`pipeline.py` に純numpyの実装を足す。名前は `_apply_inverse_gamma_numpy` とし、
+module private にする（公開APIを増やさない）。
+
+```python
+def _apply_inverse_gamma_numpy(
+    image: np.ndarray,
+    gamma: float,
+) -> np.ndarray:
+    """Raise a normalized RGB image to *gamma*, clamped to [0, 1].
+
+    ``color_mixing_matrix.apply_inverse_gamma_correction`` の numpy 版。
+    *gamma* はそのまま指数として使うので、明るくするには 1/projector.gamma を
+    渡す。入力の dtype を保つ。
+
+    torch 版は 600 万画素の冪乗のために CUDA を初期化する。対話的GUIでは
+    初回に数秒止まり、プロジェクタを駆動しているのと同じGPUのメモリを取るため
+    割に合わない。加えて torch は module scope で psutil ごと web 層へ漏れる。
+    """
+```
+
+正規化のスケール（uint8 なら 255、uint16 なら 65535、float はそのまま）と、
+戻すときの丸めを **torch 版の実装を読んで合わせること**。推測しない。
+
+**測った結果を報告に必ず書くこと。**
+
+- バイト単位で一致した場合 → `_linearize_gamma` を numpy 版へ切り替え、
+  `color_mixing_matrix` の module-scope import を削除する。
+- 一致しなかった場合 → **切り替えない。** `_linearize_gamma` は torch 版のまま
+  遅延 import にして module scope から外し、差の内訳（最大絶対差・
+  何個の値が違うか・どの入力で）を報告に書く。numpy 版は web 層専用として残し、
+  差があることをコメントに明記する。
+
+どちらの結末になったかで後続タスクの前提が変わるので、**status に明示すること。**
+
+- [ ] **Step 4: 通ることを確認**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_pipeline_gamma_numpy.py -v`
+Expected: PASS
+
+- [ ] **Step 5: 境界テスト**
+
+`pipeline.py` を import しても `torch` が `sys.modules` に入らないことを確認する
+テストを足す。既に `tests/` にパッケージ境界のテストがあればそこへ、無ければ
+このテストファイルに書く。
+
+```python
+def test_importing_pipeline_does_not_pull_torch():
+    import subprocess, sys
+    code = (
+        "import sys; import yoshidacomp.compensation.pipeline; "
+        "print('torch' in sys.modules)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+    )
+    assert out.stdout.strip() == "False", out.stdout
+```
+
+**サブプロセスで確認すること。** 同一プロセスでは他のテストが先に torch を
+import している可能性があり、そのとき何も検証しないテストになる。
+
+- [ ] **Step 6: 既存CLIの回帰を確認**
+
+Run: `.venv/Scripts/python.exe -m pytest -q`
+Expected: 196 passed（増分は新規テスト分のみ）
+
+- [ ] **Step 7: 変異試験**
+
+1. `_apply_inverse_gamma_numpy` の clamp を外す → 範囲外のテストが落ちること
+2. 正規化のスケールを 255 から 256 にする → uint8 のテストが落ちること
+3. `1.0 / projector.gamma` を `projector.gamma` にする → 方向のテストが落ちること
+
+それぞれ落ちたテスト名を報告に書くこと。
+
+- [ ] **Step 8: コミット**
+
+```bash
+git add packages/core/yoshidacomp/compensation/pipeline.py tests/test_pipeline_gamma_numpy.py
+git commit -m "refactor(core): ガンマ線形化から torch の連鎖を切る"
+```
+
+---
+
+### Task 2: ターゲット画像の入力
+
+**Files:**
+- Create: `packages/web/yoshidacomp_web/target.py`
+- Create: `packages/web/yoshidacomp_web/routers/target.py`
+- Modify: `packages/web/yoshidacomp_web/store.py`, `app.py`
+- Test: `tests/test_web_target.py`（新規）
+
+**Interfaces:**
+- Consumes: `yoshidacomp.compensation.pipeline.decode_target(image, mode, gamma)` と
+  `load_target_images(dir)`。**実装前に両方の実シグネチャを読むこと**（この計画の
+  記述は要約であり、引数名と既定値は実物が正しい）。
+- Produces:
+  - `POST /api/target` — body `{"path": "<画像ファイルまたはディレクトリ>"}` →
+    `{"id": "target1", "meta": {...}}`
+  - `GET /api/target/{id}/meta` → 形状・元パス・デコード方式
+  - `store.targets` に `TargetContext` を保持する（`MatrixStore` と同じ作法）。
+
+**設計判断**
+
+アップロードではなく**パス指定のみ**とする。このGUIはオフライン専用でローカルの
+`data/` を直接読む前提であり、99GB のツリーが手元にある。アップロード経路は
+一時ファイルの寿命管理を増やす割に使われない。
+
+ディレクトリを渡された場合は `load_target_images` で全画像を読み、
+`meta` に一覧を返して**先頭を既定**にする。個別の選択は `index` パラメータで行う。
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+`tests/test_web_target.py` を新規作成する。既存の `tests/test_web_matrix.py` の
+作法（クライアントの作り方、`store.clear()` の扱い、一時ファイルの置き方）に
+合わせること。
+
+検証すること:
+
+1. 単一の画像ファイルを渡すと id が返り、`meta` の `shape` が実際の画像と一致する
+2. ディレクトリを渡すと `meta` に画像名の一覧が入り、件数が正しい
+3. 存在しないパスは 404
+4. 空文字は 400（`Path("")` は `Path(".")` になるので先に弾く。
+   `routers/session.py` に同じ扱いの前例がある）
+5. 画像でないファイル（テキスト等）は 400 で、理由が読める文言であること
+6. `GET /api/target/{id}/meta` が `POST` の `meta` と一致する
+7. 未知の id は 404
+
+**判別力について**: 正方形の画像を使うと縦横の取り違えが見えない。
+**縦横が違うサイズ**（例 5×3）の画像を使うこと。1件目の欠陥はまさにこの形で出た。
+
+- [ ] **Step 2: 落ちることを確認**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_web_target.py -v`
+Expected: FAIL
+
+- [ ] **Step 3: 実装**
+
+`target.py` に `TargetContext` を dataclass で定義する。最低限持つもの:
+画像本体（`(H, W, 3) uint8`）、元パス、ディレクトリだった場合の一覧と選択中の index。
+
+`store.py` には `MatrixStore` と同じ形の `TargetStore` を足す。既存の
+`MatrixStore` をコピーせず、**共通部分を切り出して両方から使う形にすること**
+（id採番・ロック・`get`/`put`/`clear` は完全に同じ）。
+
+`app.py` に router を登録する。`/api/*` を先に、`StaticFiles` を最後に
+マウントする既存の順序を崩さないこと。
+
+- [ ] **Step 4: 通ることを確認**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_web_target.py -v`
+Expected: PASS
+
+- [ ] **Step 5: 変異試験**
+
+1. `shape` の H と W を入れ替えて返す → 縦横違いのテストが落ちること
+2. ディレクトリの一覧をソートしない → 順序を検証しているテストがあれば落ちること
+   （落ちなければ順序を検証していないので、決定的な順序を仕様にしてテストを足す）
+3. 空文字のガードを外す → 400 のテストが落ちること
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add packages/web/yoshidacomp_web/target.py packages/web/yoshidacomp_web/routers/target.py packages/web/yoshidacomp_web/store.py packages/web/yoshidacomp_web/app.py tests/test_web_target.py
+git commit -m "feat(web): ターゲット画像をパス指定で読み込む"
+```
+
+---
+
+### Task 3: `compensation` ビュー
+
+**Files:**
+- Create: `packages/web/yoshidacomp_web/views/compensation.py`
+- Modify: `packages/web/yoshidacomp_web/views/__init__.py`
+- Test: `tests/test_web_compensation_view.py`（新規）
+
+**Interfaces:**
+- Consumes: Task 2 の `store.targets`、`pipeline.generate_projection_image()`、
+  `views/base.py` の `ParamSpec` / `ViewResult` / `ViewSpec` / `register` /
+  `ViewNotApplicable`。`views/surface.py` を**先に読むこと** — カメラ座標の
+  拒否・コスト上限・`vmin`/`vmax` の決め方に前例がある。
+- Produces: `REGISTRY["compensation"]`。`kind="rgb"`、`channels=3`、
+  `values_are_matrix=False`。
+
+**パラメータ**
+
+| name | type | 既定 | 内容 |
+| --- | --- | --- | --- |
+| `target` | select | 読み込み済みターゲットのid | どの画像を補償するか |
+| `linearizer` | select | `none` | `none` / `gamma` / `inverse_lut` |
+| `lut` | select | なし | `linearizer="inverse_lut"` のときのLUT id |
+| `output` | select | `linear` | `linear`（補償画像）/ `code`（投影コード値） |
+
+`ParamSpec` の `choices` は静的な `list[str]` である。ターゲットやLUTのidは
+実行時に増えるので、**`/api/views` を叩いた時点の一覧を返す形にするか、
+`type="select"` ではなく文字列入力にするかを決めること。** 前者ならレジストリの
+`params` が動的になり、`ViewSpec` が frozen であることと衝突する。
+**この衝突をどう解くかは実装者の判断とし、選んだ理由を報告に書くこと。**
+最小の解は `choices` を空にして文字列として受け、不正なidを `ViewNotApplicable`
+にすることである。
+
+**拒否する条件**
+
+- 行列がカメラ座標 → `ViewNotApplicable`（`surface` と同じ理由・同じ作法）
+- `target` が未指定または未知のid → `ViewNotApplicable`
+- `linearizer="inverse_lut"` かつ `lut` が未指定 → `ViewNotApplicable`
+
+- [ ] **Step 1: 失敗するテストを書く**
+
+検証すること:
+
+1. **CLIと同じ結果になること。** 合成した小さな行列とターゲットで、
+   ビューの出力が `generate_projection_image()` を直接呼んだ結果と一致する。
+   **これがこのタスクの中心的な主張である。** 補償の数式をビュー側に
+   再実装していないことを、この1件が担保する。
+2. `linearizer` を `none` / `gamma` で切り替えると出力が**変わる**こと。
+   同じになるなら線形化が効いていない。
+3. `output` を `linear` / `code` で切り替えると出力が変わること。
+4. カメラ座標の行列は `ViewNotApplicable`（router 経由で 400）。
+5. 未知の target id は `ViewNotApplicable`。
+6. `linearizer="inverse_lut"` で lut 未指定は `ViewNotApplicable`。
+7. `ViewResult.data` が `(H, W, 3) float32` で、`labels` が3要素であること。
+
+**判別力について（重要）**
+
+- 行列を単位行列に近い対称なものにしないこと。**計画B2で、`A` が全て `2·I`
+  だったために逆行列の転置が14テスト全部を通った。** 非対称な行列を使うこと。
+- ターゲット画像を単色にしないこと。単色だと画素の入れ替えが見えない。
+- ターゲットの縦横を違うサイズにすること。
+- テスト1の期待値は**手計算の定数にしない。** `generate_projection_image()` を
+  テスト内で直接呼んで突き合わせること。定数を書き間違える余地が無くなる。
+
+- [ ] **Step 2: 落ちることを確認**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_web_compensation_view.py -v`
+Expected: FAIL
+
+- [ ] **Step 3: 実装**
+
+`views/surface.py` の構造に倣う。`MatrixContext` から行列と有効領域を取り、
+ターゲットを `store.targets` から引き、`generate_projection_image()` を呼ぶ。
+
+**有効領域の外は NaN にすること。** `coef_tiles` と `surface` が同じ規約で
+マスクしており、計画Cで読み取り欄がこの規約に合わせてある。ここだけ 0 で
+埋めると、マスク色ではなく黒として描かれ、読み取り欄のマーカーとも食い違う。
+
+`vmin`/`vmax` は `surface` の折衷（`min(0.0, nanpercentile(finite, 1))` と
+`nanpercentile(finite, 99)`）を踏襲する。3チャンネルが1つのレンジを共有するため、
+床を浮かせると R/G/B から同じ定数を引くことになり露出ではなく彩度低下になる。
+
+- [ ] **Step 4: 通ることを確認**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_web_compensation_view.py -v`
+Expected: PASS
+
+- [ ] **Step 5: 変異試験**
+
+1. `generate_projection_image()` の戻り値2つ（linear と code）を入れ替える →
+   `output` のテストが落ちること
+2. 有効領域マスクを外す → マスクのテストが落ちること
+3. `linearizer` パラメータを無視して常に `none` を渡す → テスト2が落ちること
+4. ターゲット画像を転置して渡す → 縦横違いのテストが落ちること
+
+- [ ] **Step 6: コミット**
+
+```bash
+git add packages/web/yoshidacomp_web/views/compensation.py packages/web/yoshidacomp_web/views/__init__.py tests/test_web_compensation_view.py
+git commit -m "feat(web): ターゲットに行列を適用する compensation ビュー"
+```
+
+---
+
+### Task 4: LUTの読み込みとカーブ表示
+
+**Files:**
+- Create: `packages/web/yoshidacomp_web/lut.py`, `routers/lut.py`
+- Create: `packages/web/yoshidacomp_web/static/js/plot.js`
+- Modify: `store.py`, `app.py`, `static/index.html`, `static/js/main.js`, `static/js/api.js`
+- Test: `tests/test_web_lut.py`（新規）、`tests/js/frontend_harness.mjs`
+
+**Interfaces:**
+- Consumes: `yoshidacomp.compensation.inverse_lut.load_inverse_lut(path) -> InverseLut`。
+  **実装前に `InverseLut` の実フィールドを読むこと。** 計画のこの記述は要約である。
+  仕様書には `.npz` に `lut` `(3, 256) float32`、`t_grid` `(256,) float32`、
+  `meta`（JSON文字列）とある。
+- Produces:
+  - `POST /api/lut` — body `{"path": "..."}` → `{"id": "lut1", "meta": {...}}`
+  - `GET /api/lut/{id}/curve` → `{"t_grid": [...], "lut": [[...], [...], [...]], "meta": {...}}`
+  - `plot.js` が `drawLutCurve(canvas, curve, options)` を export する。
+
+**注意**
+
+`inverse_lut.py` は module scope で `scipy` と `cv2` を引き、撮影用の巨大な
+コードを抱えている。`torch` は引かないので Global Constraints には反しないが、
+**import コストは測って報告すること。** 無視できない場合は `load_inverse_lut` と
+`InverseLut` だけを torch-free / scipy-free な小さいモジュールへ切り出す案を
+報告に書くこと（このタスクでは実施しない）。
+
+- [ ] **Step 1: 失敗するテストを書く（サーバ側）**
+
+`tests/test_web_lut.py`。検証すること:
+
+1. 実際の `.npz` を書いて読み込ませ、`curve` が `t_grid` と `lut` を
+   保存した値のまま返すこと
+2. `lut` が `(3, 256)` の入れ子リストであること（`[R行, G行, B行]` の順）
+3. 存在しないパスは 404、空文字は 400、未知の id は 404
+4. **チャンネルの順序が入れ替わっていないこと。** 3チャンネルに
+   **明確に違う形**のカーブを入れること（例: R は直線、G は上に凸、
+   B は終端が 0.688 で止まる）。3本とも同じ形だと入れ替えが見えない。
+5. `meta` の JSON 文字列がパースされて辞書として返ること
+
+- [ ] **Step 2: 落ちることを確認**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_web_lut.py -v`
+Expected: FAIL
+
+- [ ] **Step 3: サーバ側の実装**
+
+`lut.py` に `LutContext`、`store.py` に `LutStore`（Task 2 で切り出した共通部分を使う）。
+
+- [ ] **Step 4: 通ることを確認 → コミット**
+
+```bash
+git commit -m "feat(web): 逆LUTを読み込みカーブを返す"
+```
+
+- [ ] **Step 5: フロントの失敗するテストを書く**
+
+ハーネスに追加する。既存の書式に合わせること。検証すること:
+
+1. LUTを読み込むとカーブ領域に3本の線が描かれること
+   （`plot.js` は canvas に描くので、**2Dコンテキストのスタブが
+   `moveTo`/`lineTo`/`stroke` の呼び出しを記録できるようにすること。**
+   スタブが記録できないなら、記録できるように直すこと。チェックを弱めない）
+2. **縦軸が 1.0 に固定されていないこと。** 終端が 0.688 のカーブを与えたとき、
+   縦軸の上限がデータ由来であること。これは仕様の明示要件である。
+3. 解析ガンマを重ねたとき、**LUTのカーブとは別の線として**描かれること
+4. DPR が 1 でないときにスケーリングが入ること
+   （`devicePixelRatio` を 2 にして `canvas.width` が CSS 幅の2倍になること）
+
+**判別力について**: 「3本描かれた」だけを数えると、3本とも同じ座標でも通る。
+**各線の座標が入力と対応していること**を検証すること。
+
+- [ ] **Step 6: 落ちることを確認 → 実装 → 通ることを確認**
+
+Run: `.venv/Scripts/python.exe -m pytest tests/test_web_frontend_js.py -v`
+
+- [ ] **Step 7: 変異エントリを足す**
+
+`_MUTATIONS` に2件。双方向の固定集合（`missing` と `unexpected`）を
+既存エントリと同じ形で書くこと。
+
+1. 縦軸を 1.0 固定にする → 上限のチェックが落ちること
+2. チャンネルの描画順を入れ替える → 座標対応のチェックが落ちること
+
+- [ ] **Step 8: 実物で見る**
+
+`uv run uvicorn yoshidacomp_web.app:app --port 8123` を起動し、
+実際の LUT（`data/` 配下の `.npz` を探すこと）を読み込んで
+**headless Chrome のスクリーンショット**を撮り、報告に貼ること。
+
+- 3本のカーブが区別できること
+- 終端が 1.0 未満のチャンネルがそのまま見えること
+- 解析ガンマと重ねて比較できること
+
+- [ ] **Step 9: コミット**
+
+```bash
+git add packages/web/yoshidacomp_web/static/ tests/js/frontend_harness.mjs tests/test_web_frontend_js.py
+git commit -m "feat(web): LUTカーブを解析ガンマと重ねて表示する"
+```
+
+---
+
+## Self-Review
+
+**Spec coverage:** 仕様書 §12 の項目7「ターゲット入力、線形化、LUTカーブ」を
+Task 2/3/4 が覆う。Task 1 は §8 が指定する `apply_inverse_gamma_correction` の
+利用と Global Constraints の torch 禁止が衝突するために必要になった前提整備。
+
+**スコープ外（計画B4へ）:** `gamut` ビュー（`categorical` kind のフロント実装が
+まるごと必要）、`POST /api/generate`（投影画像の保存とメタデータJSON）、
+カメラ座標行列のP2Cワープ（バックグラウンドジョブ）。
+
+**Placeholder scan:** Task 3 の `ParamSpec` の動的 choices 問題と、Task 1 の
+一致/不一致の分岐は、**意図的に実装者の判断へ委ねている**。どちらも実測か
+実物のシグネチャを見ないと決められず、計画側で決め打ちすると誤った前提を
+固定することになる。判断の理由を報告に書くことを求めている。
+
+**Type consistency:** `TargetContext` / `LutContext` / `MatrixContext` は
+いずれも store に id で入る。共通のストア実装を Task 2 で切り出し、Task 4 が
+それを使う。`ViewSpec` の `values_are_matrix` は計画Cで追加済みで、
+`compensation` は `False` を宣言する。
