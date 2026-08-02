@@ -159,12 +159,26 @@ def test_importing_pipeline_does_not_pull_torch() -> None:
     same way. Net: ``import yoshidacomp.compensation.pipeline`` went from
     ~9.4-13.0s to ~0.5s wall time.
 
-    This test covers *import* only. ``generate_projection_image`` still
-    pulls torch on its *first call* regardless of linearizer, because
-    ``calc_compensation_image`` (the compensation matrix multiply, called
-    unconditionally) needs it -- see
-    ``test_generate_projection_image_gamma_call_pulls_only_what_the_matrix_step_needs``
-    below, which covers that.
+    This test covers *import* only, and separately (Addendum 4 of the task
+    report) ``calc_compensation_image`` -- the compensation matrix multiply,
+    called unconditionally by ``generate_projection_image`` regardless of
+    linearizer -- was also switched to numpy, so
+    ``generate_projection_image``'s *first call* no longer pulls torch
+    either; see
+    ``test_generate_projection_image_first_call_pulls_no_torch`` below,
+    parametrized over both linearizers, which covers that (its docstring
+    also carries this history -- the two used to disagree on this point
+    because this docstring was not updated when that test's numeric switch
+    landed; do not let that happen again).
+
+    This does **not** mean ``pipeline.py`` as a whole is torch-free on
+    first call: ``prepare_target_image_for_compensation`` (a different
+    public function in this module) still calls ``geometry.warp``'s
+    ``invwarp_image``/``warp_image``, which still costs ~7s and initializes
+    CUDA on first use -- see that function's own docstring. No test in this
+    file covers that function; it is a known, intentionally unguarded gap
+    (the warp is genuine GPU-scale work, not something Task 1 measured or
+    decided to rewrite).
 
     Run in a subprocess: in-process, some other test collected earlier in
     the same session may have already imported these modules, which would
@@ -182,7 +196,11 @@ def test_importing_pipeline_does_not_pull_torch() -> None:
         "print('cv2=%s' % ('cv2' in mods))"
     )
     out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
     )
     reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
 
@@ -259,7 +277,11 @@ def test_generate_projection_image_first_call_pulls_no_torch(linearizer: str) ->
         "print('torch=%s' % ('torch' in mods))\n"
     )
     out = subprocess.run(
-        [sys.executable, "-c", code], capture_output=True, text=True, check=True
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
     )
     reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
 
@@ -267,3 +289,62 @@ def test_generate_projection_image_first_call_pulls_no_torch(linearizer: str) ->
     assert reported["psutil"] == "False", out.stdout
     assert reported["scipy"] == "False", out.stdout
     assert reported["torch"] == "False", out.stdout
+
+
+def test_prepare_target_image_for_compensation_still_pulls_torch() -> None:
+    """既知の状態を固定する: ``prepare_target_image_for_compensation`` の
+    初回呼び出しは torch を引く（``generate_projection_image`` とは違う）。
+
+    This is not a guard against a regression -- it is the opposite: a
+    pin on a **known, currently-accepted** cost, so that a future change
+    to this function (numpy rewrite, pre-warming, or simply someone
+    generalizing ``generate_projection_image``'s "torch-free" claim to all
+    of ``pipeline.py`` without checking) is forced to touch this test and
+    its docstring rather than silently drifting the way
+    ``test_importing_pipeline_does_not_pull_torch``'s docstring already did
+    once (see that test's history section above, and
+    ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md``,
+    Important 2).
+
+    ``target_image_space="projector"`` with ``warp_method="c2p"`` makes the
+    compensation space "camera" (see ``compensation_space_from_warp_method``),
+    so this reaches the ``invwarp_image`` branch. A nonexistent pixel-map
+    path is deliberate: the call is expected to fail (missing file /
+    missing GrayCode resolution) *after* torch has already been imported,
+    which is exactly what makes the measurement meaningful -- torch loads
+    before this function does anything else. The failure itself is not
+    asserted on since it is incidental to what this test checks; only that
+    it raises (so the call really executed) and what it left in
+    ``sys.modules``.
+
+    Run in a subprocess for the same reason as the tests above.
+    """
+    code = (
+        "import sys\n"
+        "import numpy as np\n"
+        "from yoshidacomp.compensation.pipeline import prepare_target_image_for_compensation\n"
+        "\n"
+        "try:\n"
+        "    prepare_target_image_for_compensation(\n"
+        "        np.zeros((4, 4, 3), dtype=np.uint8),\n"
+        "        'projector',\n"
+        "        'nonexistent_pixel_map.npy',\n"
+        "        4, 4, 4, 4,\n"
+        "        warp_method='c2p',\n"
+        "    )\n"
+        "except Exception:\n"
+        "    pass\n"
+        "else:\n"
+        "    raise AssertionError('expected this call to fail on a missing pixel map')\n"
+        "print('torch=%s' % ('torch' in sys.modules))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    )
+    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+    # This is the pinned KNOWN state, not a guarantee -- see the docstring.
+    assert reported["torch"] == "True", out.stdout

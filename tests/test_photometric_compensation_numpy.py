@@ -58,53 +58,11 @@ def _realistic_matrices(rng: np.random.Generator, height: int, width: int) -> np
     return matrices
 
 
-def _torch_calc_compensation_image(target_image, color_mixing_matrices, device, dtype, clip=True):
-    """Same computation as the pre-switch ``calc_compensation_image``, pinned
-    to *device* (bypassing its old auto-select) so CPU and CUDA can be
-    compared side by side against the same inputs.
-    """
-    import torch
-
-    height, width, _ = target_image.shape
-    target_dtype = target_image.dtype
-    if target_dtype == np.uint8:
-        norm_target_image = target_image.astype(np.float32) / 255.0
-    elif target_dtype == np.uint16:
-        norm_target_image = target_image.astype(np.float32) / 65535.0
-    else:
-        norm_target_image = target_image.astype(np.float32)
-
-    dev = torch.device(device)
-    norm_target_tensor = torch.from_numpy(norm_target_image).float().to(dev)
-    color_mixing_matrices_tensor = (
-        torch.from_numpy(np.ascontiguousarray(color_mixing_matrices))
-        .float()
-        .reshape(-1, color_mixing_matrices.shape[2], color_mixing_matrices.shape[3])
-        .to(dev)
-    )
-    num_pixels = height * width
-    norm_target_tensor = norm_target_tensor.reshape(num_pixels, 3)
-    bias = torch.ones((num_pixels, 1), device=dev, dtype=norm_target_tensor.dtype)
-    norm_target_tensor = torch.cat([norm_target_tensor, bias], dim=1)
-
-    compensation_tensor = torch.bmm(
-        norm_target_tensor.unsqueeze(1), color_mixing_matrices_tensor
-    ).squeeze(1)
-
-    if clip:
-        compensation_tensor = torch.clamp(compensation_tensor, 0.0, 1.0)
-    compensation_image = compensation_tensor.reshape(height, width, 3).cpu().numpy()
-
-    if dtype == np.uint8:
-        compensation_image = compensation_image * 255.0
-        compensation_image = np.floor(compensation_image + 0.5).astype(dtype)
-    elif dtype == np.uint16:
-        compensation_image = compensation_image * 65535.0
-        compensation_image = np.floor(compensation_image + 0.5).astype(dtype)
-    else:
-        compensation_image = compensation_image.astype(dtype)
-
-    return compensation_image
+# The torch reference implementation lives in tests/_torch_reference.py, not
+# here, so it has exactly one copy to keep in sync -- see that module's
+# docstring for why (a second, independently-drifting copy is exactly the
+# "I1" failure mode from the task report).
+from _torch_reference import torch_calc_compensation_image as _torch_calc_compensation_image
 
 
 def test_calc_compensation_image_matches_torch_byte_for_byte_uint8() -> None:
@@ -156,11 +114,25 @@ def test_calc_compensation_image_uint8_never_diverges_beyond_cudas_own_noise() -
     torch's own self-disagreement, or with different magnitudes.
 
     Frame size matches ``data/linear_pipeline_1080``'s real matrix
-    (1920x1080) because torch's CPU/CUDA divergence is rare enough (9 out
-    of 6,220,800 elements measured on that real data) that a small grid
-    usually finds zero disagreements at all -- which would make this test
-    unable to fail in the one way that matters. Runtime is small (a few
-    hundred ms of numpy plus a torch call on each backend).
+    (1920x1080) because torch's CPU/CUDA divergence is rare enough on real
+    data (measured, on that real matrix, as 9 mismatched elements out of
+    6,220,800 for one target and 2-3 for two others -- the count is a
+    property of the target, not the matrix; the *set-equality* property
+    this test asserts is what reproduces across targets, see
+    ``photometric_compensation.calc_compensation_image``'s docstring) that a
+    small grid usually finds zero disagreements at all -- which would make
+    this test unable to fail in the one way that matters. Runtime is small
+    (a few hundred ms of numpy plus a torch call on each backend).
+
+    **Coverage gap on a GPU-less machine: this test skips entirely**, so
+    the "identical positions" property -- the decisive one for the switch
+    decision -- goes unasserted there. The exposure is narrow:
+    ``test_calc_compensation_image_matches_torch_float32_for_the_record``
+    still exercises the exact-vs-torch-CPU element order and cast on every
+    machine (proven by mutation: reversing the summation order fails it),
+    so a structural bug (wrong element order, wrong axis) would still be
+    caught without CUDA -- only the CUDA-specific noise-floor property
+    would not be.
     """
     torch = pytest.importorskip("torch")
     if not torch.cuda.is_available():

@@ -202,7 +202,53 @@ def prepare_target_image_for_compensation(
     cam_height: int,
     warp_method: WarpMethod,
 ) -> np.ndarray:
-    """Convert the target image into the coordinate system used for compensation."""
+    """Convert the target image into the coordinate system used for compensation.
+
+    **This function still costs ~7s and initializes CUDA on first call, and
+    that is not fixed by Task 1's numpy switches.** When
+    ``target_image_space`` differs from the compensation space, this calls
+    ``invwarp_image``/``warp_image`` (``yoshidacomp.geometry.warp``), which
+    goes through GrayCode's ``PixelMapWarperTorch`` for a dense scattered
+    warp over ~2M points -- genuine GPU-scale work, unlike the twelve
+    multiply-adds per pixel :func:`generate_projection_image`'s matmul step
+    used to do. Measured in a fresh process: ``'torch' in sys.modules`` is
+    ``False`` after ``import yoshidacomp.compensation.pipeline`` and
+    ``True`` after the first call to *this* function -- torch imports
+    before the call even reaches a missing-pixel-map failure. This is
+    intentionally not rewritten to numpy or otherwise guarded: unlike
+    ``calc_compensation_image`` (Addendum 4 of the task report), the
+    warping workload plausibly justifies GPU batching, and this function
+    was not measured as part of Task 1's decision. Do not generalize
+    :func:`generate_projection_image`'s "torch-free end to end" claim (see
+    :func:`_linearize_gamma`'s docstring) to this function or to
+    ``pipeline.py`` as a whole -- they are not the same claim. If a future
+    task (plan B4: wiring the P2C warp into the web layer) calls this
+    function or ``geometry.warp`` directly from an interactive path, the
+    decision is pre-warming torch at process startup versus accepting a
+    ~7s stall on first use -- not "already solved" by this task.
+
+    このモジュールを import しただけでは torch を引かないが、この関数を
+    実際に呼ぶと約7秒かかりCUDAを初期化する。これはTask 1のnumpy化では
+    解決していない。``target_image_space`` が補償を行う座標系と異なる
+    場合、GrayCodeの ``PixelMapWarperTorch`` による約200万点の散在
+    ワープ（``invwarp_image``/``warp_image``、
+    ``yoshidacomp.geometry.warp``）を経由する -- これは本物のGPU規模の
+    処理であり、:func:`generate_projection_image` の行列積ステップ
+    （1画素12回の積和）とは異なる。実測: 新しいプロセスで
+    ``import yoshidacomp.compensation.pipeline`` の直後は
+    ``'torch' in sys.modules`` が ``False``、この関数を一度呼ぶと
+    ``True`` になる（pixel_map欠落エラーに到達する前にtorchが
+    importされる）。意図的にnumpy化・保護のいずれもしていない:
+    ``calc_compensation_image``（レポートAddendum 4）と異なり、ワープの
+    計算量はGPUバッチ処理を正当化しうる規模であり、この関数はTask 1の
+    判断の対象として測定していない。:func:`generate_projection_image`
+    の「torch-free end to end」という主張（:func:`_linearize_gamma` の
+    docstring参照）をこの関数や ``pipeline.py`` 全体へ一般化しないこと
+    -- 同じ主張ではない。将来のタスク（計画B4: P2Cワープをweb層へ配線）
+    がこの関数や ``geometry.warp`` を対話的な経路から直接呼ぶ場合、
+    判断すべきはプロセス起動時のtorch事前ウォームアップか初回利用時の
+    約7秒停止を許容するかであり、「Task 1で既に解決済み」ではない。
+    """
     compensation_space = compensation_space_from_warp_method(warp_method)
     if target_image_space == compensation_space:
         return target_image
@@ -306,10 +352,12 @@ def _apply_inverse_gamma_numpy(
       function could preserve that torch itself preserves across its own
       backends.
     - An exhaustive uint16 sweep (all 65536 values x 3 channels = 196608,
-      no current caller uses this dtype) found 1-LSB disagreements: 45/196608
-      brightening (gamma=1/2.2), 21/196608 darkening (gamma=2.2) -- both
-      real, if very small (~0.02%), effects of the same underlying 1-ULP
-      float32 gap landing on an integer rounding boundary.
+      no current caller uses this dtype) found 1-LSB disagreements against
+      torch-CUDA: 45/196608 brightening (gamma=1/2.2), 21/196608 darkening
+      (gamma=2.2); against torch-CPU: 6/196608 brightening, 9/196608
+      darkening. Both devices' counts are real, if very small (~0.005-0.02%),
+      effects of the same underlying 1-ULP float32 gap landing on an integer
+      rounding boundary.
 
     Because the dtype that decides real behavior (uint8) is exhaustively
     identical, and the dtype that isn't (float32) is off by less than torch
@@ -344,10 +392,11 @@ def _apply_inverse_gamma_numpy(
       実行したかに依存していた。torch自身が自分のバックエンド間で保てない
       ビット精度を、この関数が保つべき基準は存在しない。
     - uint16 を全数検査（65536値×3ch=196608、現行の呼び出し元は誰も
-      このdtypeを使わない）すると、1LSB の相違が明方向（gamma=1/2.2）
-      45/196608・暗方向（gamma=2.2）21/196608 件見つかった。いずれも
-      小さい（約0.02%）が、同じ1ULPのfloat32ギャップが整数丸め境界に
-      落ちた実在の効果である。
+      このdtypeを使わない）すると、torch-CUDA との相違は1LSBが
+      明方向（gamma=1/2.2）45/196608・暗方向（gamma=2.2）21/196608件、
+      torch-CPU との相違は明方向6/196608・暗方向9/196608件見つかった。
+      いずれのデバイスでも小さい（約0.005〜0.02%）が、同じ1ULPの
+      float32ギャップが整数丸め境界に落ちた実在の効果である。
 
     実際の挙動を決めるdtype（uint8）が全数一致し、一致しないdtype
     （float32）もtorch自身の自己不一致より小さいずれしかないため、
@@ -380,8 +429,25 @@ def _apply_inverse_gamma_numpy(
             ``1 / projector.gamma`` を渡す。
 
     Returns:
-        Array of the same dtype as *image*.
-        *image* と同じ dtype の配列。
+        Array of the same dtype as *image*, with one deliberate exception:
+        for float dtypes other than float32 (float64, float16, ...), torch's
+        ``apply_inverse_gamma_correction`` calls ``.float()`` unconditionally
+        and returns float32 regardless of the input's float dtype -- this
+        function does not replicate that, and instead genuinely preserves
+        the input dtype (float64 in, float64 out). Nothing in this codebase
+        passes anything but uint8, uint16, or float32 through this path, so
+        it is untested and arguably the more correct behavior, but it is a
+        real, intentional structural difference from what this function
+        otherwise ports faithfully.
+        *image* と同じ dtype の配列。ただし1つ意図的な例外がある:
+        float32以外のfloat dtype（float64、float16 等）について、torch版の
+        ``apply_inverse_gamma_correction`` は無条件に ``.float()`` を
+        呼ぶため入力のfloat dtypeに関わらずfloat32を返すが、この関数は
+        それを再現せず、入力dtypeを本当に保つ（float64入力→float64出力）。
+        このコードベースはuint8・uint16・float32以外をこの経路に渡さない
+        ため未検証だが、おそらくこちらの挙動の方が妥当である。とはいえ
+        他の点では忠実に移植したこの関数における、意図的で本物の構造差
+        である。
     """
     dtype = image.dtype
     if dtype == np.uint8:
@@ -395,6 +461,13 @@ def _apply_inverse_gamma_numpy(
     # matching torch's behaviour means propagating NaN rather than raising.
     with np.errstate(invalid="ignore"):
         corrected = np.power(normalized, np.float32(gamma), dtype=np.float32)
+    # The lower bound (0.0) is currently unreachable in production: the only
+    # caller, _linearize_gamma, only ever receives calc_compensation_image's
+    # already-clipped [0, 1] output (generate_projection_image rejects
+    # clip=False for any linearizer but "none"). Kept anyway because this
+    # function's own contract (see Args above) accepts negative input
+    # directly, and torch's version clips it too -- dead in this codebase
+    # today, not dead by this function's own documented interface.
     corrected = np.clip(corrected, 0.0, 1.0)
 
     if dtype == np.uint8:

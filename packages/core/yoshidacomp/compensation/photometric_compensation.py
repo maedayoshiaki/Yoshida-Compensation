@@ -40,9 +40,17 @@ def calc_compensation_image(
     This implementation matches torch-CPU byte-for-byte, exhaustively, on
     every input tested including the real 1920x1080 matrix in
     ``data/linear_pipeline_1080/``; it differs from torch-CUDA only at the
-    exact pixels (9 out of 6,220,800 on that same real matrix) where
-    torch-CUDA already differs from torch-CPU, by the same 1 count -- i.e.
-    never worse than torch's own cross-device noise floor. Per-frame numpy
+    exact pixels where torch-CUDA already differs from torch-CPU, by the
+    same 1 count -- i.e. never worse than torch's own cross-device noise
+    floor. **The count of differing pixels is a property of the target
+    image, not of the matrix** -- on that same real matrix, three
+    different random uint8 targets measured 9, 2, and 3 differing pixels
+    out of 6,220,800 respectively (a mismatch occurs only where a float32
+    result lands within one ULP of a `.5` quantization boundary, which
+    depends on the target). What reproduces across every target tested is
+    the *set equality* -- numpy's divergence from torch-CUDA is always
+    exactly torch-CUDA's divergence from torch-CPU, same positions, same
+    magnitude -- not any particular count. Per-frame numpy
     is slower than torch-CUDA once torch is already loaded and warm
     (measured ~0.22s vs ~0.08s for 1920x1080), but avoids torch's own
     ~7.1s first-import cost entirely, which is the actual bottleneck for
@@ -57,8 +65,15 @@ def calc_compensation_image(
     存在しなかった。この実装は torch-CPU と、``data/linear_pipeline_1080/``
     の実データを含むあらゆる検証入力でバイト単位・全数一致する。
     torch-CUDA との相違は、torch-CUDA が torch-CPU と既にずれている
-    画素（同じ実データで6,220,800画素中9画素）に限られ、そのずれ幅も
-    同じ1カウントを超えない（＝torch自身の機種間ノイズ床を超えない）。
+    画素に限られ、そのずれ幅も同じ1カウントを超えない（＝torch自身の
+    機種間ノイズ床を超えない）。**相違する画素数は行列ではなくターゲット
+    画像に依存する** -- 同じ実データの行列に対し、3種の異なるランダム
+    uint8ターゲットで6,220,800画素中それぞれ9・2・3画素が相違した
+    （相違は float32 の結果が `.5` 量子化境界の1ULP以内に落ちた場合のみ
+    起こり、これはターゲット次第）。どのターゲットでも再現するのは
+    *集合としての一致* -- numpyのtorch-CUDAからの相違は常に
+    torch-CUDAのtorch-CPUからの相違と完全に同じ位置・同じ大きさになる
+    ことであり、特定の画素数ではない。
     1フレームあたりの実行速度は、torch が既にロード・ウォームアップ済みの
     場合は numpy の方が torch-CUDA より遅い（1920x1080で実測約0.22秒 対
     約0.08秒）が、torch自身の初回import コスト（実測約7.1秒）を完全に
@@ -96,7 +111,39 @@ def calc_compensation_image(
         形状 ``(H, W, 3)`` で指定された *dtype* の補償画像。
         ``clip=False`` でない限り、スケーリング前に値は有効範囲 [0, 1]
         にクランプされる。
+
+    Raises:
+        ValueError: If *target_image* is not shape ``(H, W, 3)``, or
+            *color_mixing_matrices* is not shape ``(H, W, 4, 3)`` with the
+            same ``(H, W)`` as *target_image*. The torch implementation this
+            replaced validated shape implicitly (a mismatch raised inside
+            ``.view()``/``torch.bmm``); the numpy broadcast below does not
+            fail on its own for every mismatch (e.g. a degenerate ``(1, 1,
+            4, 3)`` matrix silently broadcasts over any target), so this
+            check restores that guarantee explicitly.
+            *target_image* が ``(H, W, 3)`` でない場合、または
+            *color_mixing_matrices* が *target_image* と同じ ``(H, W)`` の
+            ``(H, W, 4, 3)`` でない場合。これが置き換えたtorch実装は
+            形状不一致を暗黙に検証していた（``.view()``/``torch.bmm`` 内で
+            例外になる）。下の numpy ブロードキャストは全ての不一致で
+            自然に失敗するわけではない（例えば縮退した ``(1, 1, 4, 3)``
+            行列は任意のターゲットへ黙って broadcast される）ため、この
+            チェックで明示的に復元する。
     """
+    if target_image.ndim != 3 or target_image.shape[-1] != 3:
+        raise ValueError(
+            f"target_image must have shape (H, W, 3), got {target_image.shape}."
+        )
+    if (
+        color_mixing_matrices.shape[:2] != target_image.shape[:2]
+        or color_mixing_matrices.shape[2:] != (4, 3)
+    ):
+        raise ValueError(
+            "color_mixing_matrices must have shape (H, W, 4, 3) matching "
+            f"target_image's (H, W); got {color_mixing_matrices.shape} for "
+            f"target_image shape {target_image.shape}."
+        )
+
     # Normalize target image to [0, 1] range
     target_dtype = target_image.dtype
     if target_dtype == np.uint8:

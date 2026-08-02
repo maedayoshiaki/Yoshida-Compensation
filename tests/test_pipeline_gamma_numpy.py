@@ -239,27 +239,53 @@ def test_linearizers_gamma_matches_torch_byte_for_byte() -> None:
 
 
 def test_generate_projection_image_gamma_output_is_byte_identical_to_torch() -> None:
-    """CLI が実際に使う経路 (``generate_projection_image``, linearizer="gamma",
-    dtype=uint8) の出力が、torch を直接呼んだ場合とバイト単位で一致すること。
+    """``generate_projection_image`` (linearizer="gamma", dtype=uint8) の出力が、
+    行列積・ガンマ補正の両方をtorchで計算した場合とバイト単位で一致すること。
 
-    This is the end-to-end check the CLI scripts' output depends on:
-    ``examples/python/sample.py`` and
-    ``examples/python/rebuild_compensation_with_map.py`` both go through
-    exactly this function with ``linearizer="gamma"`` and the default
-    ``dtype=np.uint8``. A diverse (not flat/symmetric) target and matrix
-    are used so the compensation values feeding into the gamma step cover
-    many different code points, not just one.
+    **Both stages of the reference side are torch, not just the gamma
+    step.** An earlier version of this test built its "reference" by calling
+    the production ``calc_compensation_image`` directly for the matmul step
+    -- which was correct when this test was first written (Addendum 3,
+    while that function was still torch), but Addendum 4 switched
+    ``calc_compensation_image`` to numpy, silently turning the "reference"
+    into a call to *the same numpy code the test exists to check against
+    torch*. A reviewer caught this by deleting the compensation matmul's
+    entire bias row (a ~12-uint8-count shift on every pixel) and finding
+    this test stayed green -- see
+    ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md``, "I1",
+    for the full failure mode. The reference side now calls
+    ``_torch_reference.torch_calc_compensation_image`` (a device-pinned copy
+    of the pre-switch torch implementation, kept in exactly one place -- see
+    that module's docstring) followed by torch's
+    ``apply_inverse_gamma_correction``, so it is independent of both numpy
+    implementations under test.
+
+    This is *not* an end-to-end check of any actual CLI script's output:
+    neither ``examples/python/sample.py`` nor
+    ``examples/python/rebuild_compensation_with_map.py`` calls
+    ``generate_projection_image`` (checked directly -- ``sample.py`` calls
+    ``calc_compensation_image`` and ``apply_inverse_gamma_correction``
+    directly, bypassing ``pipeline.py``'s ``LINEARIZERS`` entirely; an
+    earlier version of this docstring claimed otherwise). It verifies that
+    ``generate_projection_image``'s own call path (matmul via numpy, then
+    gamma via numpy) reproduces what calling both steps via torch would have
+    produced -- i.e. that the switch changed no output, for whichever code
+    path *does* call this function
+    (``examples/python/rebuild_compensation_with_map.py`` does).
+
+    A diverse (not flat/symmetric) target and matrix are used so the
+    compensation values feeding into the gamma step cover many different
+    code points, not just one.
     """
     torch = pytest.importorskip("torch")
     from dataclasses import dataclass
 
+    from _torch_reference import torch_calc_compensation_image
     from yoshidacomp.compensation.color_mixing_matrix import (
         apply_inverse_gamma_correction,
     )
     from yoshidacomp.compensation.pipeline import generate_projection_image
-    from yoshidacomp.compensation.photometric_compensation import (
-        calc_compensation_image,
-    )
+    from yoshidacomp.compensation.projection_region import mask_to_active_region
 
     @dataclass(frozen=True)
     class Projector:
@@ -293,17 +319,18 @@ def test_generate_projection_image_gamma_output_is_byte_identical_to_torch() -> 
     )
 
     # Independently reconstruct what the pre-switch torch path would have
-    # produced: same compensation step, then the torch gamma correction
-    # directly (device="cpu" -- uint8 already measured identical on CUDA
-    # too, see test_gamma_numpy_matches_torch_byte_for_byte_on_uint8).
-    compensation = calc_compensation_image(
-        target_image=target.astype(np.float32) / 255.0,
-        color_mixing_matrices=matrices,
+    # produced: the *torch* compensation step (not the numpy one under
+    # test), then the torch gamma correction (device="cpu" -- uint8 already
+    # measured identical on CUDA too, see
+    # test_gamma_numpy_matches_torch_byte_for_byte_on_uint8 and
+    # tests/test_photometric_compensation_numpy.py).
+    compensation = torch_calc_compensation_image(
+        target.astype(np.float32) / 255.0,
+        matrices,
+        device="cpu",
         dtype=np.uint8,
         clip=True,
     )
-    from yoshidacomp.compensation.projection_region import mask_to_active_region
-
     compensation = mask_to_active_region(compensation, (0, 0, 16, 16))
     reference_codes = np.asarray(
         apply_inverse_gamma_correction(
