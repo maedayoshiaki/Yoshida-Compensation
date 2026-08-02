@@ -98,6 +98,13 @@ def _listing(directory: Path) -> list[str]:
     says so when it is selected ("could not read ... as an image") instead of
     disappearing from a directory the user can see in Explorer. Silently
     omitting an entry is the failure this repository keeps closing elsewhere.
+
+    Pinned by ``test_an_unreadable_file_stays_in_the_listing_and_says_why_when_selected``,
+    named here because for one review round this paragraph was the only thing
+    saying it: the filter could be added back with the whole suite green, both
+    by decoding each candidate and by probing reader availability without
+    decoding at all. The test asserts the listing's *contents* rather than the
+    decode count, since the second of those never calls ``cv2.imread``.
     """
     return [
         name

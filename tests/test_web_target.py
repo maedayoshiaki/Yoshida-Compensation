@@ -153,6 +153,69 @@ def test_directory_listing_is_sorted_even_when_the_filesystem_already_sorts_it(
     assert response.json()["meta"]["images"] == names
 
 
+def test_an_unreadable_file_stays_in_the_listing_and_says_why_when_selected(
+    tmp_path,
+) -> None:
+    """A file the decoder cannot read must not vanish from the directory.
+
+    ``pipeline.load_target_images`` drops an entry ``cv2.imread`` returns
+    ``None`` for, silently. The web layer stopped using it when the listing
+    became name-only (see ``target.py::_listing``), and that changed this
+    behaviour deliberately: a file the user can see in Explorer now stays in
+    the picker and answers "could not read ... as an image" when chosen,
+    rather than disappearing with no message anywhere. Silently omitting an
+    entry is the failure class this repository keeps closing; the change was
+    documented and, until this test, pinned by nothing -- ``_listing`` could
+    have been given the filter back with all 292 tests green (measured, both
+    with a decode call and with a reader-availability probe that never
+    decodes).
+
+    ``test_corrupt_image_file_is_400_with_a_readable_message`` above covers
+    only the single-file path, which never consults a listing at all.
+
+    The entry *after* the unreadable one is asserted too, and that is the half
+    a listing-length check would miss: dropping the broken file does not merely
+    shorten the list, it renumbers everything past it, so index 2 would come
+    back as ``c_good.png``'s neighbour or as "out of range" while the picker's
+    labels still said otherwise -- the dropdown naming one image and the server
+    loading another.
+
+    復号できないファイルを一覧から黙って落とさない。選んだときに理由を言う。
+    落とすと**後ろの index が全部ずれる**ので、長さだけを見るテストでは
+    「一覧の見出しと実際に読まれる画像が食い違う」ほうを取り逃がす。
+    """
+    targets.clear()
+    directory = tmp_path / "targets"
+    directory.mkdir()
+    _write_image(directory / "a_good.png", _HEIGHT, _WIDTH, seed=1)
+    # Right extension, contents ``cv2.imread`` cannot decode -- the same
+    # fixture the single-file test uses, placed inside a directory.
+    (directory / "b_broken.png").write_bytes(b"this is not actually a png file")
+    third_height, third_width = _HEIGHT + 2, _WIDTH + 3
+    _write_image(directory / "c_good.png", third_height, third_width, seed=2)
+
+    client = TestClient(create_app())
+    listing = client.post("/api/target", json={"path": str(directory)})
+    assert listing.status_code == 200, listing.text
+    assert listing.json()["meta"]["images"] == [
+        "a_good.png", "b_broken.png", "c_good.png"
+    ]
+
+    # Selecting it is refused, and the message names the file and the reason.
+    refused = client.post("/api/target", json={"path": str(directory), "index": 1})
+    assert refused.status_code == 400, refused.text
+    detail = refused.json()["detail"]
+    assert "b_broken.png" in detail
+    assert "could not read" in detail.lower()
+    assert "out of range" not in detail.lower()  # not the index-bounds branch
+
+    # And the indices past it are unshifted: index 2 is still c_good.png.
+    third = client.post("/api/target", json={"path": str(directory), "index": 2})
+    assert third.status_code == 200, third.text
+    assert third.json()["meta"]["index"] == 2
+    assert third.json()["meta"]["shape"] == [third_height, third_width, 3]
+
+
 def test_directory_index_selects_a_specific_image(tmp_path) -> None:
     """``index`` must actually change which image is selected, not just be echoed.
 
