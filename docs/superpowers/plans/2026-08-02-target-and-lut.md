@@ -599,3 +599,97 @@ Task 2/3/4 が覆う。Task 1 は §8 が指定していた `apply_inverse_gamma
 いずれも store に id で入る。共通のストア実装を Task 2 で切り出し、Task 4 が
 それを使う。`ViewSpec` の `values_are_matrix` は計画Cで追加済みで、
 `compensation` は `False` を宣言する。
+
+---
+
+## 完了記録と申し送り
+
+**ブランチ**: `feature/target-and-lut`（`main` d682917 から21コミット）
+**テスト**: 196 → **293 passed**（うちJSハーネス132チェック / 7シナリオ）
+
+### ユーザの必要最低限要件が揃った
+
+| 要件 | 実現 |
+| --- | --- |
+| 画像を受け付けて投影画像を生成 | Task 2（`POST /api/target`）+ Task 3（`compensation` ビュー） |
+| ガンマ補正（LUT対応） | Task 1（線形化レジストリ）+ Task 4（`POST /api/lut`） |
+| LUTカーブをGUIで見る | Task 4（`plot.js`、縦軸はデータ由来） |
+
+補償ビューが**CLIと同じ関数を通る**ことはテスト1件が担保する。
+`calc_compensation_image` のバイアス項を削除しても23件全部が緑のままであることを
+レビューが確認しており、これは両辺が一緒に動く＝ビュー側に独立した補償演算が
+残っていないことの証明である。
+
+### Task 1 は前提整備のはずが性能の本題だった
+
+| | 元 | 現在 |
+| --- | ---: | ---: |
+| `import pipeline` | 9.4〜13.0 s | **0.29 s** |
+| `generate_projection_image` 初回 | 7.94 s | **0.015 s** |
+
+torch を4箇所（`pipeline` / `photometric_compensation` / `warp` / `inverse_lut`の scipy）
+から外し、`_linearize_gamma` と `calc_compensation_image` を numpy 化した。
+
+**判断は測定で決めた。** 当初「numpy に置き換える」つもりだったが、float32 では
+一致しない（CUDA 774/12003、CPU 222/12003、最大 1 ULP）。しかし
+**torch自身の CPU と CUDA が同じ幅で食い違う**ので、保存すべき「torch の答え」は
+存在しない。実データ622万画素の uint8 で:
+
+| 比較 | 不一致 |
+| --- | ---: |
+| numpy vs torch-CPU | **0** |
+| numpy vs torch-CUDA | 9 |
+| torch-CUDA vs torch-CPU（ノイズ床） | **同じ9個、位置も大きさも一致** |
+
+代償は1フレーム +0.15秒（numpy 0.22s vs CUDA 0.08s）。7.1秒の import を
+1回避けるのに十分見合う。
+
+### 残る torch 依存（計画B4への申し送り）
+
+`pipeline.prepare_target_image_for_compensation` は `geometry.warp` 経由で
+**初回呼び出しに約7秒**かかる。GrayCode の `PixelMapWarperTorch` による
+2M点の散布ワープであり、12回の積和とは規模が違うので意図的に未対応。
+**B4 がこの経路をweb層へ配線する際に、起動時の事前ウォームアップか
+停止許容かを判断すること。**「もう解決済み」ではない。
+
+### 「落ちないテスト」がこのブランチで7件（累計22件）
+
+| # | 場所 | 通ってしまった誤実装 |
+| --- | --- | --- |
+| 13 | 報告が「CLI出力の保証」と名指ししたテスト | 参照側が numpy を呼ぶよう漂流。バイアス行削除で6/6緑 |
+| 14-17 | Task 2 の4件 | NTFS が既にソート済みで返すためソート削除で11/11緑、ほか |
+| 18 | Task 4 のガンマ | 実configのγが2.2なので2.2ハードコードで19/19緑（実装者が自分で発見） |
+| 19 | ローダのフェッチ抑止 | 行列未読込のシナリオなので常に0。両ローダに再描画を足しても12/12緑 |
+| 20 | `loadInverseLut` の順序保証 | 散文のみ。id を先に公開しても12/12緑 |
+| 21 | 仕様 §8 のガンマ既定 | staleness を直した同じ段落の隣の文が偽のまま残った |
+| 22 | 復号できないファイルの一覧残留 | 散文のみ。除外に戻しても292/292緑 |
+
+**22件目が最も示唆的である。** I2（散文だけの保証）を直したのと**同じ修正ウェーブ**が、
+構造的に同一の欠陥を再導入した。この欠陥は「最後に書き留めて信じたもの」に付く。
+同じ種類の欠陥への修正であることも例外にならない。
+
+18件目は実装者が自分で見つけた。**期待値が実環境の既定値と一致するときは要注意**
+という形で、レビュー側にも「既定値と一致する期待値を特に探せ」と指示すべきである。
+
+### 計画・仕様の記述の誤り（測って判明したもの）
+
+1. 仕様 §8 が `color_mixing_matrix.apply_inverse_gamma_correction` を使えと指示。
+   Global Constraints の torch 禁止と衝突しており、従うと web層へ torch が戻る。
+2. 「gamma を省略すると2.2が適用され暗くなる」は偽。commit `9dca136` 以降
+   必須引数で、省略は `TypeError`。**防御的な `gamma or 2.2` を足さないこと。**
+3. 「有効領域外の75%は NaN」は偽（計画C由来）。非有限値は0個で、
+   領域外74.86%は全て有限。NaN は `coef_tiles` が描画時に書いている。
+4. `GET /api/target/{id}/meta` に `デコード方式` を含めた契約は実現不能。
+   `decode_target` は `mode`/`gamma` を必要とし、それを選ぶのは Task 3 である。
+5. ターゲット読み込みUIをどの Task の手順も作っていなかった。
+   File Structure 表は `main.js` に割り当てていたが手順が欠けていた。
+
+### 申し送り
+
+- `plot.js` の `vMin` 下限は未検証（負値サンプルのLUTフィクスチャが要る）。
+- `_IdStore` は設計上無制限。eviction を足すとスレッド安全性テストの
+  「発行した id は必ず解決する」と衝突する。
+- `index.html` の `path-input` はマシン固有パスのまま（本ブランチ以前から）。
+  ファイル内コメントで「一貫性の回復」として戻さないよう警告してある。
+- `examples/python/sample.py` は `LINEARIZERS` を通らず
+  `color_mixing_matrix.apply_inverse_gamma_correction` を直接呼ぶ。
