@@ -411,6 +411,12 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     # 共有するため、床を浮かせると露出ではなく彩度が変わる。``clip=True``
     # である以上 ``min`` は今日どの要求でも 0 になるが、``clip=False`` を
     # 使う日（計画中の ``gamut``）に備えて 0 の直書きにはしない。
+    # No test holds this to anything: every request this view accepts today
+    # produces `low >= 0`, so `vmin = 0.0` passes all 26 of
+    # `tests/test_web_compensation_view.py` (measured, task-4 final review
+    # Minor 1). Kept anyway, and recorded rather than pinned -- the reason is
+    # in the comment above, and a fixture that made it discriminating would
+    # have to be a request this view does not currently offer.
     vmin = min(0.0, low)
     return ViewResult(data=data, vmin=vmin, vmax=max(high, 1e-6), labels=LABELS)
 

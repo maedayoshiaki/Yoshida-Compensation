@@ -80,11 +80,32 @@
            読み込むと返ってきたidを自分でパラメータ欄へ書き込む（利用者に
            コピーさせない）。ツールバーではなくサイドバーに置くのは、あちらが
            既に520pxの行列パス欄を持っており、同じ形の欄が3つ並ぶと通常の
-           窓幅で折り返すためである。 -->
+           窓幅で折り返すためである。
+
+           Both boxes start empty. They shipped pre-filled with
+           `data/comp_test_targets_square` and
+           `data/full_recalibration_20260730_iso400/inverse_lut/inverse_lut.npz`
+           -- two directories that exist on the machine this was written on and
+           in no other checkout, since `data/` is not under version control. On
+           anyone else's clone the first click on either button was a 404 about
+           a path they never typed. The placeholders say what kind of thing goes
+           in each box, which is the part that generalises; a path that names one
+           person's captures does not.
+
+           (`path-input` in the toolbar has the same property and is deliberately
+           left as it is: it predates this branch and is not part of its diff.
+           Do not "restore consistency" by putting machine paths back here.)
+
+           2つの欄は空で始まる。以前は上記2つの実パスが入っていたが、`data/` は
+           git 管理外なので他のチェックアウトには存在せず、初回クリックが
+           「打っていないパス」の404になっていた。プレースホルダは「何を入れる
+           欄か」を述べており、そちらが一般化する部分である。
+           （ツールバーの `path-input` も同じ性質を持つが、本ブランチ以前から
+           あるものなので触っていない。ここへ実パスを戻して「揃える」ことは
+           しないこと。） -->
       <div class="group">
         <label class="lbl" for="target-path">ターゲット画像</label>
         <input id="target-path" class="mono loader" type="text" spellcheck="false"
-               value="data/comp_test_targets_square"
                placeholder="画像ファイル または画像を並べたディレクトリ" />
         <div class="group inline">
           <button id="btn-load-target">読み込み</button>
@@ -97,7 +118,6 @@
       <div class="group">
         <label class="lbl" for="lut-path">逆LUT (.npz)</label>
         <input id="lut-path" class="mono loader" type="text" spellcheck="false"
-               value="data/full_recalibration_20260730_iso400/inverse_lut/inverse_lut.npz"
                placeholder="inverse_lut.npz のパス" />
         <div class="group inline">
           <button id="btn-load-lut">読み込み</button>

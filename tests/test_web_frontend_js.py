@@ -1231,6 +1231,121 @@ _MUTATIONS = [
         ("choosing another image re-fetches that index and re-fills the id",),
         id="the_image_picker_always_reloads_the_first_image",
     ),
+    # ---- a loader that renders on its own
+    #
+    # "They stage; they do not render" is the one rule of the server-parameter
+    # group (see the note above `refreshParamsPending`), and until the `target`
+    # and `lut` scenarios loaded a matrix these two entries could not exist: with
+    # `state.matrixId` null `reload()` returns at its first line, so the loaders
+    # could have called `applyServerParams()` on every load with the whole suite
+    # green. That is what the review measured -- 12/12 in both scenarios with the
+    # call inserted -- and it is why those scenarios now start with `clickLoad`.
+    #
+    # The cost is the point. Loading a target and then a LUT would run two extra
+    # full compensation renders of the 1080p matrix (~740 ms and ~390 MB peak
+    # each), both discarded afterwards by `reqId`, so the screen shows the right
+    # picture and nothing on it says the machine did the work three times.
+    #
+    # 「読み込みは置くだけで描かない」規則の変異。行列を読まないシナリオでは
+    # `reload()` が先頭で打ち切るため、この2件はそもそも成立しなかった
+    # （レビューが実測: 挿入しても両シナリオ 12/12）。だから両シナリオは
+    # `clickLoad` から始まる。
+    pytest.param(
+        "target",
+        [(
+            "js/main.js",
+            '    setServerParam("target", res.id);',
+            '    setServerParam("target", res.id);\n    applyServerParams();',
+        )],
+        ("loading a target does not fetch the view on its own",),
+        id="the_target_loader_renders_on_load",
+    ),
+    pytest.param(
+        "lut",
+        [(
+            "js/main.js",
+            '    setServerParam("lut", res.id);',
+            '    setServerParam("lut", res.id);\n    applyServerParams();',
+        )],
+        ("loading a LUT does not fetch the view on its own",),
+        id="the_lut_loader_renders_on_load",
+    ),
+    # ---- the LUT id published before its curve is in hand
+    #
+    # `loadInverseLut` issues two requests and publishes nothing until both have
+    # returned. That was stated in a comment and asserted nowhere: the fake
+    # server had no LUT whose POST succeeded and whose curve did not, so the two
+    # orders were indistinguishable and moving the assignments up left the
+    # scenario at 12/12 (measured). `LUTS["data/curveless.npz"]` exists to make
+    # the state reachable.
+    #
+    # What the order prevents is not an exception -- both builds show the same
+    # error sentence -- but a disagreement: the LUT ID box and `state.lutId`
+    # naming LUT B while the canvas still holds LUT A's curves. Press 適用 and
+    # the compensation is computed with B against a plot of A, which is the
+    # "the heading and the numbers describe different things" failure this
+    # branch has closed everywhere else.
+    #
+    # 公開順の変異。POSTは成功しcurveだけが失敗するLUTが無かったため、順序を
+    # 入れ替えても12/12だった（実測）。防いでいるのは例外ではなく食い違いで
+    # ある——欄と `state.lutId` は新しいLUTを名乗り、canvas には前のLUTが残る。
+    pytest.param(
+        "lut",
+        [(
+            "js/main.js",
+            """    const res = await loadLut(path);
+    const curve = await fetchLutCurve(res.id);
+    state.lutId = res.id;
+    state.lutCurve = curve;
+    setServerParam("lut", res.id);""",
+            """    const res = await loadLut(path);
+    state.lutId = res.id;
+    setServerParam("lut", res.id);
+    const curve = await fetchLutCurve(res.id);
+    state.lutCurve = curve;""",
+        )],
+        ("a LUT whose curve could not be fetched is not named as loaded",),
+        id="the_lut_id_is_published_before_its_curve",
+    ),
+    # ---- the three info lines, which nothing read until the final fix wave
+    #
+    # All three are text beside a control, so none of them can break anything:
+    # the id still reaches the parameter box, the curve is still drawn at the
+    # right coordinates, and the picture is still correct. What is lost is the
+    # page's account of *what it is showing* -- the image's size, which LUT
+    # this is and how it was measured, and which exponent the dashed line is.
+    # 3行とも表示だけなので壊れても絵は正しいままで、失われるのは「いま何を
+    # 見ているか」の説明である。
+    pytest.param(
+        "target",
+        [(
+            "js/main.js",
+            '$("target-info").textContent = `${res.id} / ${width}×${height}`;',
+            '$("target-info").textContent = `${res.id} / ${height}×${width}`;',
+        )],
+        ("the target info line names the id and the image's width x height",),
+        id="the_target_info_line_swaps_width_and_height",
+    ),
+    pytest.param(
+        "lut",
+        [(
+            "js/main.js",
+            '$("lut-info").textContent = `${res.id} / ${channels}×${samples} / ${source}`;',
+            '$("lut-info").textContent = "";',
+        )],
+        ("the LUT info line names the id, the table's shape and its source",),
+        id="the_lut_info_line_says_nothing",
+    ),
+    pytest.param(
+        "lut",
+        [(
+            "js/main.js",
+            '$("lut-gamma-value").textContent = `γ=${curve.gamma}`;',
+            '$("lut-gamma-value").textContent = "γ=2.2";',
+        )],
+        ("the analytic gamma's exponent is shown, and it is the server's",),
+        id="the_gamma_legend_hardcodes_the_usual_exponent",
+    ),
 ]
 
 

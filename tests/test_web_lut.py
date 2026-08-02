@@ -225,6 +225,12 @@ def test_post_reports_the_path_and_shape(tmp_path) -> None:
     assert body["id"] == body["meta"]["id"]
     assert body["meta"]["path"] == str(path)
     assert body["meta"]["shape"] == [3, len(_T_GRID)]
+    # This one pins the field's *presence*, not its value, and is kept knowing
+    # that: ``save_inverse_lut`` writes float32 and ``load_inverse_lut`` reads
+    # float32, so no fixture this loader accepts can make it say anything else
+    # (task-4 final review, Minor 13). What it still catches is the key going
+    # missing or being renamed -- the meta is what the sidebar's info line and
+    # any future caller read.
     assert body["meta"]["dtype"] == "float32"
 
 
@@ -427,6 +433,14 @@ def test_the_real_measured_luts_load_and_keep_their_sub_unit_endpoints() -> None
     終端は 0.813 / 0.876 / 0.751 であり 1.0 ではない。この事実がこのタスクの
     プロットの縦軸を決めているので、ファイルが在る環境ではそれを確認する
     （このリポジトリの ``data/`` は git 管理外なので、無ければ skip）。
+
+    その3つの値を名指しで固定する。当初は ``0 < end < 1`` しか見ておらず、
+    docstring が挙げる数値のどれも固定していなかった。``data/`` 配下の実測LUT
+    15本のうち **9本は終端がちょうど 1.0** であり（レビューが全走査して確認）、
+    既定パスがそちら側のファイルを指すよう変わればこのテストは skip も fail も
+    せずに静かに意味を失う——`plot.js` の縦軸の根拠として引用しているのは
+    「1.0 未満で、しかも3チャンネルとも違う」という**この**ファイルの性質で
+    あって、「1.0 未満のLUTが世の中にある」ではない。
     """
     from pathlib import Path
 
@@ -450,5 +464,13 @@ def test_the_real_measured_luts_load_and_keep_their_sub_unit_endpoints() -> None
     assert len(payload["lut"]) == 3
     assert len(payload["t_grid"]) == len(payload["lut"][0])
     ends = [row[-1] for row in payload["lut"]]
+    # The numbers this file is cited for, to 3 decimals -- the same ones
+    # ``static/js/plot.js`` and this module's docstring quote. float32 samples
+    # arriving through JSON, so an exact comparison would be about the codec
+    # rather than about the file.
+    assert [round(end, 3) for end in ends] == [0.813, 0.876, 0.751], ends
+    # And the property those three have that the plot depends on, stated as a
+    # property: below 1.0, and different from one another.
     assert all(0.0 < end < 1.0 for end in ends), ends
+    assert len(set(round(end, 3) for end in ends)) == 3, ends
     assert payload["meta"]["source"] == "channel_ramp"

@@ -172,8 +172,22 @@ const state = {
   targetMeta: null,   // the POST /api/target meta: path, images, index, shape
   lutId: null,
   lutCurve: null,     // the GET /api/lut/{id}/curve body, kept for redraws
-  lutPlot: null,      // what drawLutCurve last drew: the mapping, for tests
 };
+
+// What `drawLutCurve` last returned: the data rectangle and the mapping from
+// LUT values into it.
+//
+// Not in `state`. Nothing in this file reads it -- the plot is redrawn from
+// `state.lutCurve`, never from this -- and its only consumer is
+// tests/js/frontend_harness.mjs, which needs the mapping to say *where* a
+// value should have been drawn. `state` is what the viewer runs on, so a
+// field there that no code path reads is an invitation to wire something to
+// it; the automation handle `window.__viewer` is already the declared place
+// for things that exist for a driver rather than for the page.
+// `state` には置かない。このファイルのどこもこれを読まない（描き直しは
+// `state.lutCurve` から行う）。読み手はハーネスだけであり、そういうものの
+// 置き場は既に `window.__viewer` と決まっている。
+let lastLutPlot = null;
 
 // Which runtime-id parameter each loader fills. Read by buildServerParams so a
 // view switch does not throw away an id that is still loaded.
@@ -1112,7 +1126,7 @@ async function loadInverseLut() {
 function redrawLutCurve() {
   if (!state.lutCurve) return;
   const overlay = $("lut-gamma-overlay").checked;
-  state.lutPlot = drawLutCurve($("lut-curve"), state.lutCurve, {
+  lastLutPlot = drawLutCurve($("lut-curve"), state.lutCurve, {
     gamma: overlay ? state.lutCurve.gamma : null,
   });
 }
@@ -1600,7 +1614,13 @@ async function main() {
   // Debug/automation handle. The smoke test and any CDP-driven measurement need
   // to reach the views without going through synthetic input events.
   // スモークテストや自動計測から views へ触るためのハンドル。
-  window.__viewer = { state, views, display, applyDisplay, reload };
+  // `lutPlot` is a getter, not a copy: it is read after a redraw the driver
+  // itself triggered, and a snapshot taken here would describe the first draw
+  // forever.
+  window.__viewer = {
+    state, views, display, applyDisplay, reload,
+    get lutPlot() { return lastLutPlot; },
+  };
 
   // Derive the legend swatch from the shader's own mask colour rather than
   // restating it in CSS. See NAN_COLOR in glview.js.

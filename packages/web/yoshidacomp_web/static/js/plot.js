@@ -163,6 +163,24 @@ export function drawLutCurve(canvas, curve, options = {}) {
   // カーブが実測の範囲を超える所では図の上へ抜けるが、それがその差の正直な絵
   // である。
   const { lo, hi } = extent(rows);
+  // `Math.min(0, lo)` and not `0`: the axis always includes 0, because 0 is
+  // "no drive" and a curve's distance from it is what is being read, but a LUT
+  // holding negative values must not have them drawn off the bottom of the
+  // frame with nothing to say so. `lut.py::_validate` refuses a non-finite LUT
+  // and a mis-shaped one; it does not require [0, 1], so a negative sample
+  // loads.
+  //
+  // No test holds this to anything, and that is recorded rather than fixed:
+  // every fixture LUT starts at exactly 0, so the harness's
+  // `closeEnough(plot.vMin, Math.min(0, fixtureMin))` computes 0 either way and
+  // `const vMin = 0;` passes it (measured, task-4 final review Minor 2). The
+  // *upper* bound is a real guard -- `lut_plot_axis_pinned_to_one` fails its
+  // named check. Discriminating the lower one needs a fixture LUT with a
+  // negative sample, which is a physically meaningless file this loader
+  // nonetheless accepts.
+  // `0` ではなく `Math.min(0, lo)` にしてある理由と、それを検証しているものが
+  // 無いことの両方をここに書いておく。フィクスチャの最小値が 0 ちょうどなので
+  // 下端のチェックは何も述べていない（上端は本物のガード）。
   const vMin = Math.min(0, Number.isFinite(lo) ? lo : 0);
   const vMaxRaw = Number.isFinite(hi) ? hi : 1;
   const vMax = vMaxRaw > vMin ? vMaxRaw : vMin + 1;

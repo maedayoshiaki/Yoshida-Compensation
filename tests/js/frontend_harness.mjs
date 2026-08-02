@@ -773,6 +773,9 @@ const TARGETS = {
 // バックスラッシュのエスケープが見えて区別できる。
 const TARGET_404_DETAIL = 'no image at "data/missing.png"';
 const LUT_404_DETAIL = 'no inverse LUT at "data/missing.npz"';
+// The failure of the *second* request of a load, after the first has already
+// succeeded. Also quoted, for the same reason as the two above.
+const LUT_CURVE_FAILURE_DETAIL = 'could not read the curve for "lut_curveless"';
 
 // The LUT fixture: three curves with three different shapes and three
 // different endpoints, none of them 1.0.
@@ -803,6 +806,28 @@ const LUT_META = { source: "channel_ramp", trust_low: 5, trust_high: 245 };
 const LUT_GAMMA = 1.9;
 const LUTS = {
   "data/inverse_lut.npz": { key: "measured", rows: LUT_ROWS },
+  // A LUT whose POST succeeds and whose curve fetch does not.
+  //
+  // `loadInverseLut` publishes `state.lutId` and the LUT ID box only *after*
+  // `GET /api/lut/{id}/curve` has returned, and said so in a comment that
+  // nothing held it to: with only the entry above, a registered id always had
+  // a curve and an unregistered path failed at the POST, so the two orders
+  // were indistinguishable. Moving both assignments above the curve fetch left
+  // all twelve checks in the `lut` scenario passing (measured).
+  //
+  // The state is not exotic -- the server restarted between the two calls, a
+  // proxy dropped the second, validation was added to the curve endpoint
+  // later. What the ordering prevents is the LUT ID box and `state.lutId`
+  // naming LUT B while the canvas still shows LUT A's curves: press 適用 and
+  // the compensation is computed from a LUT the plot beside it does not
+  // describe.
+  //
+  // POST は成功するが curve の取得だけが失敗するLUT。`loadInverseLut` が
+  // 「カーブが手元に来てからIDを公開する」ことを述べていたのはコメントだけで、
+  // この状態を作れるフィクスチャが無かったため何も検証されていなかった
+  // （順序を入れ替えても12件全部通ることを実測）。順序が逆だと、欄と
+  // `state.lutId` は新しいLUTを名乗り canvas には前のLUTのカーブが残る。
+  "data/curveless.npz": { key: "curveless", rows: LUT_ROWS, curveStatus: 500 },
 };
 
 const targetPostLog = [];   // every POST /api/target body, in order
@@ -903,9 +928,14 @@ globalThis.fetch = async (url, options) => {
         status: 404, headers: { "content-type": "application/json" },
       });
     }
+    // A registered LUT whose curve cannot be produced -- see `LUTS`.
+    if (entry.curveStatus) {
+      return new Response(JSON.stringify({ detail: LUT_CURVE_FAILURE_DETAIL }), {
+        status: entry.curveStatus, headers: { "content-type": "application/json" },
+      });
+    }
     return new Response(JSON.stringify({
       t_grid: LUT_T_GRID, lut: entry.rows, meta: LUT_META, gamma: LUT_GAMMA,
-      path: "data/inverse_lut.npz",
     }), { headers: { "content-type": "application/json" } });
   }
 
@@ -1245,7 +1275,11 @@ function lutPathsSinceLastClear(canvas) {
 }
 
 // What js/plot.js says it drew: the data rectangle and the mapping.
-const lutPlot = () => (globalThis.window.__viewer.state.lutPlot ?? null);
+//
+// On `__viewer` rather than on `__viewer.state`: the page never reads it, so
+// it is not part of the viewer's state -- see the note on `lastLutPlot` in
+// main.js. `__viewer` is a getter, so this reads the newest draw.
+const lutPlot = () => (globalThis.window.__viewer.lutPlot ?? null);
 
 // Where a value at `t` must have been drawn, from the fixture and the plot's
 // own declared rectangle and range.
@@ -2591,12 +2625,41 @@ if (SCENARIO === "target") {
     el("target-path") !== null && el("btn-load-target") !== null,
     `path=${el("target-path") !== null} button=${el("btn-load-target") !== null}`);
 
+  // A matrix is loaded first so that "the loader did not fetch the view" can
+  // be false.
+  //
+  // `reload()` returns at its first line while `state.matrixId` is null, so in
+  // a scenario that never loads one the view counter stays at 0 no matter what
+  // the loaders do -- and `viewRequestCount() === 0` below would be restating
+  // this scenario's starting conditions rather than checking any behaviour of
+  // the loader. It was: adding `applyServerParams()` to `loadTargetImage` left
+  // all twelve checks here passing (measured), i.e. the "loading stages, it
+  // does not render" rule was unguarded on the one path this task created.
+  //
+  // 先に行列を1つ読み込む。行列が無いと `reload()` は先頭で打ち切るため、
+  // 読み込み側が何をしても取得数は 0 のままで、下の検査はシナリオの初期条件を
+  // 述べているだけになる（実際そうだった: 読み込みに `applyServerParams()` を
+  // 足しても12件全部通ることを実測）。
+  clickLoad("A");
+  await settled();
+
   el("view-select").value = "compensation";
   el("view-select").__fire("change");
-  await sleep(20);
+  await settled();
   check("the compensation view's ターゲットID box exists to be filled",
     el("sp-target") !== null && el("sp-target").value === "",
     `value=${el("sp-target") && el("sp-target").value}`);
+
+  // The counter is live: it has already moved once, so it is capable of moving
+  // again. Without this the fix above could rot back into the state it came
+  // from -- a matrix that silently stopped loading would put the scenario back
+  // to "0 forever" and the check below would go green for the old wrong reason.
+  // 取得数が実際に動くことをここで固定する。行列の読み込みが静かに壊れると
+  // 「常に0」へ戻り、下の検査がまた別の理由で通ってしまう。
+  const viewFetchesBeforeLoading = viewRequestCount();
+  check("a matrix is loaded, so a fetch from a loader would be counted",
+    state.matrixId !== null && viewFetchesBeforeLoading > 0,
+    `matrixId=${state.matrixId} view fetches=${viewFetchesBeforeLoading}`);
 
   // --- 1. loading writes the id the server returned into the parameter box
   //
@@ -2616,6 +2679,18 @@ if (SCENARIO === "target") {
       && targetPostLog.length === 1
       && targetPostLog[0].path === "data/one.png",
     `box=${el("sp-target").value} posts=${JSON.stringify(targetPostLog)}`);
+
+  // The info line beside the button: the only place the loaded image's *size*
+  // appears anywhere on the page. The fixture is 5 wide and 3 high, so a line
+  // built from `meta.shape` in the order it arrives (H, W) prints "3×5" --
+  // plausible, and wrong about the one fact the line exists to state. Nothing
+  // looked at this line at all until now.
+  // ボタン横の情報行。読み込んだ画像の大きさが出るのはここだけである。
+  // フィクスチャは横5・縦3なので、`meta.shape` の並び順のまま出す実装は
+  // 「3×5」と書く——もっともらしく、この行が述べるべき唯一の事実について誤る。
+  check("the target info line names the id and the image's width x height",
+    el("target-info").textContent === "target_one_0 / 5×3",
+    `info=${el("target-info").textContent}`);
 
   // A single file has one selectable entry, so the picker has nothing to offer.
   check("a single file shows no image picker",
@@ -2654,10 +2729,15 @@ if (SCENARIO === "target") {
 
   // Loading stages the id; it does not render. Only 適用 reaches the view
   // endpoint -- see the note above `refreshParamsPending` in main.js and the
-  // measurement of what a per-control fetch costs on the 1080p matrix.
+  // measurement of what a per-control fetch costs on the 1080p matrix (~740 ms
+  // and ~390 MB peak per render, most of it discarded by reqId afterwards, so
+  // the screen looks right and only the machine knows).
+  // Measured against the count taken with a matrix already loaded, not against
+  // zero -- see the note where `viewFetchesBeforeLoading` is taken.
   // 読み込みは値を置くだけで再描画しない（ビュー取得へ行ってよいのは 適用 だけ）。
   check("loading a target does not fetch the view on its own",
-    viewRequestCount() === 0, `view fetches=${viewRequestCount()}`);
+    viewRequestCount() === viewFetchesBeforeLoading,
+    `view fetches=${viewFetchesBeforeLoading} -> ${viewRequestCount()}`);
 
   // --- 3. a refusal is prose, and does not take the loader down with it
   //
@@ -2723,12 +2803,27 @@ if (SCENARIO === "lut") {
     `path=${el("lut-path") !== null} button=${el("btn-load-lut") !== null} `
       + `canvas=${el("lut-curve") !== null}`);
 
+  // A matrix first, for the same reason the `target` scenario loads one: with
+  // `state.matrixId` null, `reload()` returns at its first line and the view
+  // counter cannot move, so "loading a LUT does not fetch the view" would be a
+  // statement about this scenario's starting conditions. Adding
+  // `applyServerParams()` to `loadInverseLut` left all twelve checks here
+  // passing (measured).
+  // 行列を先に読む（理由は `target` シナリオと同じ）。
+  clickLoad("A");
+  await settled();
+
   el("view-select").value = "compensation";
   el("view-select").__fire("change");
-  await sleep(20);
+  await settled();
   check("the compensation view's LUT ID box exists to be filled",
     el("sp-lut") !== null && el("sp-lut").value === "",
     `value=${el("sp-lut") && el("sp-lut").value}`);
+
+  const viewFetchesBeforeLoading = viewRequestCount();
+  check("a matrix is loaded, so a fetch from a loader would be counted",
+    state.matrixId !== null && viewFetchesBeforeLoading > 0,
+    `matrixId=${state.matrixId} view fetches=${viewFetchesBeforeLoading}`);
 
   // The overlay checkbox is `checked` in index.html, but the harness's parser
   // deliberately records only tags, classes, ids and inline styles -- adding
@@ -2748,6 +2843,26 @@ if (SCENARIO === "lut") {
       && lutCurveLog.length === 1 && lutCurveLog[0] === "/api/lut/lut_measured/curve",
     `box=${el("sp-lut").value} posts=${JSON.stringify(lutPostLog)} `
       + `curves=${JSON.stringify(lutCurveLog)}`);
+
+  // The two lines of text beside and under the plot, neither of which anything
+  // read before. The info line is where "which LUT is this, and how was it
+  // measured" is answered -- `source` decides whether the curve describes a
+  // grey ramp or per-channel ramps, and those disagree by up to 1.7x on this
+  // projector, so a blank or wrong line is a plot with no provenance.
+  // プロットの脇と下にある2行。どちらもこれまで誰も読んでいなかった。
+  check("the LUT info line names the id, the table's shape and its source",
+    el("lut-info").textContent === "lut_measured / 3×5 / channel_ramp",
+    `info=${el("lut-info").textContent}`);
+  // The exponent the dashed overlay is drawn at, in words next to its
+  // checkbox. Asserted against the fixture's 1.9 rather than a formatting
+  // pattern, so a label that printed the usual 2.2 while the curve was drawn
+  // at the server's exponent -- a legend that disagrees with the line it
+  // labels -- fails here.
+  // 重ね描きの指数を文字で示す行。既定の 2.2 ではなくフィクスチャの 1.9 と
+  // 突き合わせるので、線と凡例が食い違う実装が落ちる。
+  check("the analytic gamma's exponent is shown, and it is the server's",
+    el("lut-gamma-value").textContent === `γ=${LUT_GAMMA}`,
+    `label=${el("lut-gamma-value").textContent} expected γ=${LUT_GAMMA}`);
 
   // --- 1. three curves, at the coordinates the three channels map to
   //
@@ -2882,8 +2997,67 @@ if (SCENARIO === "lut") {
     `status=${statusText()} disabled=${el("btn-load-lut").disabled} `
       + `box=${el("sp-lut").value}`);
 
+  // --- a LUT whose *curve* could not be fetched is not published either
+  //
+  // The other half of a two-request load, and the only state in which
+  // `loadInverseLut`'s publication order is observable at all: the POST
+  // registers `lut_curveless` and the GET for its curve comes back 500 (see
+  // `LUTS` for why that is an ordinary thing to happen and what it costs).
+  //
+  // Three things are asserted together, because each is survivable alone and
+  // the failure is the disagreement between them: the id box still names the
+  // LUT that is plotted, `state.lutId` -- which is what 適用 sends -- agrees
+  // with the box, and the canvas still holds the previous LUT's three curves.
+  // Publishing the id before the curve satisfies none of the first two while
+  // the third stays true, which is exactly the "the heading and the numbers
+  // disagree" failure this branch has closed everywhere else.
+  //
+  // 2つの要求のうち後半だけが失敗する場合。`loadInverseLut` の公開順が外から
+  // 見えるのはこの状態だけである。欄・`state.lutId`・canvas の3つを同時に見る
+  // （食い違いこそが失敗であり、単独ではどれも生き延びる）。
+  const idBeforeCurveFailure = el("sp-lut").value;
+  const curveBeforeFailure =
+    JSON.stringify(lutPathsSinceLastClear(el("lut-curve")).map((p) => p.points));
+  const curveFetchesBefore = lutCurveLog.length;
+  el("lut-path").value = "data/curveless.npz";
+  el("btn-load-lut").__fire("click");
+  await waitFor(() => /could not read the curve/.test(statusText()));
+
+  // The fixture has to actually reach the state being checked. If the POST
+  // ever started failing for this path, everything below would pass for the
+  // reason the 404 case above already covers and this case would quietly stop
+  // being about ordering at all.
+  // フィクスチャがその状態に本当に到達していることを固定する。POSTが失敗する
+  // ようになったら、以下は404の場合と同じ理由で通り、順序の検査ではなくなる。
+  check("the LUT POST succeeded and only its curve fetch failed",
+    lutPostLog[lutPostLog.length - 1].path === "data/curveless.npz"
+      && lutCurveLog.length === curveFetchesBefore + 1
+      && lutCurveLog[lutCurveLog.length - 1] === "/api/lut/lut_curveless/curve",
+    `posts=${JSON.stringify(lutPostLog)} curves=${JSON.stringify(lutCurveLog)}`);
+
+  const curveAfterFailure =
+    JSON.stringify(lutPathsSinceLastClear(el("lut-curve")).map((p) => p.points));
+  check("a LUT whose curve could not be fetched is not named as loaded",
+    el("sp-lut").value === idBeforeCurveFailure
+      && state.lutId === idBeforeCurveFailure
+      && curveAfterFailure === curveBeforeFailure
+      && el("btn-load-lut").disabled === false,
+    `box=${el("sp-lut").value} state.lutId=${state.lutId} `
+      + `(expected ${idBeforeCurveFailure}) curve unchanged=`
+      + `${curveAfterFailure === curveBeforeFailure} `
+      + `disabled=${el("btn-load-lut").disabled}`);
+
+  check("the failed curve fetch is shown as its sentence, not as a JSON envelope",
+    statusText().includes('could not read the curve for "lut_curveless"')
+      && !/\{"detail"|\\"/.test(statusText())
+      && el("status").classList.contains("error"),
+    `status=${statusText()} class=${el("status").className}`);
+
+  // Measured against the count taken with a matrix already loaded, not against
+  // zero -- see `viewFetchesBeforeLoading` above.
   check("loading a LUT does not fetch the view on its own",
-    viewRequestCount() === 0, `view fetches=${viewRequestCount()}`);
+    viewRequestCount() === viewFetchesBeforeLoading,
+    `view fetches=${viewFetchesBeforeLoading} -> ${viewRequestCount()}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

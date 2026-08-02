@@ -90,6 +90,15 @@ def get_lut_curve(lut_id: str) -> dict[str, Any]:
     ``t ** (1 / gamma)`` が「測定版が置き換えている解析曲線」そのものになる。
     フロントには他に知る手段が無く、違う指数を重ねれば定量的に見えて実は
     そうでない比較になるので、カーブと一緒に返す。
+
+    The file's own path is **not** here. It was, and nothing read it: the
+    frontend takes it from the ``POST /api/lut`` meta, which is the response
+    that answers "what did I just load", and no test asserted it (task-4 final
+    review, Minor 6). A field that is sent, documented and never read is a
+    field the next reader has to decide about; it is easier to add back than to
+    find out whether anything depended on it.
+    ファイルのパスはここには入れない。以前は入っていたが誰も読まず、フロントは
+    ``POST /api/lut`` の meta から取っている。
     """
     context = require_lut(lut_id)
     return {
@@ -97,5 +106,4 @@ def get_lut_curve(lut_id: str) -> dict[str, Any]:
         "lut": [[float(v) for v in row] for row in context.lut.lut],
         "meta": dict(context.lut.meta),
         "gamma": float(get_config().projector.gamma),
-        "path": str(context.path),
     }
