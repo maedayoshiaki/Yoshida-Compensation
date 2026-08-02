@@ -1,8 +1,9 @@
 // Drives the shipped viewer frontend under a stub DOM/WebGL, for pytest.
 //
 // Usage: node frontend_harness.mjs <static-dir> <scenario>
-//   <static-dir>  directory holding index.html and js/{main,glview,api}.js
+//   <static-dir>  directory holding index.html and js/{main,glview,api,plot}.js
 //   <scenario>    "ordering" | "views" | "button" | "rgb" | "probe"
+//                 | "target" | "lut"
 // Prints one JSON object to stdout: { scenario, checks: [{name, ok, detail}] }.
 //
 // Why a stub instead of a browser: the behaviours under test -- request
@@ -110,6 +111,45 @@ function glStub(uploads, uniforms) {
   });
 }
 
+// -------------------------------------------------------------- 2D ctx stub
+// Records every call and every property assignment, in order.
+//
+// The GL stub above swallows all but three calls, because what a WebGL upload
+// *means* is visible in `texImage2D`'s last argument alone. A 2D canvas is the
+// opposite: the whole output of js/plot.js is the sequence of `moveTo`/`lineTo`
+// coordinates and the `strokeStyle` in force when `stroke()` is called. A stub
+// that dropped them would leave "three lines were drawn" as the only checkable
+// property -- and three lines at identical coordinates, or drawn for the wrong
+// channels, satisfy that just as well as the right ones do. The brief for this
+// task names that failure explicitly: counting lines cannot detect that they
+// were drawn in the wrong place, so the stub records where.
+//
+// Property *assignments* are recorded too, and interleaved with the calls in
+// one list rather than kept as final values, because `strokeStyle` is set once
+// per curve: only the order tells which colour belonged to which polyline.
+//
+// GL側は3つを除いて飲み込むが、2Dは逆で、js/plot.js の出力そのものが
+// `moveTo`/`lineTo` の座標列と `stroke()` 時点の `strokeStyle` である。落とすと
+// 検証できるのは「3本描かれた」だけになり、同じ座標に3本でも、チャンネルを
+// 取り違えた3本でも通ってしまう。プロパティ代入も同じ列に順序どおり記録する
+// （`strokeStyle` は曲線ごとに設定されるので、順序だけがどの色がどの折れ線の
+// ものかを決める）。
+function ctx2dStub(calls) {
+  const properties = {};
+  return new Proxy(properties, {
+    get(target, prop) {
+      if (prop === "__calls") return calls;
+      if (Object.prototype.hasOwnProperty.call(target, prop)) return target[prop];
+      return (...args) => { calls.push([String(prop), ...args]); };
+    },
+    set(target, prop, value) {
+      target[prop] = value;
+      calls.push([`set:${String(prop)}`, value]);
+      return true;
+    },
+  });
+}
+
 // ------------------------------------------------------------------ DOM stub
 const registry = new Map();
 
@@ -156,10 +196,26 @@ function makeEl(tag = "div") {
     __fire(name, event = {}) {
       for (const fn of listeners[name] || []) fn({ target: el, ...event });
     },
-    // One context per element, kept, so each tile's uploads accumulate on its
-    // own GLView rather than on a fresh proxy per call.
-    // 要素ごとに1つのコンテキストを保持し、タイル別に記録が貯まるようにする。
-    getContext() { return (el.__gl ||= glStub([], {})); },
+    // One context per element *per type*, kept, so each tile's uploads
+    // accumulate on its own GLView rather than on a fresh proxy per call --
+    // and so the LUT canvas's 2D calls accumulate across the redraws a scenario
+    // triggers (load, overlay toggle, DPR change) instead of being lost.
+    //
+    // Branching on the type is what makes the 2D canvas testable at all: the
+    // GL proxy answers every property with another proxy, so `getContext("2d")`
+    // used to hand js/plot.js something that accepted `moveTo`/`stroke` and
+    // recorded nothing. Nothing would have thrown; the plot would simply have
+    // been invisible from here.
+    // 要素ごと・種類ごとに1つのコンテキストを保持する。種類で分けないと
+    // `getContext("2d")` がGLのプロキシを返し、`moveTo`/`stroke` を受け取って
+    // 何も記録しない（例外も出ないので、図はただ外から見えなくなる）。
+    getContext(type) {
+      if (String(type) === "2d") {
+        el.__ctx2dCalls ||= [];
+        return (el.__ctx2d ||= ctx2dStub(el.__ctx2dCalls));
+      }
+      return (el.__gl ||= glStub([], {}));
+    },
     getBoundingClientRect() { return { left: 0, top: 0 }; },
     setPointerCapture() {},
   };
@@ -469,6 +525,13 @@ const VIEWS = [
     values_are_matrix: false,
     params: [
       { name: "target", label: "ターゲットID", type: "text", default: "", choices: [] },
+      // The second runtime id, and the reason it is declared here as well as
+      // `target`: the two sidebar loaders write into different boxes through
+      // the same `setServerParam` path, and a build that filled one and not the
+      // other would still pass every check that only looks at `target`.
+      // 2つ目の実行時ID。読み込み欄は2つあり、同じ経路で別々の欄へ書く。
+      // 片方だけ埋める実装でも `target` しか見ないチェックは通ってしまう。
+      { name: "lut", label: "LUT ID", type: "text", default: "", choices: [] },
       {
         name: "output", label: "出力", type: "select",
         default: "linear", choices: ["linear", "code"],
@@ -676,6 +739,76 @@ const waitForHeld = (row, col) => waitFor(() => heldIndex(row, col) >= 0);
 // needs to be reachable on its own.
 // load() と reload() は別々の await を持ち、それぞれに別のガードがあるため、
 // POSTとバイナリ取得のどちらも独立に遅延できるようにする。
+// ------------------------------------------------------- targets and LUTs
+//
+// The two runtime-id endpoints the sidebar loaders drive.
+//
+// Ids are derived from *what was asked for*, never fixed strings: a client that
+// invented an id, echoed the path, or reused the previous response would
+// produce something that does not match `target_<key>_<index>`, and a client
+// that re-posted with the wrong index would produce a real id for the wrong
+// image. A constant id -- "target1" for everything -- would make all of that
+// indistinguishable.
+//
+// 発行するIDは「何を要求されたか」から作る。固定文字列にすると、IDを勝手に
+// 作る実装・パスを流用する実装・前の応答を使い回す実装が全て同じに見える。
+const TARGETS = {
+  "data/one.png": {
+    key: "one", is_directory: false, images: ["one.png"], shapes: [[3, 5, 3]],
+  },
+  // Three images with three different sizes, so "which one is loaded" is
+  // visible in `meta.shape` and not only in an opaque id.
+  // 3枚とも大きさを変える（どれを読んだかが shape にも出る）。
+  "data/dir": {
+    key: "dir", is_directory: true,
+    images: ["a.png", "b.png", "c.png"],
+    shapes: [[3, 5, 3], [7, 4, 3], [2, 9, 3]],
+  },
+};
+
+// The `detail` a missing target comes back with. Carries a quote, so a client
+// that rendered the raw JSON envelope instead of the sentence would show the
+// backslash escape -- the same trick REFUSAL_DETAIL uses above.
+// 404 の説明文。引用符を含めてあるので、JSONの外側ごと出す実装は
+// バックスラッシュのエスケープが見えて区別できる。
+const TARGET_404_DETAIL = 'no image at "data/missing.png"';
+const LUT_404_DETAIL = 'no inverse LUT at "data/missing.npz"';
+
+// The LUT fixture: three curves with three different shapes and three
+// different endpoints, none of them 1.0.
+//
+// Three curves of the same shape cannot detect a channel swap -- the failure
+// the brief for this task names first -- so R is a straight line, G bulges up,
+// and B bulges down and stops at 0.688, the largest of the three. That 0.688
+// is what the plot's vertical axis has to come from: a LUT ending at 1.0 makes
+// an axis pinned to 1.0 indistinguishable from one read off the data, and a
+// measured LUT does *not* end at 1.0 (the ISO400 file in this repository stops
+// at 0.813 / 0.876 / 0.751).
+//
+// 3本とも同じ形だとチャンネルの入れ替えが見えない。R は直線、G は上に凸、
+// B は下に凸で 0.688（3本の最大値）で止まる。1.0 で終わるフィクスチャでは、
+// 軸を 1.0 に固定した実装とデータ由来の実装が区別できない。実測LUTの終端は
+// 1.0 ではない（このリポジトリのISO400ファイルは 0.813/0.876/0.751）。
+const LUT_T_GRID = [0, 0.2, 0.5, 0.9, 1];
+const LUT_ROWS = [
+  [0, 0.11, 0.275, 0.495, 0.55],    // R: straight, ends at 0.55
+  [0, 0.22, 0.311, 0.417, 0.44],    // G: concave,  ends at 0.44
+  [0, 0.028, 0.172, 0.557, 0.688],  // B: convex,   ends at 0.688
+];
+const LUT_META = { source: "channel_ramp", trust_low: 5, trust_high: 245 };
+// Not 2.2: the default would be indistinguishable from a frontend that
+// hard-coded the usual exponent instead of reading the one the server sent.
+// 2.2 にしない（既定値だと、サーバの値を読まず定番の指数を書いた実装と
+// 区別が付かない）。
+const LUT_GAMMA = 1.9;
+const LUTS = {
+  "data/inverse_lut.npz": { key: "measured", rows: LUT_ROWS },
+};
+
+const targetPostLog = [];   // every POST /api/target body, in order
+const lutPostLog = [];      // every POST /api/lut body, in order
+const lutCurveLog = [];     // every GET /api/lut/{id}/curve url, in order
+
 const sessionDelayMs = {};
 const viewDelayMs = {};
 // Identifies which matrix a payload came from: every float in the body is the
@@ -711,6 +844,68 @@ globalThis.fetch = async (url, options) => {
         space: "camera", path: matrixPath, active_region: null,
         projector: { width: 64, height: 48 },
       },
+    }), { headers: { "content-type": "application/json" } });
+  }
+
+  // POST /api/target, answered the way routers/target.py does: an id plus the
+  // meta the sidebar's image list and info line are built from.
+  if (url === "/api/target") {
+    const body = JSON.parse(options.body);
+    targetPostLog.push(body);
+    const entry = TARGETS[body.path];
+    if (!entry) {
+      return new Response(JSON.stringify({ detail: TARGET_404_DETAIL }), {
+        status: 404, headers: { "content-type": "application/json" },
+      });
+    }
+    const index = Number(body.index ?? 0);
+    if (!(index >= 0 && index < entry.images.length)) {
+      return new Response(JSON.stringify({
+        detail: `index ${index} is out of range for ${body.path}`,
+      }), { status: 400, headers: { "content-type": "application/json" } });
+    }
+    const id = `target_${entry.key}_${index}`;
+    return new Response(JSON.stringify({
+      id,
+      meta: {
+        id, shape: entry.shapes[index], dtype: "uint8", path: body.path,
+        is_directory: entry.is_directory, images: entry.images, index,
+      },
+    }), { headers: { "content-type": "application/json" } });
+  }
+
+  // POST /api/lut, answered the way routers/lut.py does.
+  if (url === "/api/lut") {
+    const body = JSON.parse(options.body);
+    lutPostLog.push(body);
+    const entry = LUTS[body.path];
+    if (!entry) {
+      return new Response(JSON.stringify({ detail: LUT_404_DETAIL }), {
+        status: 404, headers: { "content-type": "application/json" },
+      });
+    }
+    const id = `lut_${entry.key}`;
+    return new Response(JSON.stringify({
+      id,
+      meta: {
+        id, path: body.path, dtype: "float32",
+        shape: [entry.rows.length, LUT_T_GRID.length], meta: LUT_META,
+      },
+    }), { headers: { "content-type": "application/json" } });
+  }
+
+  const lutCurve = url.match(/^\/api\/lut\/([^/?]+)\/curve$/);
+  if (lutCurve) {
+    lutCurveLog.push(url);
+    const entry = Object.values(LUTS).find((e) => `lut_${e.key}` === lutCurve[1]);
+    if (!entry) {
+      return new Response(JSON.stringify({ detail: `lut not found: ${lutCurve[1]}` }), {
+        status: 404, headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({
+      t_grid: LUT_T_GRID, lut: entry.rows, meta: LUT_META, gamma: LUT_GAMMA,
+      path: "data/inverse_lut.npz",
     }), { headers: { "content-type": "application/json" } });
   }
 
@@ -998,6 +1193,90 @@ async function afterViewFetches(expected) {
   const entries = Object.entries(expected);
   await waitFor(() => entries.every(([k, n]) => (viewFetchCount.get(k) ?? 0) >= n));
   for (let i = 0; i < 12; i++) await sleep(5);
+}
+
+// ------------------------------------------------------------ the LUT plot
+//
+// Every `beginPath … stroke` on the curve canvas is one data polyline, and
+// nothing else on that canvas is a stroked path: js/plot.js draws its frame
+// with `strokeRect` and its gridlines with `fillRect` precisely so this reader
+// does not have to tell a curve from a grid line first. Reading them back is
+// what turns "three lines were drawn" -- which three identical lines, or three
+// lines of the wrong channels, satisfy just as well -- into "line c is at the
+// coordinates channel c's values map to".
+//
+// `style` is captured at `stroke()` rather than at `beginPath()`, since either
+// order is legal in the canvas API and only the value in force when the path is
+// painted is the one the user sees.
+//
+// カーブ用canvas上の `beginPath … stroke` は必ずデータの折れ線1本であり、
+// 枠は `strokeRect`、目盛線は `fillRect` で描かれているので、ここで両者を
+// 区別する必要は無い。座標まで読むことで「3本描かれた」（同じ座標の3本でも、
+// チャンネルを取り違えた3本でも成り立つ）を「c番目の線はチャンネルcの値が
+// 写る座標にある」へ変える。色は `stroke()` 時点の値を採る。
+function strokedPaths(canvas) {
+  const out = [];
+  let points = null;
+  let style = null;
+  for (const [op, ...args] of canvas.__ctx2dCalls || []) {
+    if (op === "set:strokeStyle") style = args[0];
+    else if (op === "beginPath") points = [];
+    else if (op === "moveTo" || op === "lineTo") {
+      if (points) points.push([args[0], args[1]]);
+    } else if (op === "stroke") {
+      if (points && points.length) out.push({ style, points });
+      points = null;
+    }
+  }
+  return out;
+}
+
+// Only the paths drawn by the newest `drawLutCurve` call. The canvas keeps one
+// context for the whole run, so its call log accumulates across every redraw a
+// scenario triggers; a check that read the whole log would be describing the
+// first draw and the newest one at once.
+// 最新の描画分だけを取る。コンテキストは実行を通じて1つなので、記録は再描画の
+// たびに積み上がる（全部を読むと初回と最新が混ざる）。
+function lutPathsSinceLastClear(canvas) {
+  const calls = canvas.__ctx2dCalls || [];
+  let start = 0;
+  for (let i = 0; i < calls.length; i++) if (calls[i][0] === "clearRect") start = i;
+  return strokedPaths({ __ctx2dCalls: calls.slice(start) });
+}
+
+// What js/plot.js says it drew: the data rectangle and the mapping.
+const lutPlot = () => (globalThis.window.__viewer.state.lutPlot ?? null);
+
+// Where a value at `t` must have been drawn, from the fixture and the plot's
+// own declared rectangle and range.
+//
+// The *layout* (margins, insets) is the module's business and is read back from
+// the return value; the *mapping from data to that rectangle* is not, and is
+// computed here from `LUT_T_GRID`/`LUT_ROWS` directly. That split is what keeps
+// this from comparing the implementation with itself: if `vMax` were pinned to
+// 1.0, the coordinates and the returned range would still agree with each
+// other -- so the range is asserted separately, against the fixture's own
+// maximum, by `the plot's vertical axis comes from the data`.
+//
+// 余白などの配置は実装の裁量なので戻り値から読み、データ→矩形の写像は
+// フィクスチャから自前で計算する。この分け方が「実装同士の突き合わせ」を
+// 避けている（上限を 1.0 に固定した実装は座標と戻り値が互いに整合してしまう
+// ため、範囲そのものは別のチェックがフィクスチャの最大値と突き合わせる）。
+function expectedPoint(plot, t, v) {
+  return [
+    plot.plot.x + (plot.plot.w * (t - plot.tMin)) / (plot.tMax - plot.tMin),
+    plot.plot.y + plot.plot.h * (1 - (v - plot.vMin) / (plot.vMax - plot.vMin)),
+  ];
+}
+
+const closeEnough = (a, b) => Math.abs(a - b) < 1e-6;
+
+function pointsMatch(points, plot, values) {
+  if (!plot || points.length !== values.length) return false;
+  return points.every(([x, y], i) => {
+    const [ex, ey] = expectedPoint(plot, LUT_T_GRID[i], values[i]);
+    return closeEnough(x, ex) && closeEnough(y, ey);
+  });
 }
 
 // ---------------------------------------------------------------- scenarios
@@ -2291,6 +2570,320 @@ if (SCENARIO === "probe") {
     `before=${JSON.stringify(beforeReload)} marked=${markedBeforeReload} | `
       + `after=${JSON.stringify(matrixTexts())} pos=${el("probe-pos").textContent} `
       + `marked=${el("probe-pos").classList.contains("outside")}`);
+}
+
+if (SCENARIO === "target") {
+  // The control that makes the `compensation` view drivable at all.
+  //
+  // That view has shipped complete since plan B3 Task 3 and, until this task,
+  // unreachable: its ターゲットID is free text naming an id that only exists
+  // after a `POST /api/target`, and no page element issued one. Every request
+  // from a browser therefore came back "needs a target image", forever, with
+  // the only way out being curl. Nothing failed; the viewer simply had a view
+  // in its dropdown that could not be made to draw.
+  //
+  // `compensation` ビューを駆動する唯一の手段。ターゲットIDは
+  // `POST /api/target` の後にしか存在しないidを指す自由入力であり、それを
+  // 発行する要素がページに無かったため、ブラウザからは永久に「ターゲットが
+  // 要る」と返り続けていた。何も失敗はせず、ただ描けないビューが選択肢に
+  // 並んでいた。
+  check("the page has a target loader (a path box and a button)",
+    el("target-path") !== null && el("btn-load-target") !== null,
+    `path=${el("target-path") !== null} button=${el("btn-load-target") !== null}`);
+
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await sleep(20);
+  check("the compensation view's ターゲットID box exists to be filled",
+    el("sp-target") !== null && el("sp-target").value === "",
+    `value=${el("sp-target") && el("sp-target").value}`);
+
+  // --- 1. loading writes the id the server returned into the parameter box
+  //
+  // The id is checked against `target_one_0`, which the fake server derives
+  // from the path and the index. A client that invented an id, echoed the
+  // path, or left the box alone and only remembered the id internally fails
+  // this -- and the last of those is the one worth naming: it looks like it
+  // works from the outside and leaves the user with an empty box.
+  // IDはサーバがパスとindexから作った値と突き合わせる。IDを勝手に作る実装も、
+  // 内部に覚えるだけで欄を埋めない実装も落ちる（後者は外からは動いて見えて、
+  // 利用者の手元には空欄が残る）。
+  el("target-path").value = "data/one.png";
+  el("btn-load-target").__fire("click");
+  await waitFor(() => el("sp-target").value !== "");
+  check("loading a target fills the ターゲットID box with the id the server returned",
+    el("sp-target").value === "target_one_0"
+      && targetPostLog.length === 1
+      && targetPostLog[0].path === "data/one.png",
+    `box=${el("sp-target").value} posts=${JSON.stringify(targetPostLog)}`);
+
+  // A single file has one selectable entry, so the picker has nothing to offer.
+  check("a single file shows no image picker",
+    el("target-images").hidden === true, `hidden=${el("target-images").hidden}`);
+
+  // --- 2. a directory lists its images, and choosing one re-fetches by index
+  el("target-path").value = "data/dir";
+  el("btn-load-target").__fire("click");
+  await waitFor(() => el("sp-target").value === "target_dir_0");
+  const listed = el("target-images").children.map((o) => o.textContent);
+  check("a directory lists its images and selects the first",
+    el("target-images").hidden === false
+      && JSON.stringify(listed) === JSON.stringify(["a.png", "b.png", "c.png"])
+      && el("target-images").value === "0",
+    `hidden=${el("target-images").hidden} listed=${JSON.stringify(listed)} `
+      + `value=${el("target-images").value}`);
+
+  // Both halves asserted: a *new* POST carrying index 1 (not a locally derived
+  // id, not a re-post of index 0), and the box following it. A client that
+  // computed the next id itself would satisfy the box half and issue no
+  // request; one that re-posted the path without the index would issue a
+  // request and load image 0 while the dropdown claimed image 1.
+  // 両方向を見る。index 1 の新しいPOSTが飛ぶことと、欄がその結果に従うこと。
+  // IDを自前で計算する実装は前者を、indexを付けずに投げ直す実装は後者を落とす。
+  const postsBefore = targetPostLog.length;
+  el("target-images").value = "1";
+  el("target-images").__fire("change");
+  await waitFor(() => el("sp-target").value === "target_dir_1");
+  const reposted = targetPostLog[targetPostLog.length - 1];
+  check("choosing another image re-fetches that index and re-fills the id",
+    targetPostLog.length === postsBefore + 1
+      && reposted.path === "data/dir" && Number(reposted.index) === 1
+      && el("sp-target").value === "target_dir_1",
+    `posts=${postsBefore} -> ${targetPostLog.length} last=${JSON.stringify(reposted)} `
+      + `box=${el("sp-target").value}`);
+
+  // Loading stages the id; it does not render. Only 適用 reaches the view
+  // endpoint -- see the note above `refreshParamsPending` in main.js and the
+  // measurement of what a per-control fetch costs on the 1080p matrix.
+  // 読み込みは値を置くだけで再描画しない（ビュー取得へ行ってよいのは 適用 だけ）。
+  check("loading a target does not fetch the view on its own",
+    viewRequestCount() === 0, `view fetches=${viewRequestCount()}`);
+
+  // --- 3. a refusal is prose, and does not take the loader down with it
+  //
+  // The status bar is shared with everything else on this page, so a 404 shown
+  // as `{"detail":"no image at \"data/missing.png\""}` is not merely ugly: it
+  // is the one sentence that says which path was wrong, rendered as a JSON
+  // envelope in a bar that is otherwise Japanese prose. And a loader left
+  // disabled by a failed load is a viewer that cannot be recovered without a
+  // page reload, which is why the button state and a subsequent success are
+  // both part of this check.
+  // 404は「どのパスが違ったか」を述べる唯一の文である。JSONの外側ごと出れば
+  // 読めず、失敗でボタンが無効のままなら再読み込みするまで復帰できない。
+  const idBeforeFailure = el("sp-target").value;
+  el("target-path").value = "data/missing.png";
+  el("btn-load-target").__fire("click");
+  await waitFor(() => /no image at/.test(statusText()));
+  check("a 404 is shown as its sentence, not as a JSON envelope",
+    statusText().includes('no image at "data/missing.png"')
+      && !/\{"detail"|\\"/.test(statusText())
+      && el("status").classList.contains("error"),
+    `status=${statusText()} class=${el("status").className}`);
+  check("a refused load leaves the loader usable and the previous id intact",
+    el("btn-load-target").disabled === false
+      && el("target-images").disabled === false
+      && el("sp-target").value === idBeforeFailure,
+    `button disabled=${el("btn-load-target").disabled} `
+      + `picker disabled=${el("target-images").disabled} box=${el("sp-target").value}`);
+
+  el("target-path").value = "data/one.png";
+  el("btn-load-target").__fire("click");
+  await waitFor(() => el("sp-target").value === "target_one_0");
+  check("a load after a refused one still works",
+    el("sp-target").value === "target_one_0"
+      && !el("status").classList.contains("error"),
+    `box=${el("sp-target").value} class=${el("status").className}`);
+
+  // --- and the id survives a view switch, because the controls do not
+  //
+  // `buildServerParams` rebuilds every `sp-*` from the spec's declared
+  // defaults, and for a runtime id that default is "". Without the state the
+  // loader keeps, looking at `surface` and coming back would empty the box for
+  // a target that is still loaded server-side, and the view would refuse a
+  // request the user has no reason to think incomplete.
+  // コントロールはビュー切替のたびに宣言側の既定（空文字）から作り直される。
+  // 読み込み側が状態を保持していないと、サーバには残っているターゲットについて
+  // 欄だけが空に戻り、利用者から見て理由の無い拒否になる。
+  el("view-select").value = "surface";
+  el("view-select").__fire("change");
+  await sleep(30);
+  check("switching away from compensation drops its controls", el("sp-target") === null);
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await sleep(30);
+  check("coming back re-fills the ターゲットID box with the loaded id",
+    el("sp-target") !== null && el("sp-target").value === "target_one_0",
+    `box=${el("sp-target") && el("sp-target").value}`);
+}
+
+if (SCENARIO === "lut") {
+  check("the page has a LUT loader and a curve canvas",
+    el("lut-path") !== null && el("btn-load-lut") !== null
+      && el("lut-curve") !== null,
+    `path=${el("lut-path") !== null} button=${el("btn-load-lut") !== null} `
+      + `canvas=${el("lut-curve") !== null}`);
+
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await sleep(20);
+  check("the compensation view's LUT ID box exists to be filled",
+    el("sp-lut") !== null && el("sp-lut").value === "",
+    `value=${el("sp-lut") && el("sp-lut").value}`);
+
+  // The overlay checkbox is `checked` in index.html, but the harness's parser
+  // deliberately records only tags, classes, ids and inline styles -- adding
+  // boolean attributes would change what every existing scenario sees at
+  // startup. So the state this scenario needs is set here, explicitly.
+  // 重ね描きのチェックボックスは index.html では既定でオンだが、ハーネスの
+  // パーサは真偽属性を記録しない（既存シナリオの初期状態が変わるため）。
+  // このシナリオが必要とする状態はここで明示的に設定する。
+  el("lut-gamma-overlay").checked = true;
+
+  el("lut-path").value = "data/inverse_lut.npz";
+  el("btn-load-lut").__fire("click");
+  await waitFor(() => el("sp-lut").value !== "");
+  check("loading a LUT fills the LUT ID box and fetches its curve",
+    el("sp-lut").value === "lut_measured"
+      && lutPostLog.length === 1 && lutPostLog[0].path === "data/inverse_lut.npz"
+      && lutCurveLog.length === 1 && lutCurveLog[0] === "/api/lut/lut_measured/curve",
+    `box=${el("sp-lut").value} posts=${JSON.stringify(lutPostLog)} `
+      + `curves=${JSON.stringify(lutCurveLog)}`);
+
+  // --- 1. three curves, at the coordinates the three channels map to
+  //
+  // Counting lines is not enough and the brief says so: three lines drawn at
+  // identical coordinates, or drawn for the wrong channels, satisfy a count
+  // just as well as the right ones. Each polyline is therefore compared point
+  // for point against its own channel's values (see `expectedPoint` for which
+  // half of that comparison comes from the implementation and which from the
+  // fixture). The three fixture curves have three different shapes and three
+  // different endpoints, so no permutation of them agrees with another.
+  // 本数だけでは足りない。各折れ線をチャンネルごとの値と1点ずつ突き合わせる。
+  // 3本は形も終端も全て違うので、どの入れ替えも一致しない。
+  const withOverlay = lutPathsSinceLastClear(el("lut-curve"));
+  const plot = lutPlot();
+  const channelsOk = LUT_ROWS.every(
+    (row, c) => withOverlay[c] && pointsMatch(withOverlay[c].points, plot, row));
+  check("each of the three curves is drawn at its own channel's coordinates",
+    withOverlay.length === 4 && channelsOk,
+    `paths=${withOverlay.length} plot=${JSON.stringify(plot)} `
+      + `points=${JSON.stringify(withOverlay.map((p) => p.points.slice(0, 2)))}`);
+
+  // Three curves that cannot be told apart on screen are one curve as far as
+  // the reader is concerned.
+  // 画面上で区別が付かない3本は、読む側にとっては1本と同じである。
+  const styles = withOverlay.map((p) => p.style);
+  check("the curves are drawn in distinguishable colours",
+    new Set(styles).size === withOverlay.length && styles.every(Boolean),
+    JSON.stringify(styles));
+
+  // --- 2. the vertical axis comes from the data, not from 1.0
+  //
+  // The fixture's largest value is 0.688 and none of its channels reaches 1.0,
+  // which is the case a measured LUT actually presents (the ISO400 file in
+  // this repository stops at 0.813 / 0.876 / 0.751). Asserted against the
+  // fixture's own maximum rather than against what the plot returned, so an
+  // axis pinned to [0, 1] cannot satisfy it by being internally consistent.
+  // フィクスチャの最大値は 0.688 で、どのチャンネルも 1.0 に届かない（実測LUT
+  // が実際にそうである）。戻り値同士ではなくフィクスチャの最大値と突き合わせる
+  // ので、[0, 1] に固定した実装が「自分と整合している」だけで通ることはない。
+  const fixtureMax = Math.max(...LUT_ROWS.flat());
+  const fixtureMin = Math.min(...LUT_ROWS.flat());
+  check("the plot's vertical axis comes from the data, not pinned to 1.0",
+    !!plot && closeEnough(plot.vMax, fixtureMax) && plot.vMax !== 1
+      && closeEnough(plot.vMin, Math.min(0, fixtureMin)),
+    `vMin=${plot && plot.vMin} vMax=${plot && plot.vMax} `
+      + `(fixture ${fixtureMin}..${fixtureMax})`);
+
+  // --- 3. the analytic gamma is a fourth line, not a redrawn LUT
+  //
+  // Both directions. The overlay has to be its *own* line -- at t ** (1 /
+  // gamma), with the exponent the server sent rather than a hard-coded 2.2 --
+  // and turning it off has to remove exactly that one line and leave the three
+  // measured ones untouched. A build that drew it into one of the channels, or
+  // that drew nothing extra at all, fails one of the two.
+  // 両方向。重ね描きは独立した1本（指数はサーバが送った値であり、直書きの
+  // 2.2 ではない）であり、切ると**その1本だけ**が消えて実測3本は変わらない。
+  const overlayPath = withOverlay[3];
+  const analytic = LUT_T_GRID.map((t) => Math.pow(t, 1 / LUT_GAMMA));
+  check("the analytic gamma is drawn as a separate line, at the server's exponent",
+    !!overlayPath && pointsMatch(overlayPath.points, plot, analytic)
+      && !LUT_ROWS.some((row) => pointsMatch(overlayPath.points, plot, row)),
+    `overlay=${overlayPath && JSON.stringify(overlayPath.points.slice(0, 2))} `
+      + `expected=${JSON.stringify(analytic.slice(0, 2))}`);
+
+  // Compared against the three measured lines from the draw above rather than
+  // against the fixture again: what this asserts is that switching the overlay
+  // off removed the overlay and *only* the overlay. Re-deriving the channels
+  // here would make this a second copy of the correspondence check above, and
+  // every mutation of the channel order would then fail two checks that say
+  // the same thing.
+  // 直前の描画の3本と突き合わせる（フィクスチャから引き直さない）。ここで
+  // 見たいのは「重ね描きだけが消えたこと」であり、チャンネルの対応を再導出
+  // すると上のチェックの写しになる。
+  const measuredBefore = JSON.stringify(withOverlay.slice(0, 3).map((p) => p.points));
+  el("lut-gamma-overlay").checked = false;
+  el("lut-gamma-overlay").__fire("change");
+  await sleep(20);
+  const withoutOverlay = lutPathsSinceLastClear(el("lut-curve"));
+  check("turning the overlay off removes exactly that line",
+    withoutOverlay.length === 3
+      && JSON.stringify(withoutOverlay.map((p) => p.points)) === measuredBefore,
+    `paths=${withoutOverlay.length}`);
+
+  // --- 4. the backing store follows the device pixel ratio
+  //
+  // A canvas sized by CSS is drawn into a backing store of CSS size x DPR, and
+  // without the term the whole plot goes into a quarter of the canvas on a
+  // 200% display and is then stretched to fit -- three curves and a scale, at
+  // half resolution, on the machine this is used on (Windows, 150%). Both
+  // directions are checked, since "always 1x" and "always 2x" each pass one.
+  // CSSで伸縮するcanvasのバッキングストアは CSSサイズ×DPR で取る。DPR項が無い
+  // と 200% 表示で図がcanvasの1/4に描かれて引き伸ばされる。常に1倍・常に2倍の
+  // どちらも片側だけなら通るので両方見る。
+  const canvas = el("lut-curve");
+  const at1 = { width: canvas.width, height: canvas.height };
+  globalThis.window.devicePixelRatio = 2;
+  el("lut-gamma-overlay").__fire("change");
+  await sleep(20);
+  check("the canvas backing store scales with devicePixelRatio",
+    at1.width === canvas.clientWidth && at1.height === canvas.clientHeight
+      && canvas.width === canvas.clientWidth * 2
+      && canvas.height === canvas.clientHeight * 2,
+    `dpr1=${at1.width}x${at1.height} dpr2=${canvas.width}x${canvas.height} `
+      + `css=${canvas.clientWidth}x${canvas.clientHeight}`);
+  globalThis.window.devicePixelRatio = 1;
+
+  // --- and the plot is still in CSS pixels afterwards
+  //
+  // Scaling the backing store without scaling the context draws the same
+  // figure at half size in the corner of a canvas twice as large. The
+  // coordinates recorded here are the ones passed to `moveTo`/`lineTo`, i.e.
+  // before the transform, so they must not change with DPR at all.
+  // バッキングストアだけ拡げて座標系を拡大しないと、2倍のcanvasの隅に同じ図が
+  // 半分の大きさで描かれる。記録される座標は変換前の値なので、DPRで変わっては
+  // ならない。
+  const afterDpr = lutPathsSinceLastClear(canvas);
+  check("the curve coordinates stay in CSS pixels across a DPR change",
+    afterDpr.length === 3
+      && JSON.stringify(afterDpr.map((p) => p.points)) === measuredBefore,
+    `paths=${afterDpr.length}`);
+
+  // --- a refused LUT load says why and leaves the loader usable
+  const idBeforeFailure = el("sp-lut").value;
+  el("lut-path").value = "data/missing.npz";
+  el("btn-load-lut").__fire("click");
+  await waitFor(() => /no inverse LUT at/.test(statusText()));
+  check("a refused LUT load is prose, keeps the previous id and leaves the button usable",
+    statusText().includes('no inverse LUT at "data/missing.npz"')
+      && !/\{"detail"|\\"/.test(statusText())
+      && el("btn-load-lut").disabled === false
+      && el("sp-lut").value === idBeforeFailure,
+    `status=${statusText()} disabled=${el("btn-load-lut").disabled} `
+      + `box=${el("sp-lut").value}`);
+
+  check("loading a LUT does not fetch the view on its own",
+    viewRequestCount() === 0, `view fetches=${viewRequestCount()}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

@@ -177,6 +177,59 @@ def test_the_hover_readout_reads_the_matrix_through_the_point_query() -> None:
     _assert_all_passed(_run_harness(_STATIC_DIR, "probe"))
 
 
+def test_the_target_loader_makes_the_compensation_view_drivable() -> None:
+    """The ``compensation`` view must be reachable from the page, not curl.
+
+    Its ``target`` parameter is free text naming an id that only exists after
+    a ``POST /api/target`` (``views/base.py::ParamSpec.type`` carries the
+    argument for why it cannot be a ``select``), and until this task no
+    element on the page issued that POST. The view shipped complete in plan
+    B3 Task 3 and every browser request it could receive came back "needs a
+    target image" -- a view in the dropdown that could not be made to draw,
+    with nothing failing anywhere.
+
+    Three things have to hold and each fails silently on its own: the id the
+    server returns has to reach the parameter box (a client that only
+    remembered it internally looks identical from the outside and leaves the
+    user an empty box), choosing another image of a directory has to re-issue
+    the load *with that index* rather than derive an id locally, and a refused
+    load has to be legible and leave the loader usable.
+
+    ``compensation`` ビューをブラウザから駆動できること。ターゲットIDは
+    ``POST /api/target`` の後にしか存在しないidであり、それを発行する要素が
+    ページに無かったため、このビューは「選べるが描けない」状態で出荷されて
+    いた。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "target"))
+
+
+def test_the_lut_loader_plots_three_curves_against_the_analytic_gamma() -> None:
+    """The measured inverse LUT must be visible, and visible as itself.
+
+    Three properties, all of which a plausible-looking plot can violate:
+
+    - Each polyline has to be at *its own channel's* coordinates. Counting
+      lines cannot see a channel swap, and three curves of the same shape
+      cannot either -- so the fixture's three differ in shape and in endpoint,
+      and every point of every line is compared against the values it claims
+      to be.
+    - The vertical axis has to come from the data. A measured LUT does not end
+      at 1.0 (``data/full_recalibration_20260730_iso400`` stops at 0.813 /
+      0.876 / 0.751), and an axis pinned to [0, 1] draws the same picture for
+      a LUT that reaches 1.0 and one that stops at 0.69.
+    - The analytic gamma has to be a fourth line at the exponent the *server*
+      sent, not a hard-coded 2.2 and not one of the measured curves redrawn.
+
+    Plus the backing store scaling with ``devicePixelRatio``, without which
+    the whole plot is drawn into a quarter of the canvas and stretched on the
+    150% display this project is used on.
+
+    実測逆LUTが「それ自身として」見えること。本数を数えるだけでは
+    チャンネルの入れ替えも、縦軸を 1.0 に固定した実装も検出できない。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "lut"))
+
+
 def test_load_button_is_released_after_a_reload_during_a_load() -> None:
     """Touching a server-side control mid-load must not wedge 読み込み.
 
@@ -1065,6 +1118,118 @@ _MUTATIONS = [
             "the marker stays with the numbers it disclaims",
         ),
         id="readout_never_says_a_pixel_is_outside_the_active_region",
+    ),
+    # ---- the LUT plot's vertical axis, pinned back to 1.0
+    #
+    # The state a plot arrives in if nobody thinks about it, and the one the
+    # spec calls out by name. A measured inverse LUT does not end at 1.0:
+    # data/full_recalibration_20260730_iso400/inverse_lut/inverse_lut.npz stops
+    # at 0.813 / 0.876 / 0.751, and that gap -- the projector never gets there
+    # -- is one of the few things the plot exists to show. With the axis fixed
+    # at [0, 1] the picture is identical for a LUT that reaches 1.0 and one
+    # that stops at 0.69: three curves, right colours, right shapes, ending
+    # somewhere below the top, and nothing on screen saying which.
+    #
+    # The coordinate check does *not* fail here, deliberately: it reads the
+    # mapping back off `drawLutCurve`'s return value, so a pinned axis stays
+    # internally consistent with what it drew. Pinning the range is a separate
+    # question from drawing it faithfully, and the two checks are separate for
+    # that reason -- the axis one compares against the fixture's own maximum,
+    # which no internally-consistent wrong answer can satisfy.
+    #
+    # 縦軸を 1.0 に固定する変異。実測LUTの終端は 1.0 ではなく、[0, 1] 固定では
+    # 1.0 まで届くLUTと 0.69 で止まるLUTが同じ絵になる。座標のチェックは
+    # 意図的に落ちない（戻り値の写像と描画は整合したままなので）。範囲を
+    # データから取ることと、その範囲へ忠実に描くことは別の問いであり、
+    # だからチェックも別になっている。
+    pytest.param(
+        "lut",
+        [(
+            "js/plot.js",
+            "  const vMax = vMaxRaw > vMin ? vMaxRaw : vMin + 1;",
+            "  const vMax = 1;",
+        )],
+        ("the plot's vertical axis comes from the data, not pinned to 1.0",),
+        id="lut_plot_axis_pinned_to_one",
+    ),
+    # ---- the three curves drawn for the wrong channels
+    #
+    # Rotated by one, so every polyline is a real curve of the fixture -- just
+    # not the one its colour claims. Nothing throws, three lines appear in
+    # three colours, the axis is right, and the only thing wrong is which
+    # channel each line is. On a real LUT that is the difference between "blue
+    # tops out lowest" and "red does", which is what the plot gets read for.
+    # Only the correspondence check sees it: the count, the colours, the axis
+    # and the overlay are all indifferent to a permutation.
+    # 1つずらす。どの折れ線もフィクスチャの実在の曲線であり、ただ色が名乗って
+    # いるチャンネルと中身が違う。本数・色・軸・重ね描きのどれも順列に無関心で、
+    # 座標対応のチェックだけが見ている。
+    pytest.param(
+        "lut",
+        [(
+            "js/plot.js",
+            "    polyline(ctx, xs, rows[c].map((v) => mapY(Number(v))),",
+            "    polyline(ctx, xs, rows[(c + 1) % rows.length].map((v) => mapY(Number(v))),",
+        )],
+        ("each of the three curves is drawn at its own channel's coordinates",),
+        id="lut_plot_draws_the_channels_in_the_wrong_order",
+    ),
+    # ---- the canvas backing store, sized in CSS pixels
+    #
+    # Without the devicePixelRatio term the figure is drawn into a quarter of
+    # the canvas on a 200% display and then stretched to fit -- three curves
+    # and a scale at half resolution, on the 150% Windows display this project
+    # is used on. It renders; it is simply blurred, which is not a failure any
+    # assertion about content can reach.
+    # DPR項が無いと 200% 表示で図がcanvasの1/4に描かれて引き伸ばされる。描画は
+    # 成功し、ただ半分の解像度になる（内容についてのどの検査にも掛からない）。
+    pytest.param(
+        "lut",
+        [
+            ("js/plot.js", "  canvas.width = Math.max(1, Math.round(cssW * dpr));",
+             "  canvas.width = Math.max(1, Math.round(cssW));"),
+            ("js/plot.js", "  canvas.height = Math.max(1, Math.round(cssH * dpr));",
+             "  canvas.height = Math.max(1, Math.round(cssH));"),
+        ],
+        ("the canvas backing store scales with devicePixelRatio",),
+        id="lut_plot_ignores_the_device_pixel_ratio",
+    ),
+    # ---- the loaded id thrown away by a view switch
+    #
+    # `buildServerParams` rebuilds every `sp-*` from the spec's declared
+    # default, and for a runtime id that default is "". Without the line that
+    # re-applies the loaded id, looking at another view and coming back empties
+    # the ターゲットID box for a target that is still loaded server-side -- and
+    # `compensation` then refuses a request the user has no reason to think
+    # incomplete, naming a parameter they can see they filled in.
+    # コントロールはビュー切替のたびに既定値（空文字）から作り直される。読み込み
+    # 済みのIDを書き戻す行が無いと、サーバには残っているターゲットについて欄
+    # だけが空に戻り、利用者から見て理由の無い拒否になる。
+    pytest.param(
+        "target",
+        [("js/main.js", "    if (loadedId) el.value = loadedId;\n", "")],
+        ("coming back re-fills the ターゲットID box with the loaded id",),
+        id="a_view_switch_empties_the_loaded_target_id",
+    ),
+    # ---- the image picker that changes the label and not the image
+    #
+    # Forced to index 0: the dropdown moves, a request goes out, an id comes
+    # back, and the box is filled -- with the id of the image that was already
+    # loaded. Everything about the interaction looks like it worked. This is
+    # why the check asserts the *index that was posted* and the id that came
+    # back, rather than that "a request happened".
+    # index を 0 に固定する。ドロップダウンは動き、要求は飛び、IDは返り、欄は
+    # 埋まる——既に読み込まれていた画像のIDで。操作は成功したように見える。
+    # だからチェックは「要求が飛んだ」ではなく「送られたindexと返ったID」を見る。
+    pytest.param(
+        "target",
+        [(
+            "js/main.js",
+            "    loadTargetImage(meta.path, Number($(\"target-images\").value) || 0)",
+            "    loadTargetImage(meta.path, 0)",
+        )],
+        ("choosing another image re-fetches that index and re-fills the id",),
+        id="the_image_picker_always_reloads_the_first_image",
     ),
 ]
 

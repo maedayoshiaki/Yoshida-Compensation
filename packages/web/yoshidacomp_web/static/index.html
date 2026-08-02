@@ -59,6 +59,59 @@
 
       <hr />
 
+      <!-- The two loaders the `compensation` view cannot be driven without.
+
+           Its ターゲットID / LUT ID are free text (a stored id only exists at
+           runtime, see views/base.py::ParamSpec.type), so before these existed
+           the only way to obtain one was to POST /api/target by hand: the view
+           shipped complete and unreachable from a browser. They load a path and
+           write the id they get back into the parameter box themselves -- the
+           id is never something the user has to copy.
+
+           In the sidebar rather than the toolbar because that row already holds
+           the matrix path box at 520px and these two are the same shape; three
+           of them side by side is a toolbar that wraps at any window this
+           viewer is used at.
+
+           `compensation` ビューを駆動するのに必要な2つの読み込み欄。
+           ターゲットID / LUT ID は実行時にしか存在しないidを指す自由入力で
+           あり、これが無い間は curl で POST /api/target するほかに手が無く、
+           ビューは「完成しているがブラウザから到達できない」状態だった。
+           読み込むと返ってきたidを自分でパラメータ欄へ書き込む（利用者に
+           コピーさせない）。ツールバーではなくサイドバーに置くのは、あちらが
+           既に520pxの行列パス欄を持っており、同じ形の欄が3つ並ぶと通常の
+           窓幅で折り返すためである。 -->
+      <div class="group">
+        <label class="lbl" for="target-path">ターゲット画像</label>
+        <input id="target-path" class="mono loader" type="text" spellcheck="false"
+               value="data/comp_test_targets_square"
+               placeholder="画像ファイル または画像を並べたディレクトリ" />
+        <div class="group inline">
+          <button id="btn-load-target">読み込み</button>
+          <span id="target-info" class="muted mono">未読み込み</span>
+        </div>
+        <!-- Only shown for a directory; see main.js::showTargetImages. -->
+        <select id="target-images" hidden></select>
+      </div>
+
+      <div class="group">
+        <label class="lbl" for="lut-path">逆LUT (.npz)</label>
+        <input id="lut-path" class="mono loader" type="text" spellcheck="false"
+               value="data/full_recalibration_20260730_iso400/inverse_lut/inverse_lut.npz"
+               placeholder="inverse_lut.npz のパス" />
+        <div class="group inline">
+          <button id="btn-load-lut">読み込み</button>
+          <span id="lut-info" class="muted mono">未読み込み</span>
+        </div>
+        <canvas id="lut-curve" class="lut-curve"></canvas>
+        <label class="lut-legend">
+          <input id="lut-gamma-overlay" type="checkbox" checked />
+          <span class="muted">解析ガンマ <span id="lut-gamma-value" class="mono">—</span> を重ねる</span>
+        </label>
+      </div>
+
+      <hr />
+
       <div class="group">
         <label class="lbl">サーバ側パラメータ <span class="muted">（適用で再取得）</span></label>
         <div id="server-params"></div>

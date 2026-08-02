@@ -78,6 +78,54 @@ export async function fetchMeta(matrixId) {
   return jsonOrThrow(await fetch(`/api/matrix/${matrixId}/meta`));
 }
 
+// POST a filesystem path; the server reads the image (or the directory of
+// them) and hands back an id + meta. `index` selects which image of a
+// directory becomes the loaded one -- it is sent on every call, including the
+// first, because the server treats an absent one as 0 and the caller here
+// always knows which it wants.
+//
+// Every refusal comes back through `errorMessage` like the matrix loader's:
+// a missing path is a 404 and an unreadable file a 400, and both carry a
+// sentence naming the path. That sentence is the whole value of the response
+// for a loader whose input is a hand-typed path.
+//
+// パスを送るとサーバが画像（またはディレクトリ）を読んでIDを返す。`index` は
+// ディレクトリのうちどれを選ぶか。拒否は行列の読み込みと同じく `errorMessage`
+// を通り、パスを名指しした文になる。手入力のパスを扱う以上、その文こそが
+// 応答の価値である。
+export async function loadTarget(path, index = 0) {
+  return jsonOrThrow(
+    await fetch("/api/target", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, index }),
+    })
+  );
+}
+
+// POST a filesystem path; the server reads the measured inverse LUT `.npz`.
+export async function loadLut(path) {
+  return jsonOrThrow(
+    await fetch("/api/lut", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path }),
+    })
+  );
+}
+
+// The LUT's own sample points: `{ t_grid, lut: [R, G, B], meta, gamma }`.
+//
+// Unlike the matrix, this really does cross the wire in full, and deliberately:
+// 3x256 floats is 768 numbers -- every point of the curve on screen -- against
+// the matrix's 99 MB. A point query would be the wrong shape here anyway, since
+// a curve means nothing one sample at a time.
+// 行列と違い中身をそのまま送る。3x256 = 768 個であり、行列の 99MB とは桁が
+// 違う。カーブは1点ずつでは意味を成さないので点クエリにする理由も無い。
+export async function fetchLutCurve(lutId) {
+  return jsonOrThrow(await fetch(`/api/lut/${encodeURIComponent(lutId)}/curve`));
+}
+
 // The view registry drives the GUI: every registered view and its parameters.
 export async function listViews() {
   return (await jsonOrThrow(await fetch("/api/views"))).views;
