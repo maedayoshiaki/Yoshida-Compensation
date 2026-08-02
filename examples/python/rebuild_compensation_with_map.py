@@ -29,6 +29,7 @@ ensure_on_syspath()
 
 from yoshidacomp.compensation import inverse_lut
 from yoshidacomp.compensation.pipeline import (
+    LINEARIZER_FILENAME_PREFIXES,
     generate_projection_image,
     load_target_images,
 )
@@ -141,11 +142,11 @@ def main() -> None:
             linear_dir / f"compensation_image_{index:02d}.png",
             compensation,
         )
-        suffix = {
-            "none": "no_gamma",
-            "gamma": "inv_gamma",
-            "inverse_lut": "inv_lut",
-        }[args.linearizer]
+        # Read from the core rather than written out here: ``POST /api/generate``
+        # (``packages/web/yoshidacomp_web/generate.py``) writes the same files
+        # and a second copy of this mapping would be two dicts that must agree
+        # with nothing making them. See ``LINEARIZER_FILENAME_PREFIXES``.
+        suffix = LINEARIZER_FILENAME_PREFIXES[args.linearizer]
         _save_rgb(
             projector_dir / f"{suffix}_comp_image_{index:02d}.png",
             projector_image,

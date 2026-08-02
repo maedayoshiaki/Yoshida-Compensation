@@ -572,6 +572,33 @@ LINEARIZERS: dict[str, Linearizer] = {
     "inverse_lut": _linearize_inverse_lut,
 }
 
+# The filename prefix each linearizer's projector images are saved under, e.g.
+# ``no_gamma_comp_image_00.png``. Keyed by the same names as ``LINEARIZERS``
+# directly above, so a linearizer added there without a prefix here fails
+# ``test_web_generate.py::test_every_linearizer_has_a_filename_prefix`` rather
+# than raising ``KeyError`` inside whichever writer reached it first.
+#
+# This dict lives in the core, not in a writer, because there are two writers:
+# ``examples/python/rebuild_compensation_with_map.py`` (the CLI) and
+# ``packages/web/yoshidacomp_web/generate.py`` (``POST /api/generate``). It was
+# the CLI's private literal until the web endpoint needed the same names; a
+# second copy there would have been two dicts that must agree and nothing
+# making them, so the GUI and the CLI could come to write different filenames
+# for the same run. Downstream tools glob these names --
+# ``examples/python/evaluate_compensation_conditions.py`` looks for
+# ``no_gamma_comp_image_{index:02d}.png`` / ``inv_gamma_...`` / ``inv_lut_...``
+# and finds nothing, silently, if they change -- so the *values* are pinned by
+# a test as well.
+#
+# 投影画像のファイル名接頭辞。書き出し側が CLI と Web の2つあるため、
+# 片方に literal を置くと2つの辞書が食い違いうる。値は下流のツールが
+# glob しているのでテストで固定してある。
+LINEARIZER_FILENAME_PREFIXES: dict[str, str] = {
+    "none": "no_gamma",
+    "gamma": "inv_gamma",
+    "inverse_lut": "inv_lut",
+}
+
 
 def generate_projection_image(
     target_uint8: np.ndarray,
