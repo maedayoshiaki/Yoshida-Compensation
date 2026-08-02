@@ -44,10 +44,11 @@ router が 400 にするのと、利用者から見て同じ結果になる。
 from __future__ import annotations
 
 import math
-from typing import NoReturn, get_args
+from typing import get_args
 
 import numpy as np
 
+from yoshidacomp.compensation.inverse_lut import InverseLut
 from yoshidacomp.compensation.pipeline import (
     LINEARIZERS,
     TargetDecodeMode,
@@ -56,7 +57,7 @@ from yoshidacomp.compensation.pipeline import (
 from yoshidacomp.config import get_config
 
 from ..matrix import MatrixContext, classify_space
-from ..store import targets
+from ..store import luts, targets
 from .base import ParamSpec, ViewNotApplicable, ViewResult, ViewSpec, register
 
 LABELS = ["R", "G", "B"]
@@ -179,48 +180,54 @@ def _require_target(params: dict) -> np.ndarray:
         ) from None
 
 
-def _require_lut(params: dict) -> NoReturn:
-    """Resolve ``lut`` for ``linearizer="inverse_lut"`` -- today, always refuse.
+def _require_lut(params: dict) -> InverseLut:
+    """Resolve ``lut`` for ``linearizer="inverse_lut"``, or refuse.
 
-    ``NoReturn`` is the honest annotation *today* and is meant to change: every
-    path raises because there is nothing to look a lut id up in yet. Task 4
-    turns this into ``-> InverseLut``, at which point the ``lut=lut`` argument
-    at the call site -- provably ``None`` while this is ``NoReturn``, and kept
-    deliberately -- starts carrying a value.
-    ``NoReturn`` は今日の事実であり、変わることを前提にした注釈である。
-
-    There is no LUT store yet: ``POST /api/lut`` and ``store.luts`` arrive in
-    plan B3 Task 4, so *every* lut id is unknown at the moment. Refusing with
-    a message that says so is the whole point -- without this,
+    Both refusals are deliberate and neither may become a 500. Without them
     ``_linearize_inverse_lut`` raises ``ValueError`` for ``lut=None``, which
-    ``routers/view.py`` deliberately leaves as a 500 (a ``ValueError`` from a
-    view is a server bug, see ``views/base.py::ViewNotApplicable``), and the
-    user gets a blank failure for a request that was merely early.
+    ``routers/view.py`` leaves as a 500 (a ``ValueError`` from a view is a
+    server bug, see ``views/base.py::ViewNotApplicable``) -- so a request that
+    merely named a LUT that was never loaded would come back as "the server
+    broke".
 
-    **Task 4:** replace this body with a ``store.luts.get(lut_id)`` lookup that
-    keeps both refusals -- the empty-id one and the unknown-id one, the latter
-    then being a genuine ``KeyError`` rather than an unconditional raise.
+    This used to be annotated ``NoReturn``, because until plan B3 Task 4 there
+    was nothing to look an id up in and *every* id was unknown. Task 4 added
+    ``POST /api/lut`` and ``store.luts``; the unknown-id branch is now a
+    genuine ``KeyError`` from the store rather than an unconditional raise, and
+    the ``lut=lut`` argument at the call site -- kept through three tasks while
+    it was provably ``None`` -- carries the loaded ``InverseLut``.
 
-    LUTストアは計画B3 Task 4 で入る。それまで LUT id は全て未知なので、
-    理由の分かる 400 で断る。断らないと ``_linearize_inverse_lut`` の
-    ``ValueError`` が 500 になり、単に手順が早かっただけの要求が
-    「サーバが壊れた」として返る。
+    Returns:
+        The stored ``InverseLut``, passed to ``generate_projection_image``
+        unchanged so the GUI linearizes through the same object the CLI does.
+
+    Raises:
+        ViewNotApplicable: ``lut`` was not given, or names a LUT that is not
+            loaded. Both are the client asking for something this server does
+            not have, exactly as in ``_require_target``.
+
+    未指定と未知のid、どちらも 400 で断る。断らないと ``lut=None`` の
+    ``ValueError`` が 500 になり、「読み込んでいないLUTを指定した」だけの
+    要求が「サーバが壊れた」として返る。
     """
     lut_id = _identifier(params, "lut")
     if not lut_id:
         raise ViewNotApplicable(
             'view "compensation": linearizer="inverse_lut" needs a measured '
-            "LUT: pass lut=<id>, or choose linearizer=gamma for the analytic "
-            "inverse gamma. "
+            "LUT: pass lut=<id>, the id returned by POST /api/lut, or choose "
+            "linearizer=gamma for the analytic inverse gamma. "
             "（inverse_lut は lut=<id> を必要とします。）"
         )
-    raise ViewNotApplicable(
-        f'view "compensation": no LUT with id {lut_id!r} is loaded. Loading '
-        "inverse LUTs (POST /api/lut) is plan B3 Task 4; until then use "
-        "linearizer=none or linearizer=gamma. "
-        f"（LUT {lut_id!r} は読み込まれていません。LUTの読み込みは"
-        "計画B3 Task 4 で入ります。）"
-    )
+    try:
+        return luts.get(lut_id).lut
+    except KeyError:
+        raise ViewNotApplicable(
+            f'view "compensation": no LUT with id {lut_id!r} is loaded. '
+            "POST /api/lut to load one and use the id it returns, or choose "
+            "linearizer=none / linearizer=gamma. "
+            f"（LUT {lut_id!r} は読み込まれていません。POST /api/lut で"
+            "読み込んでください。）"
+        ) from None
 
 
 def _target_decode(params: dict) -> tuple[str, float]:
@@ -325,7 +332,7 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
         projector=projector,
         active_region=region,
         linearizer=linearizer,  # type: ignore[arg-type]
-        lut=lut,  # type: ignore[arg-type]
+        lut=lut,
         target_decode=decode_mode,  # type: ignore[arg-type]
         target_gamma=decode_gamma,
         dtype=np.float32,

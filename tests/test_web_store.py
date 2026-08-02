@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import threading
 
-from yoshidacomp_web.store import MatrixStore, TargetStore
+from yoshidacomp_web.store import LutStore, MatrixStore, TargetStore
 
 
 def test_fresh_stores_issue_kind_prefixed_ids_starting_at_one() -> None:
@@ -29,16 +29,20 @@ def test_fresh_stores_issue_kind_prefixed_ids_starting_at_one() -> None:
 
     Asserting this against the process-wide singletons instead would make
     the literal depend on how many other tests already called
-    ``store.put``/``targets.put`` before this one runs -- exactly the
-    order-fragility this test exists to avoid (task-2-review.md Important 4).
+    ``store.put``/``targets.put``/``luts.put`` before this one runs -- exactly
+    the order-fragility this test exists to avoid (task-2-review.md
+    Important 4).
     """
     matrix_store = MatrixStore()
     target_store = TargetStore()
+    lut_store = LutStore()
 
     assert matrix_store.put(object()) == "matrix1"
     assert matrix_store.put(object()) == "matrix2"
     assert target_store.put(object()) == "target1"
     assert target_store.put(object()) == "target2"
+    assert lut_store.put(object()) == "lut1"
+    assert lut_store.put(object()) == "lut2"
 
 
 def test_clear_does_not_reset_the_counter() -> None:
@@ -54,32 +58,44 @@ def test_clear_does_not_reset_the_counter() -> None:
     assert store.put(object()) == "target2"
 
 
-def test_matrix_and_target_stores_do_not_share_state() -> None:
-    """A ``MatrixStore`` and a ``TargetStore`` must never resolve each
-    other's ids. Fails immediately if a future edit moves ``_items``,
-    ``_lock``, or ``_counter`` from ``_IdStore.__init__`` (per-instance) to
-    class scope (shared across every instance, including the two live
-    process-wide singletons ``store``/``targets``).
+def test_the_stores_do_not_share_state() -> None:
+    """A ``MatrixStore``, a ``TargetStore`` and a ``LutStore`` must never
+    resolve each other's ids. Fails immediately if a future edit moves
+    ``_items``, ``_lock``, or ``_counter`` from ``_IdStore.__init__``
+    (per-instance) to class scope (shared across every instance, including the
+    three live process-wide singletons ``store``/``targets``/``luts``).
+
+    All three pairs are checked, not only matrix-vs-target: the third
+    subclass arrived in plan B3 Task 4 and a pair-wise check that stopped at
+    two would have left it unguarded, which is the whole failure mode this
+    test exists for (``GET /api/lut/{a matrix id}/curve`` resolving a
+    ``MatrixContext`` and 500ing on ``.lut`` instead of 404ing).
     """
-    matrix_store = MatrixStore()
-    target_store = TargetStore()
+    stores = {
+        "matrix": MatrixStore(),
+        "target": TargetStore(),
+        "lut": LutStore(),
+    }
 
-    assert matrix_store._items is not target_store._items
-    assert matrix_store._lock is not target_store._lock
-    assert matrix_store._counter is not target_store._counter
+    for a_kind, a in stores.items():
+        for b_kind, b in stores.items():
+            if a_kind == b_kind:
+                continue
+            assert a._items is not b._items, (a_kind, b_kind)
+            assert a._lock is not b._lock, (a_kind, b_kind)
+            assert a._counter is not b._counter, (a_kind, b_kind)
 
-    marker = object()
-    matrix_id = matrix_store.put(marker)
-    assert matrix_id not in target_store._items
-    try:
-        target_store.get(matrix_id)
-    except KeyError:
-        pass
-    else:
-        raise AssertionError(
-            f"TargetStore resolved {matrix_id!r}, an id it never issued -- "
-            "the two stores are sharing state"
-        )
+            issued = a.put(object())
+            assert issued not in b._items, (a_kind, b_kind)
+            try:
+                b.get(issued)
+            except KeyError:
+                pass
+            else:
+                raise AssertionError(
+                    f"the {b_kind} store resolved {issued!r}, an id it never "
+                    f"issued -- it is sharing state with the {a_kind} store"
+                )
 
 
 def test_put_is_thread_safe_and_issues_no_duplicate_or_lost_ids() -> None:

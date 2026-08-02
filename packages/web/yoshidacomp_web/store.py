@@ -1,12 +1,12 @@
 """In-memory context stores (one process, thread-safe).
 
-読み込み済みの行列・ターゲット画像をサーバのRAMに置き、不透明なIDで参照する。
-線を渡るのは2次元のビュー結果だけで、(H, W, 4, 3) の行列そのものは決して
-送らない。FastAPI に依存させないので単体でテストできる。
+読み込み済みの行列・ターゲット画像・逆LUTをサーバのRAMに置き、不透明なIDで
+参照する。線を渡るのは2次元のビュー結果だけで、(H, W, 4, 3) の行列そのものは
+決して送らない。FastAPI に依存させないので単体でテストできる。
 
-``MatrixStore`` と ``TargetStore`` は id 採番・ロック・``get``/``put``/
-``clear`` が完全に同じ形なので、その共通部分を ``_IdStore`` に切り出して
-両方から使う。id の接頭辞（``"matrix"``/``"target"``）だけが違う。
+``MatrixStore``/``TargetStore``/``LutStore`` は id 採番・ロック・``get``/
+``put``/``clear`` が完全に同じ形なので、その共通部分を ``_IdStore`` に切り出して
+3つとも使う。id の接頭辞（``"matrix"``/``"target"``/``"lut"``）だけが違う。
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ import threading
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 if TYPE_CHECKING:
+    from .lut import LutContext
     from .matrix import MatrixContext
     from .target import TargetContext
 
@@ -70,5 +71,13 @@ class TargetStore(_IdStore["TargetContext"]):
         super().__init__("target")
 
 
+class LutStore(_IdStore["LutContext"]):
+    """Thread-safe id -> LutContext map. Ids look like ``"lut1"``."""
+
+    def __init__(self) -> None:
+        super().__init__("lut")
+
+
 store = MatrixStore()
 targets = TargetStore()
+luts = LutStore()

@@ -23,3 +23,13 @@ class LoadTargetRequest(BaseModel):
 
     path: str
     index: int = 0
+
+
+class LoadLutRequest(BaseModel):
+    """Body of ``POST /api/lut``.
+
+    No ``index``: an inverse LUT ``.npz`` holds exactly one table, so unlike a
+    target there is nothing to select within it.
+    """
+
+    path: str

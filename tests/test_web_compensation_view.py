@@ -148,6 +148,7 @@ def _reference(
     output: str = "linear",
     target_decode: str = "srgb",
     target_gamma: float = 2.2,
+    lut=None,
 ) -> np.ndarray:
     """What the CLI would compute, via the real pipeline function.
 
@@ -160,6 +161,7 @@ def _reference(
         projector=get_config().projector,
         active_region=_REGION,
         linearizer=linearizer,  # type: ignore[arg-type]
+        lut=lut,
         target_decode=target_decode,  # type: ignore[arg-type]
         target_gamma=target_gamma,
         dtype=np.float32,
@@ -584,19 +586,124 @@ def test_inverse_lut_without_a_lut_is_refused(
 def test_inverse_lut_with_an_unknown_lut_id_is_refused(
     tmp_path, stand_in_projector_config
 ) -> None:
-    """未知の LUT id も 400。LUTストアは計画B3 Task 4 で入る。
+    """未知の LUT id は 400。
 
-    今日は**あらゆる** LUT id が未知である（``store`` に LUT が無い）。
-    それを 500 ではなく、次に何をすればよいか分かる 400 で返す。
+    ``luts.clear()`` した直後なので ``"lut_that_was_never_loaded"`` はどの
+    ストアにも無い。500（``_linearize_inverse_lut`` の ``ValueError``）では
+    なく、次に何をすればよいか分かる 400 で返す。
     """
+    from yoshidacomp_web.store import luts
+
     client, matrix_id, target_id, _, _ = _prepared(tmp_path, stand_in_projector_config)
+    luts.clear()
     response = client.get(
-        _url(matrix_id, target=target_id, linearizer="inverse_lut", lut="lut1")
+        _url(
+            matrix_id,
+            target=target_id,
+            linearizer="inverse_lut",
+            lut="lut_that_was_never_loaded",
+        )
     )
     assert response.status_code == 400, response.text
     detail = response.json()["detail"]
-    assert "lut1" in detail
-    assert "Task 4" in detail or "/api/lut" in detail
+    assert "lut_that_was_never_loaded" in detail
+    assert "/api/lut" in detail
+
+
+@pytest.mark.parametrize("output", ["linear", "code"])
+def test_inverse_lut_with_a_loaded_lut_matches_the_pipeline_exactly(
+    tmp_path, stand_in_projector_config, output: str
+) -> None:
+    """計画B3 Task 4 の継ぎ目そのもの: 読み込んだ LUT が実際に使われること。
+
+    ``_require_lut`` は Task 3 まで無条件に断っていた（``NoReturn``）ため、
+    ``generate_projection_image(lut=...)`` へ渡る値は常に ``None`` だった。
+    ここでは ``POST /api/lut`` で読み込んだ id を渡し、ビューの画素が
+    **同じ ``InverseLut`` を渡した** ``generate_projection_image`` の戻り値と
+    完全一致することを見る。
+
+    判別力: ``linearizer="gamma"`` の結果とも違うことを併せて確認する。
+    「LUT を無視して解析ガンマに落ちる」実装でも、それ単体では
+    「``none`` と違う」検査を通ってしまうためである。3本のカーブは形が全部
+    違い（``tests/test_web_lut.py`` の ``_LUT_ROWS`` と同じ理由）、終端も
+    1.0 ではないので、チャンネルの取り違えも恒等LUTへの退化もここに出る。
+    """
+    from yoshidacomp.compensation.inverse_lut import InverseLut, save_inverse_lut
+    from yoshidacomp_web.store import luts
+
+    client, matrix_id, target_id, matrices, image = _prepared(
+        tmp_path, stand_in_projector_config
+    )
+    luts.clear()
+
+    t_grid = np.array([0.0, 0.2, 0.5, 0.9, 1.0], dtype=np.float32)
+    rows = np.array(
+        [
+            [0.0, 0.11, 0.275, 0.495, 0.55],
+            [0.0, 0.22, 0.311, 0.417, 0.44],
+            [0.0, 0.028, 0.172, 0.557, 0.688],
+        ],
+        dtype=np.float32,
+    )
+    lut_path = tmp_path / "inverse_lut.npz"
+    save_inverse_lut(lut_path, InverseLut(lut=rows, t_grid=t_grid, meta={"source": "gray"}))
+
+    load = client.post("/api/lut", json={"path": str(lut_path)})
+    assert load.status_code == 200, load.text
+    lut_id = load.json()["id"]
+
+    response = client.get(
+        _url(
+            matrix_id,
+            target=target_id,
+            linearizer="inverse_lut",
+            lut=lut_id,
+            output=output,
+        )
+    )
+    assert response.status_code == 200, response.text
+    data = _hwc(response)
+
+    expected = _reference(
+        image,
+        matrices,
+        linearizer="inverse_lut",
+        output=output,
+        lut=InverseLut(lut=rows, t_grid=t_grid, meta={"source": "gray"}),
+    )
+    inside = _inside_mask()
+    np.testing.assert_array_equal(data[inside], expected[inside])
+    assert np.isnan(data[~inside]).all()
+
+    # Which of the two outputs the linearizer can even reach, asserted rather
+    # than assumed.
+    #
+    # ``output="linear"`` is the compensation *before* linearization -- the
+    # pipeline returns it unchanged whatever ``linearizer`` says -- so the LUT
+    # provably cannot alter it, and the exact-match above is a pass-through
+    # check there rather than a check of the LUT. ``output="code"`` is the one
+    # the LUT actually shapes. Both directions are pinned here, in one place,
+    # so neither claim rests on prose.
+    #
+    # どちらの出力に linearizer が効くのかを、仮定ではなく検証で固定する。
+    # ``linear`` は線形化の**手前**であり LUT では変わりえない（上の完全一致は
+    # そこでは素通しの検査である）。``code`` が LUT の形が出る側である。
+    gamma_reference = _reference(image, matrices, linearizer="gamma", output=output)
+    none_reference = _reference(image, matrices, linearizer="none", output=output)
+    if output == "linear":
+        np.testing.assert_array_equal(expected[inside], none_reference[inside])
+    else:
+        # The LUT has to be *this* LUT, not the analytic gamma standing in for
+        # it, and not the identity.
+        # 解析ガンマに落ちる実装とも、恒等に落ちる実装とも区別する。
+        assert not np.allclose(expected[inside], gamma_reference[inside], atol=1e-4), (
+            "the fixture LUT is too close to the analytic gamma to tell an "
+            "implementation that ignores it from one that uses it"
+        )
+        assert not np.allclose(expected[inside], none_reference[inside], atol=1e-4), (
+            "the fixture LUT is too close to the identity to tell an "
+            "implementation that skips linearization from one that does it"
+        )
 
 
 @pytest.mark.parametrize("bad_gamma", ["0", "-2.2", "nan"])
