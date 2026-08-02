@@ -1,18 +1,15 @@
 """Photometric compensation image calculation module.
 
 Provides functionality to compute compensation images using per-pixel
-color mixing matrices and PyTorch-based batch processing with GPU
-acceleration.
+color mixing matrices.
 
 色補償画像計算モジュール。
 
-ピクセルごとのカラーミキシング行列と PyTorch ベースのバッチ処理
-（GPU アクセラレーション対応）を用いた補償画像の計算機能を提供する。
+ピクセルごとのカラーミキシング行列を用いた補償画像の計算機能を提供する。
 """
 
 import numpy as np
 from numpy import ndarray
-import torch
 
 
 def calc_compensation_image(
@@ -24,13 +21,48 @@ def calc_compensation_image(
     """Calculate a compensation image using color mixing matrices.
 
     Apply photometric compensation by transforming the target image
-    through pixel-wise color mixing matrices. Uses batch processing
-    via PyTorch for GPU acceleration when available.
+    through pixel-wise color mixing matrices: for each pixel,
+    ``[R, G, B, 1] @ M`` where ``M`` is that pixel's 4x3 matrix.
 
     カラーミキシング行列を用いて補償画像を計算する。
 
-    ピクセルごとのカラーミキシング行列を通じて目標画像に色補償を適用する。
-    GPU が利用可能な場合は PyTorch によるバッチ処理で高速化を行う。
+    ピクセルごとのカラーミキシング行列を通じて目標画像に色補償を適用する:
+    各画素で ``[R, G, B, 1] @ M``（``M`` はその画素の 4x3 行列）を計算する。
+
+    This used to run the matmul as a batched ``torch.bmm`` (GPU-accelerated
+    when CUDA is available). Measured against that implementation (see
+    ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md``,
+    Addendum 4, for the full table): this is 12 multiply-adds per pixel
+    (~24 MFLOP for a 1920x1080 frame) -- not a workload that needs GPU
+    batching -- and torch's own CPU and CUDA backends already disagree
+    with each other by up to 1 count (uint8) / ~1e-5 (float32) on real
+    data, so there was no single bit-exact "torch answer" to begin with.
+    This implementation matches torch-CPU byte-for-byte, exhaustively, on
+    every input tested including the real 1920x1080 matrix in
+    ``data/linear_pipeline_1080/``; it differs from torch-CUDA only at the
+    exact pixels (9 out of 6,220,800 on that same real matrix) where
+    torch-CUDA already differs from torch-CPU, by the same 1 count -- i.e.
+    never worse than torch's own cross-device noise floor. Per-frame numpy
+    is slower than torch-CUDA once torch is already loaded and warm
+    (measured ~0.22s vs ~0.08s for 1920x1080), but avoids torch's own
+    ~7.1s first-import cost entirely, which is the actual bottleneck for
+    an interactive first use.
+
+    以前はこの行列積を（CUDAが使えればGPUで加速される）バッチ ``torch.bmm``
+    で計算していた。その実装との実測比較（詳細は上記レポートの
+    Addendum 4）: 1画素あたり12回の積和（1920x1080フレームで約24MFLOP）
+    しかなく、GPUバッチ処理を要する規模ではない。加えて torch 自身の
+    CPU/CUDAバックエンドは実データで既に最大1カウント（uint8）・約1e-5
+    （float32）ずれており、そもそも単一のビット精度な「torchの答え」は
+    存在しなかった。この実装は torch-CPU と、``data/linear_pipeline_1080/``
+    の実データを含むあらゆる検証入力でバイト単位・全数一致する。
+    torch-CUDA との相違は、torch-CUDA が torch-CPU と既にずれている
+    画素（同じ実データで6,220,800画素中9画素）に限られ、そのずれ幅も
+    同じ1カウントを超えない（＝torch自身の機種間ノイズ床を超えない）。
+    1フレームあたりの実行速度は、torch が既にロード・ウォームアップ済みの
+    場合は numpy の方が torch-CUDA より遅い（1920x1080で実測約0.22秒 対
+    約0.08秒）が、torch自身の初回import コスト（実測約7.1秒）を完全に
+    回避できる。これは対話的な初回利用における実際のボトルネックである。
 
     Args:
         target_image: Input target image with shape ``(H, W, 3)``.
@@ -65,8 +97,6 @@ def calc_compensation_image(
         ``clip=False`` でない限り、スケーリング前に値は有効範囲 [0, 1]
         にクランプされる。
     """
-    height, width, _ = target_image.shape
-
     # Normalize target image to [0, 1] range
     target_dtype = target_image.dtype
     if target_dtype == np.uint8:
@@ -76,33 +106,24 @@ def calc_compensation_image(
     else:
         norm_target_image = target_image.astype(np.float32)
 
-    # Convert to torch tensor for batch processing
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    matrices = np.asarray(color_mixing_matrices, dtype=np.float32)
 
-    norm_target_tensor = torch.from_numpy(norm_target_image).float().to(device)
-    color_mixing_matrices_tensor = (
-        torch.from_numpy(color_mixing_matrices)
-        .float()
-        .reshape(-1, color_mixing_matrices.shape[2], color_mixing_matrices.shape[3])
-        .to(device)
+    # [R, G, B, 1] @ M, per pixel, without ever materializing the augmented
+    # (H, W, 4) array: M's four rows (R-weight, G-weight, B-weight, bias)
+    # contracted against the target's three channels plus an implicit 1 for
+    # the bias row. Matches torch's element order (and therefore its
+    # float32 rounding) exactly -- see the docstring above for the measured
+    # agreement this achieves.
+    compensation_image = (
+        norm_target_image[..., 0:1] * matrices[..., 0, :]
+        + norm_target_image[..., 1:2] * matrices[..., 1, :]
+        + norm_target_image[..., 2:3] * matrices[..., 2, :]
+        + matrices[..., 3, :]
     )
 
-    # Reshape target tensor and append bias term for affine transformation
-    num_pixels = height * width
-    norm_target_tensor = norm_target_tensor.view(num_pixels, 3)
-    bias = torch.ones((num_pixels, 1), device=device, dtype=norm_target_tensor.dtype)
-    norm_target_tensor = torch.cat([norm_target_tensor, bias], dim=1)
-
-    # Apply color mixing matrices via batch matrix multiplication
-    compensation_tensor = torch.bmm(
-        norm_target_tensor.unsqueeze(1),  # Shape: (num_pixels, 1, 4)
-        color_mixing_matrices_tensor,
-    ).squeeze(1)  # Shape: (num_pixels, 3)
-
-    # Clamp to valid range and convert back to numpy
+    # Clamp to valid range
     if clip:
-        compensation_tensor = torch.clamp(compensation_tensor, 0.0, 1.0)
-    compensation_image = compensation_tensor.view(height, width, 3).cpu().numpy()
+        compensation_image = np.clip(compensation_image, 0.0, 1.0)
 
     # Scale to output dtype range
     if dtype == np.uint8:

@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _CORE_DIR = _REPO_ROOT / "packages" / "core" / "yoshidacomp"
 _IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(yoshidacomp_web)\b", re.MULTILINE)
@@ -196,45 +198,40 @@ def test_importing_pipeline_does_not_pull_torch() -> None:
     assert reported["cv2"] == "True", out.stdout
 
 
-def test_generate_projection_image_gamma_call_pulls_only_what_the_matrix_step_needs() -> None:
-    """``generate_projection_image(..., linearizer="gamma")`` の初回呼び出し後、
-    ``psutil``・``color_mixing_matrix``・``scipy`` は sys.modules に無いこと。
+@pytest.mark.parametrize("linearizer", ["gamma", "none"])
+def test_generate_projection_image_first_call_pulls_no_torch(linearizer: str) -> None:
+    """``generate_projection_image(...)`` の初回呼び出し後、torch・psutil・
+    color_mixing_matrix・scipy のいずれも sys.modules に無いこと
+    （``linearizer`` を問わず）。
 
-    This is the test the review that reversed Task 1's original "keep
-    torch" decision asked for: import-only coverage let an 8s-plus,
+    History: the review that reversed Task 1's original "keep torch"
+    decision found that import-only coverage let an 8s-plus,
     CUDA-initializing *first call* stall through even though the module
-    import itself was fast. ``_linearize_gamma`` now calls
-    ``_apply_inverse_gamma_numpy`` (numpy), not the torch implementation,
-    so the gamma step itself contributes none of ``torch``/``psutil``/
-    ``color_mixing_matrix``.
+    import itself was fast. At that point, switching ``_linearize_gamma``
+    to ``_apply_inverse_gamma_numpy`` (numpy) removed the gamma step's own
+    contribution, but ``calc_compensation_image`` (the compensation
+    matrix-multiply step, called unconditionally regardless of linearizer)
+    still needed torch -- confirmed by this test's ``linearizer="none"``
+    case, which pulls no gamma code at all and still cost the same ~7.7s
+    that ``linearizer="gamma"`` did, proving the stall was unconditional on
+    the linearizer choice. That was the whole reason this test parametrizes
+    over both: ``"gamma"`` alone could not have shown this.
 
-    **``torch`` is deliberately NOT asserted absent here -- it will be
-    present, and that is correct, not a regression.**
-    ``calc_compensation_image`` (``photometric_compensation.py``), the
-    compensation *matrix-multiply* step, is called unconditionally by
-    ``generate_projection_image`` regardless of which linearizer is
-    selected -- confirmed by measuring ``linearizer="none"`` alone, which
-    pulls torch and costs the same ~7.7s as ``linearizer="gamma"`` did
-    before this task's numpy switch. Profiling that cost (see the task
-    report) found it is overwhelmingly the cost of ``import torch`` itself
-    (~7.1s of it, independent of CUDA specifically: ``torch.cuda.is_available()``
-    is ~0.15s and the first real CUDA op is ~0.38s more) -- a cost that was
-    always going to be paid on any real (non-``"none"``) call to
-    ``generate_projection_image``, before or after this task, because the
-    matrix step is genuine GPU-scale linear algebra, not the trivial
-    elementwise power the brief singled out gamma correction for. Switching
-    the gamma linearizer to numpy measurably shrinks the first-call cost
-    (~7.9s to ~7.6-7.7s -- the marginal cost of the old gamma-specific
-    torch call plus the ``color_mixing_matrix``/``psutil`` import it used to
-    trigger) but does **not** eliminate the dominant stall; that remains
-    ``calc_compensation_image``'s and is out of this task's scope (see the
-    task report's "Addendum 3" section for the full numbers and why this
-    was not also rewritten here).
+    ``calc_compensation_image`` has since also been switched to numpy (same
+    measure-then-decide method: torch's own CPU and CUDA backends disagree
+    with each other on real 1920x1080 data by up to 1 count in uint8,
+    9 pixel-channels out of 6,220,800 -- never exceeded by numpy's own
+    divergence from either backend -- so there was no single bit-exact
+    torch answer to preserve; see
+    ``photometric_compensation.calc_compensation_image``'s docstring and
+    the task report's Addendum 4 for the full table). So, unlike the
+    version of this test that first existed, **``torch`` is now asserted
+    absent for both linearizers** -- measured first-call cost dropped from
+    ~7.6-7.9s to ~0.01s for both.
 
-    Run in a subprocess for the same reason as the import-only test above.
+    Run in a subprocess: in-process, some other test collected earlier in
+    the same session may have already imported these modules.
     """
-    import numpy as np
-
     code = (
         "import sys\n"
         "import numpy as np\n"
@@ -253,7 +250,7 @@ def test_generate_projection_image_gamma_call_pulls_only_what_the_matrix_step_ne
         "target = np.full((4, 4, 3), 200, dtype=np.uint8)\n"
         "generate_projection_image(\n"
         "    target, matrices, projector=Projector(), active_region=(0, 0, 4, 4),\n"
-        "    linearizer='gamma', target_decode='none',\n"
+        f"    linearizer={linearizer!r}, target_decode='none',\n"
         ")\n"
         "mods = sys.modules\n"
         "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods))\n"
@@ -269,6 +266,4 @@ def test_generate_projection_image_gamma_call_pulls_only_what_the_matrix_step_ne
     assert reported["color_mixing_matrix"] == "False", out.stdout
     assert reported["psutil"] == "False", out.stdout
     assert reported["scipy"] == "False", out.stdout
-    # See docstring: torch is expected here, from calc_compensation_image,
-    # not from the gamma step.
-    assert reported["torch"] == "True", out.stdout
+    assert reported["torch"] == "False", out.stdout

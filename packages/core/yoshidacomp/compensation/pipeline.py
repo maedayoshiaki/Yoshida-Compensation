@@ -24,6 +24,9 @@ import cv2
 import numpy as np
 
 from yoshidacomp.compensation.inverse_lut import InverseLut, apply_inverse_lut
+from yoshidacomp.compensation.photometric_compensation import (
+    calc_compensation_image,
+)
 from yoshidacomp.compensation.projection_region import (
     embed_in_active_region,
     mask_to_active_region,
@@ -314,10 +317,13 @@ def _apply_inverse_gamma_numpy(
     than torch: delivery output is unchanged, the float32 preview the web
     layer wants is within torch's own noise floor, and the gamma step's own
     marginal contribution to the ~8s CUDA-initialization stall (and the
-    projector GPU's memory contention) is gone. Note this does not remove
-    that stall from ``generate_projection_image`` as a whole --
-    ``calc_compensation_image`` still pulls torch unconditionally; see
-    :func:`_linearize_gamma`'s docstring.
+    projector GPU's memory contention) is gone. ``calc_compensation_image``
+    (``photometric_compensation.py``) was, for a while, the reason
+    ``generate_projection_image`` as a whole still paid that stall
+    regardless of linearizer; it has since been switched to numpy too (same
+    measure-then-decide method, see the task report's Addendum 4), so this
+    module now has no torch dependency anywhere in ``generate_projection_image``'s
+    call graph.
 
     ``LINEARIZERS["gamma"]`` に（:func:`_linearize_gamma` 経由で）配線
     している。torch 版との実測比較（詳細は上記レポートの表。旧版はこの
@@ -348,11 +354,13 @@ def _apply_inverse_gamma_numpy(
     ``_linearize_gamma`` は torch ではなくこの関数を呼ぶ: 配信物は不変、
     web層が求める float プレビューは torch自身のノイズ幅に収まり、
     ガンマ処理自身が約8秒のCUDA初期化停止（とプロジェクタと同じGPUの
-    メモリ競合）に寄与していた分は無くなる。ただしこれで
-    ``generate_projection_image`` 全体が初回呼び出しでその停止を
-    免れるわけではない -- ``calc_compensation_image`` は依然として
-    無条件に torch を引く。:func:`_linearize_gamma` の docstring を
-    参照。
+    メモリ競合）に寄与していた分は無くなる。``calc_compensation_image``
+    （``photometric_compensation.py``）は、しばらくの間
+    ``generate_projection_image`` 全体が linearizer に関わらず
+    その停止を払い続けていた原因だったが、同じ「測ってから決める」
+    手法で numpy へ切り替え済み（詳細はレポートの Addendum 4）。
+    そのため現在は ``generate_projection_image`` の呼び出しグラフ全体で
+    torch への依存が無い。
 
     Args:
         image: RGB image, shape ``(H, W, 3)``. uint8 in [0, 255], uint16 in
@@ -428,15 +436,18 @@ def _linearize_gamma(
     CUDA, which is exactly the interactive-GUI stall the numpy version
     exists to avoid.
 
-    This does **not** make ``generate_projection_image`` as a whole
-    torch-free on first call: ``calc_compensation_image`` (the compensation
-    matrix-multiply step, called unconditionally regardless of linearizer)
-    still needs torch and still costs roughly the same ~7.6-7.7s on first
-    use -- confirmed by measuring ``linearizer="none"`` alone, which pulls
-    torch and costs about the same. That is out of this function's scope:
-    it is genuine GPU-scale linear algebra, not the trivial elementwise
-    power the brief singled out gamma correction for. See the task report's
-    "Addendum 3" for the full measurement and why it was left alone here.
+    This function's switch alone did **not** make ``generate_projection_image``
+    as a whole torch-free on first call: ``calc_compensation_image`` (the
+    compensation matrix-multiply step, called unconditionally regardless of
+    linearizer) still needed torch and still cost roughly the same
+    ~7.6-7.7s on first use -- confirmed by measuring ``linearizer="none"``
+    alone, which pulled torch and cost about the same. That has since also
+    been switched to numpy (Addendum 4 of the task report), by the same
+    measure-then-decide method: torch's own CPU and CUDA backends disagree
+    with each other on real data too (by up to 1 count in uint8, never
+    exceeded by numpy's own divergence from either backend), so the same
+    "no single bit-exact torch answer to preserve" reasoning applied.
+    ``generate_projection_image``'s call graph is now torch-free end to end.
     :func:`_apply_inverse_gamma_numpy` を呼ぶ。``color_mixing_matrix`` の
     torch 実装は呼ばない。*この関数自身*が寄与する torch/psutil/scipy
     依存は、import・初回呼び出しのいずれにおいてもゼロになった。
@@ -449,16 +460,19 @@ def _linearize_gamma(
     ことを実測し、これはまさに numpy 版が避けようとしている対話的GUIの
     停止そのものだったため、この判断を覆した。
 
-    これによって ``generate_projection_image`` 全体が初回呼び出しで
-    torch-freeになるわけではない: ``calc_compensation_image``（補償の
-    行列積ステップ。linearizer に関わらず無条件に呼ばれる）は依然として
-    torch を必要とし、初回利用時に同程度の約7.6〜7.7秒かかる --
-    ``linearizer="none"`` 単体でも torch を引き、同程度のコストが
-    かかることを実測して確認済み。これはこの関数の範囲外である:
-    ブリーフがガンマ補正について「割に合わない」と名指しした些細な
-    要素ごとのべき乗とは異なり、本物のGPU規模の線形代数だからである。
-    詳細と、ここでは手を付けなかった理由はレポートの「Addendum 3」を
-    参照。
+    この関数だけの切り替えでは ``generate_projection_image`` 全体が
+    初回呼び出しで torch-free になったわけではなかった:
+    ``calc_compensation_image``（補償の行列積ステップ。linearizer に
+    関わらず無条件に呼ばれる）は依然として torch を必要とし、初回利用時に
+    同程度の約7.6〜7.7秒かかっていた -- ``linearizer="none"`` 単体でも
+    torch を引き、同程度のコストがかかることを実測して確認済み。これも
+    同じ「測ってから決める」手法で numpy へ切り替え済み（レポートの
+    Addendum 4）: torch 自身の CPU/CUDA バックエンドは実データでも
+    （uint8で最大1カウント）互いにずれており、numpy がどちらかと
+    ずれる幅もそれを超えないため、「単一のビット精度なtorchの答えは
+    そもそも存在しない」という同じ理屈が成り立った。これで
+    ``generate_projection_image`` の呼び出しグラフ全体が torch-free に
+    なっている。
     """
     return _apply_inverse_gamma_numpy(image, gamma=1.0 / projector.gamma)
 
@@ -576,15 +590,6 @@ def generate_projection_image(
             "undefined for values outside [0, 1] -- exactly the values "
             "clip=False exists to preserve."
         )
-
-    # Lazily imported: photometric_compensation imports torch at module
-    # scope, and this module must not pull torch in just from being
-    # imported (nor, per _linearize_gamma's docstring, from the gamma
-    # linearizer's first call -- this is the same reasoning applied here
-    # since calc_compensation_image itself still needs real torch compute).
-    from yoshidacomp.compensation.photometric_compensation import (
-        calc_compensation_image,
-    )
 
     target_linear = decode_target(
         target_uint8,
