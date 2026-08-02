@@ -39,23 +39,47 @@
 // real matrix x photo pairs, 46.5-85.0% of pixels are out of gamut, so this
 // view is normally *mostly* not class 0: a palette that only reads when a few
 // pixels are flagged (a neutral field with one accent) would be the wrong
-// choice here. These are Okabe-Ito qualitative colours. Separations below are
-// measured on the bytes ANGLE/D3D11 actually wrote, read back with
-// gl.readPixels, not computed from these literals:
+// choice here. These are Okabe-Ito qualitative colours. Every separation below
+// is measured on the bytes ANGLE/D3D11 actually wrote, read back with
+// gl.readPixels, and not computed from these literals:
 //
-//   closest pair (class 2 vs 3, orange vs vermillion)  CIEDE2000 22.2
-//   next closest (class 0 vs 1)                        CIEDE2000 38.4
-//   nearest class to the mask colour (class 1)         CIEDE2000 44.2
+//   normal vision   closest pair (class 2 vs 3)          CIEDE2000  22.2
+//                   next closest (class 0 vs 1)          CIEDE2000  38.4
+//                   nearest class to the mask colour     CIEDE2000  44.2
+//   protanopia      closest pair (class 0 vs 2)          CIEDE2000  17.7
+//   deuteranopia    closest pair (class 2 vs 3)          CIEDE2000  12.7
+//                   class 0 vs class 2                   CIEDE2000  26.4
+//
+// The two dichromacy rows use Vienot, Brettel & Mollon 1999, which defines
+// matrices for protanopia and deuteranopia and **not** for tritanopia. A
+// tritanopia figure would therefore be a statement about whichever third-party
+// matrix was picked: the closest pair comes out at CIEDE2000 9.9 under a
+// Brettel-style matrix and 12.4 under Machado 2009. It is the weak case under
+// any of them and is not designed for here.
+//
+// Class 0 and class 2 are the pair worth protecting -- 43.7% and 39.9% of the
+// real frame measured in the task report, against 0.8% for class 3 -- and they
+// stay at 26.4 under deuteranopia. That is why the deuteranopic minimum sitting
+// on 2-vs-3 is acceptable rather than a reason to reorder.
 //
 // NAN_COLOR (magenta, 0.85/0.1/0.75) is deliberately outside the family, so
-// "no answer" cannot be read as a class. Under simulated dichromacy (Vienot
-// 1999) the minimum pairwise CIE76 separation falls from 33.4 to 26.8
-// (protanopia) and 19.6 (deuteranopia), which is still legible; tritanopia is
-// the weak case at 10.2 and is not designed for here.
+// "no answer" cannot be read as a class -- **in normal vision**, where its
+// nearest class is 44.2 away. That claim does not survive simulation: the mask
+// falls to CIEDE2000 9.4 (protanopia), 11.3 (deuteranopia) and 2.5-11.5
+// (tritanopia, model-dependent) from its nearest class. NAN_COLOR is repo-wide
+// and predates this view, so this is a limitation recorded rather than fixed.
 //
-// 距離は実測値（ANGLE/D3D11 が書いたバイトを readPixels で読み戻したもの）で
-// あり、この定数から計算したものではない。最接近対は 22.2、マスク色は最も近い
-// クラスからも 44.2 離れている。P/D型色覚では最小 26.8 / 19.6、T型は 10.2。
+// 距離はすべて実測値（ANGLE/D3D11 が書いたバイトを readPixels で読み戻した
+// もの）であり、この定数から計算したものではない。通常色覚で最接近対は
+// CIEDE2000 22.2、マスク色は最も近いクラスからも 44.2。P型では最接近対
+// （クラス0と2）が 17.7、D型では（クラス2と3）が 12.7 で、実フレームで支配的な
+// クラス0と2は D型でも 26.4 離れている。P/D型の行列は Vienot, Brettel &
+// Mollon 1999 で、同論文は T型の行列を定義していない（T型の数値は採用する
+// 第三者の行列次第で 9.9〜12.4 と動く。いずれにせよ最も弱い場合であり、
+// ここでは対象にしていない）。**マスク色が4色から離れているのは通常色覚での
+// 話である**——模擬すると最近接クラスから 9.4（P型）/ 11.3（D型）/
+// 2.5〜11.5（T型）まで縮む。NAN_COLOR はリポジトリ全体の色で本ビューより
+// 古いため、直さずに限界として記録しておく。
 //
 // The index *is* the class index, so the order is a wire-facing decision and
 // not a palette-designer's: views/gamut.py's LABELS are
@@ -65,10 +89,8 @@
 // 離散パレット。**表示色そのもの**を書き出し、露出もγもOETFもディザも掛け
 // ない。凡例のスウォッチ（classColorCss）が画素と同じ色であることの根拠が
 // これである。実データでは46.5〜85.0%が色域外＝大半がクラス0以外なので、
-// 「少数の画素だけが目立つ」型のパレットは選べない。Okabe-Ito の定性色で、
-// 最接近対（橙と朱）でも CIEDE2000 で 20.6 離れている。マスク色（マゼンタ）
-// は4色すべてから 32 以上離してある。番号はクラス番号そのものなので並びは
-// 表示上の都合ではない。
+// 「少数の画素だけが目立つ」型のパレットは選べない。番号はクラス番号そのもの
+// なので並びは表示上の都合ではない。
 export const CLASS_COLORS = Object.freeze([
   Object.freeze([0.0000, 0.6196, 0.4510]),   // #009E73 bluish green
   Object.freeze([0.0000, 0.4471, 0.6980]),   // #0072B2 blue

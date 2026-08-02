@@ -1331,6 +1331,135 @@ _MUTATIONS = [
         ("the class legend sits above the sidebar's first divider",),
         id="the_class_legend_goes_back_below_the_fold",
     ),
+    # The display range recomputed from the pixels instead of read off the wire.
+    #
+    # ``views/gamut.py`` takes its range from ``LABELS`` rather than from the
+    # frame, and says why: on a frame that is entirely in gamut a data-derived
+    # range gives ``vmin == vmax == 0``, every class collapses onto one colour,
+    # and the view breaks exactly when the answer is "everything is
+    # representable". This is that decision undone from the client side, and it
+    # is the obvious thing to write if ``sharedRange`` is ever generalised.
+    #
+    # It could not be seen until the fixture stopped holding all four classes:
+    # with classes 0-3 present the data-derived range is ``{0, 3}``, the same
+    # numbers the header sends, and this mutation left the scenario 24/24 green
+    # (measured). The fill is ``(row * 2 + col) % 3`` against four labels for
+    # that reason -- see the note in the fake server.
+    #
+    # Only ``state.ranges`` moves; ``#range-info`` is written from
+    # ``payload.vmin``/``vmax`` a line later, so exactly one check sees this.
+    # レンジを画素から再計算する変異。`views/gamut.py` が LABELS から取っている
+    # 判断をクライアント側で打ち消すもので、全画素が範囲内のフレームでは
+    # `vmin == vmax == 0` になり全クラスが1色に潰れる。フィクスチャが4クラス
+    # 揃っていた間は再計算しても同じ {0, 3} になり、24/24 のまま通っていた。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "    state.ranges = [{ vmin: p.vmin, vmax: p.vmax }];",
+            "    state.ranges = [(() => { let lo = Infinity, hi = -Infinity;\n"
+            "      for (const value of p.data) {\n"
+            "        if (!Number.isFinite(value)) continue;\n"
+            "        if (value < lo) lo = value;\n"
+            "        if (value > hi) hi = value;\n"
+            "      }\n"
+            "      return { vmin: lo, vmax: hi };\n"
+            "    })()];",
+        )],
+        ("the categorical range is the class index range from the payload",),
+        id="categorical_range_recomputed_from_the_pixels",
+    ),
+    # The two strings that say the values are names rather than quantities.
+    #
+    # ``const classes = traits.labelsAreClasses`` looks like a special case with
+    # one caller, which is what makes it a candidate for a ``computeRanges``
+    # cleanup. Forced false, the sidebar reads 表示レンジ ``[0.0000, 3.0000]`` --
+    # the "1.5 is a value this view can hold" reading the comment on that
+    # ternary exists to prevent -- and the tile is captioned
+    # ``色域外 1超クリップ 両方 範囲内, 補正可  [0.0000, 3.0000]``, which is the
+    # legend restated in the one place with no room for it. Both are correct for
+    # ``rgb``, whose labels are R/G/B and whose values are a measurement.
+    #
+    # Measured before the two checks existed: this left the scenario 24/24.
+    # 値が量ではなく名前であることを述べている2つの文字列。`classes` の三項は
+    # 呼び出し1箇所の特別扱いに見えるため整理の対象になりやすい。false に倒すと
+    # レンジは `[0.0000, 3.0000]`、見出しは4つのクラス名の羅列になる（どちらも
+    # rgb では正しい）。この2件の検査が無い間は 24/24 で通っていた。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "    const classes = traits.labelsAreClasses;",
+            "    const classes = false;",
+        )],
+        (
+            "the display range is worded as a class count, not as an interval",
+            "the tile caption does not restate the legend under the tile",
+        ),
+        id="the_categorical_range_and_caption_lose_their_class_wording",
+    ),
+    # ``sharedRange`` flipped for ``categorical`` -- an *old* column whose answer
+    # for the new kind was unpinned.
+    #
+    # Invisible in ``state.ranges``: with one channel both branches of
+    # ``computeRanges`` build the same single-entry array, so the display range
+    # the tiles are drawn against does not change at all. What changes is the
+    # same two strings above, through the other branch: the caption becomes
+    # ``色域外  ±3.0000`` (``labels[0]`` again -- the per-channel axis) and
+    # ``#range-info`` becomes ``±3.0000``. Before the two checks existed,
+    # flipping this column failed **nothing** (measured), which is the report's
+    # §9.1 question answered from the other side.
+    # 古い列 `sharedRange` の categorical における答えを固定する。1チャンネルでは
+    # どちらの分岐でも `state.ranges` は同じになるため、レンジ自体は変わらない。
+    # 変わるのは上と同じ2つの文字列で、見出しは `labels[0]` を使った
+    # `色域外  ±3.0000` になる。検査が無い間は、この列を反転しても何も落ちなかった。
+    pytest.param(
+        "gamut",
+        [(
+            "js/contract.js",
+            "    sharedRange: true,\n"
+            "    // **`labels[c]` is class c's name, not channel c's.**",
+            "    sharedRange: false,\n"
+            "    // **`labels[c]` is class c's name, not channel c's.**",
+        )],
+        (
+            "the display range is worded as a class count, not as an interval",
+            "the tile caption does not restate the legend under the tile",
+        ),
+        id="categorical_takes_a_per_channel_range_instead_of_a_shared_one",
+    ),
+    # The GLSL palette typed out beside CLASS_COLORS instead of generated from
+    # it, with two classes given the same colour.
+    #
+    # The drift this catches is silent in every other check and in the browser:
+    # the legend still lists four rows in four distinct colours (it reads
+    # ``CLASS_COLORS``), the picture still shows flat regions, and the only
+    # symptom is that two of the four classes are now one region on screen while
+    # the legend insists they are two. That is the exact failure the view exists
+    # to avoid, arrived at through the palette rather than through the data.
+    # Nothing textual can see it -- ``test_web_golden.py`` reads ``shaders.js``
+    # as text and sees ``${CLASS_PALETTE_GLSL}``, not what it expands to -- so
+    # the check that catches it evaluates the module under node.
+    # GLSL のパレットを生成ではなく手書きに戻し、2クラスを同じ色にする変異。
+    # 凡例は `CLASS_COLORS` を読むので4色のまま、絵も平坦な領域のままで、
+    # 「凡例は4クラスと言うが画面には3領域しかない」という状態だけが残る。
+    # テキストとして読むゴールデンテストからは見えない（展開前の
+    # `${CLASS_PALETTE_GLSL}` しか見えない）ため、node 側で評価して突き合わせる。
+    pytest.param(
+        "gamut",
+        [(
+            "js/shaders.js",
+            "vec3 classColor(int i) {\n${CLASS_PALETTE_GLSL}\n    return u_nanColor;\n}",
+            "vec3 classColor(int i) {\n"
+            "    if (i == 0) return vec3(0.0000, 0.6196, 0.4510);\n"
+            "    if (i == 1) return vec3(0.0000, 0.4471, 0.6980);\n"
+            "    if (i == 2) return vec3(0.9020, 0.6235, 0.0000);\n"
+            "    if (i == 3) return vec3(0.9020, 0.6235, 0.0000);\n"
+            "    return u_nanColor;\n}",
+        )],
+        ("the legend's colours are the palette the shader compiles",),
+        id="the_glsl_palette_is_typed_out_beside_the_array_it_should_come_from",
+    ),
     # The class readout's own index arithmetic, transposed.
     #
     # The failure this repository has now shipped twice, in the one place this

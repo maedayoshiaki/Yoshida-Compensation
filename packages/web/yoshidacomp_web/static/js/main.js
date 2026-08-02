@@ -820,6 +820,29 @@ function renderClassLegend(payload, traits) {
 // would still list them with `classColorCss` returning null; say so instead.
 // パレットの色数を超えるクラス数は、回り込ませず断る。2つのクラスが同じ色に
 // なると、絵は正しく見えたまま2つの領域が1つに融ける。
+//
+// No fixture exercises this: no registered view declares more than four
+// classes, and inventing one to exercise a guard is a fixture that exists for
+// the test rather than for the viewer. Verified by hand instead -- with the
+// palette shrunk to three colours it throws this message, leaves the previous
+// view on screen and does not wedge the page.
+//
+// Its *call site* has a second effect worth knowing, because it is not local:
+// `traits.labelsAreClasses` there is the first read of `traits` in `reload()`,
+// so it is what turns an unknown kind into a throw before `state.payload` is
+// republished. `unsupported_kind_renders_as_scalar` in
+// tests/test_web_frontend_js.py expects exactly one failing check *because of
+// that ordering*; remove this call and that entry starts failing two and trips
+// the "broke checks nobody expected" assertion, pointing at an unrelated line.
+// Detected either way -- just misdirected.
+//
+// この関数専用のフィクスチャは無い（4クラスを超えるビューは登録されておらず、
+// ガードのためだけのビューを作るのは本末転倒）。手で確認済み: パレットを3色に
+// 縮めると上記の文言で失敗し、直前のビューが画面に残り、操作不能にはならない。
+// 呼び出し側には局所的でない副作用がある——ここが `reload()` における `traits`
+// の最初の読み出しなので、未知の kind が `state.payload` の更新前に例外になる
+// 理由でもある。この呼び出しを消すと、無関係な変異項目の落ちるチェック数が
+// 変わる（検出はされるが指し示す先がずれる）。
 function requireClassesFitThePalette(labels, where) {
   if (labels.length > CLASS_COLORS.length) {
     throw new Error(
@@ -1334,12 +1357,32 @@ function applyDisplay() {
 // カラーマップはこの一覧に入れない——同じ2つの kind で無効になるが問いが
 // 違い（rgb はトーンチェーンを掛けるがカラーマップは通さない）、まとめると
 // 今日の3つの kind でたまたま一致しているだけの規則になる。値は消さない。
+// Mirrored by TONE_IDS in tests/js/frontend_harness.mjs, which is how the
+// disabled state is read back. A control added here and not there is enabled
+// or disabled with nothing watching -- the mirror is not derivable from this
+// list, because the harness has to name the ids it reads.
+// tests/js/frontend_harness.mjs の TONE_IDS が写し。片方だけ足すと、その
+// コントロールの状態は誰も見ていないことになる。
 const TONE_CONTROL_IDS = ["ev-slider", "gamma-input", "gamma-slider", "dither-check"];
 
 function setToneControlsEnabled(enabled) {
   for (const id of TONE_CONTROL_IDS) {
     const el = $(id);
-    if (el) el.disabled = !enabled;
+    // Not `if (el)`. A missing id means this list and index.html have come
+    // apart, and skipping it silently leaves a live slider over a categorical
+    // picture with nothing to say why -- the same fail-open this file argues
+    // against everywhere else. The harness's own reader requires the element
+    // to exist, so a rename is caught today; this is what catches it in the
+    // browser, where there is no harness.
+    // 黙って飛ばさない。id が無いのはこの一覧と index.html が食い違ったという
+    // ことであり、飛ばせば categorical の絵の上に生きたスライダが残る。
+    if (!el) {
+      throw new Error(
+        `表示コントロール "${id}" がページに見つかりません` +
+        "（main.js の TONE_CONTROL_IDS と index.html が食い違っています）。"
+      );
+    }
+    el.disabled = !enabled;
   }
 }
 

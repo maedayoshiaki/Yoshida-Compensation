@@ -289,11 +289,24 @@ function unregister(el) {
 // two contains them. Rather than weaken that check to "the ids still exist"
 // (which is the shape of a check that cannot fail), the stub grew a parser.
 //
-// Deliberately minimal: it records the tag, the `class` and the `id`, and the
-// nesting. Not `value`, not boolean attributes -- every one of those would
-// change what the *existing* scenarios see at startup, and a stub that starts
-// simulating a browser more broadly than the checks need is a new source of
-// false answers rather than a better fixture.
+// Deliberately minimal: it records the tag, the `class`, the `id`, `hidden`,
+// and the nesting. Not `value`, and no other boolean attribute -- every one of
+// those would change what the *existing* scenarios see at startup, and a stub
+// that starts simulating a browser more broadly than the checks need is a new
+// source of false answers rather than a better fixture.
+//
+// `hidden` is the exception, and it was added because leaving it out made a
+// check unable to fail. Every element starts `hidden: false` in makeEl, so
+// `class-legend is on screen for a categorical view` passed against a page
+// whose legend does not exist and against one that declares `hidden` -- the
+// only way it could fail was for code to actively set it true. Three elements
+// in index.html carry the attribute (`#space-note`, `#target-images`,
+// `#class-legend`) and all three are hidden-until-something-happens, which is
+// a real initial state and not a detail of presentation.
+// `hidden` だけは例外として記録する。これが無いと全要素が `hidden: false` で
+// 始まるため、「凡例が出ている」の検査はコードが明示的に true を書いたときに
+// しか落ちなかった。index.html で `hidden` を持つ3要素はいずれも「何かが
+// 起きるまで隠れている」状態であり、体裁ではなく初期状態である。
 //
 // index.html が宣言している要素の木を組む。id の登録だけでは「その要素が
 // 在るか」しか答えられず、「どこに在るか」——表示レンジと計測が、縦に溢れる
@@ -351,6 +364,17 @@ function parseHtml(source) {
     for (const a of rawAttrs.matchAll(ATTR_RE)) attrs[a[1].toLowerCase()] = a[2];
     if (attrs.class) node.className = attrs.class;
     if (attrs.id) node.id = attrs.id;          // the setter is what registers it
+    // Presence is the value, as in HTML: bare `hidden` and `hidden=""` both
+    // mean hidden. Quoted runs are removed before looking for the bare token,
+    // so a *value* containing the word (`placeholder="a hidden thing"`) is not
+    // read as the attribute. See the note above for why this one alone is
+    // modelled.
+    // 属性値を先に取り除いてから裸のトークンを探す（値の中の "hidden" を属性と
+    // 読まないため）。
+    if ("hidden" in attrs
+      || /(?:^|\s)hidden(?=[\s/=>]|$)/.test(rawAttrs.replace(/"[^"]*"|'[^']*'/g, ""))) {
+      node.hidden = true;
+    }
     // An inline `style` is recorded because an inline declaration is the one
     // thing that beats the stylesheet: `<section class="readout"
     // style="display:block">` restores the stacked layout this task replaced
@@ -1065,53 +1089,60 @@ globalThis.fetch = async (url, options) => {
     if (key === "gamut") {
       // Class indices, not `(c + 1) * tag`.
       //
-      // The generic fill would give a one-channel view a frame of a single
-      // value -- every pixel class 1 -- and that is a fixture symmetric in the
-      // dimension under test: a shader painting every class the same colour
-      // could not be told from a correct one, and neither could a legend row
-      // picked by a constant. `(row * 3 + col) % 4` puts all four classes in
-      // this 4x5 frame instead.
+      // Three properties are being bought here and each cost a revision, so
+      // they are written out rather than left to be re-derived.
       //
-      // The coefficient is 3 rather than 1 on purpose. `(row + col) % 4` also
-      // gives four classes, and it is symmetric under transposition -- pixel
-      // (row 1, col 2) and pixel (row 2, col 1) hold the same class -- so it
-      // cannot see a readout that swaps the two coordinates. That failure is
-      // the one this repository has now shipped twice; see
-      // `hover_probe_transposes_row_and_col` in tests/test_web_frontend_js.py.
+      // 1. **More than one class.** The generic fill gives a one-channel view a
+      //    frame of a single value, and that is symmetric in the dimension
+      //    under test: a shader painting every class the same colour could not
+      //    be told from a correct one, and neither could a legend row picked by
+      //    a constant.
       //
-      // Measured rather than reasoned about, in three runs:
+      // 2. **Not symmetric under transposition.** `(row + col) % 4` gives four
+      //    classes and still cannot see a readout that swaps the coordinates,
+      //    because pixel (row 1, col 2) and pixel (row 2, col 1) hold the same
+      //    class. Measured, against the transposed-readout mutation:
       //
-      //   (row * 3 + col) % 4, NaN at (2,1)  + transposed readout : 2 fail
-      //   (row + col) % 4,     NaN at (2,1)  + transposed readout : 2 fail
-      //   (row + col) % 4,     NaN at (2,2)  + transposed readout : 0 fail
+      //      (row * 2 + col) % 3, NaN at (2,1)  -> 2 fail
+      //      (row + col) % 4,     NaN at (2,1)  -> 2 fail
+      //      (row + col) % 4,     NaN at (2,2)  -> 0 fail  (24/24 green)
       //
-      // The middle row is the trap. The symmetric fill does catch it -- but
-      // only because the swapped index lands on the masked pixel, which is
-      // where the NaN happens to be and not a property of the fill. Move the
-      // NaN onto the diagonal, where it is its own transpose, and the whole
-      // scenario passes 24/24 with the bug in place. With this fill,
-      // (row 1, col 2) is class 1 and (row 2, col 1) is class 3, so the swap
-      // is visible without help.
+      //    The third row is the trap: the symmetric fill catches the swap only
+      //    because the swapped index lands on the masked pixel, and moving the
+      //    mask onto the diagonal -- where it is its own transpose -- takes
+      //    that away. Here (row 1, col 2) is class 1 and (row 2, col 1) is the
+      //    mask, and the classes either side of the swap differ anyway.
       //
-      // One pixel is NaN, at (row 2, col 1). Outside the active projection
-      // region a pixel has no class, and 0.0 is a perfectly good class 0 --
-      // "everything here is representable", written across the part of the
-      // frame the projector never lit. It sits off the first six elements, off
-      // the first and off the last, so it does not collide with the upload
-      // summary the plane checks read.
+      // 3. **Fewer classes in the frame than in `labels`.** `% 3` against four
+      //    labels, so the frame holds classes {0, 1, 2} and never class 3.
+      //    This is what makes the declared range observable: with all four
+      //    classes present, a client that recomputed vmin/vmax from the pixels
+      //    would get {0, 3} -- the header's own values -- and the check that
+      //    the range comes from the payload could not fail. Measured: with a
+      //    four-class frame, replacing the header range with min/max over the
+      //    data left the scenario 24/24 green. It is also the more honest
+      //    fixture, because a real frame need not contain every class: the
+      //    legend's row count then comes from `labels` because it has to,
+      //    rather than because the two happen to agree.
       //
-      // クラス番号を入れる。共通の埋め方だと1チャンネルのビューは全画素が
-      // 同じ値になり、「全クラスを同じ色で塗るシェーダ」も「定数で選んだ凡例」
-      // も区別できない。係数を3にしてあるのは、`(row + col) % 4` が転置に対して
-      // 対称であり（(row 1, col 2) と (row 2, col 1) が同じクラスになる）、
-      // 行と列の取り違えを検出できないためである。実測（転置の変異に対して）:
-      // `(row*3+col)%4` かつ NaN (2,1) は2件失敗、`(row+col)%4` かつ NaN (2,1)
-      // も2件失敗、しかし `(row+col)%4` かつ NaN を対角の (2,2) へ動かすと
-      // 24件すべて通ってしまう。対称な埋め方が捕まえていたのは、入れ替えた添字が
-      // たまたまマスク画素に当たっていたからにすぎない。NaN を1つ置く理由は、
-      // 領域外が黙ってクラス0（範囲内）になる失敗がこのビューで最も重いため。
+      // The NaN sits at (row 2, col 1). Outside the active projection region a
+      // pixel has no class, and 0.0 is a perfectly good class 0 -- "everything
+      // here is representable", written across the part of the frame the
+      // projector never lit. It is off the first six elements, off the first
+      // and off the last, so it does not collide with the upload summary.
+      //
+      // ここで買っている性質は3つ。(1) 複数クラスがあること（共通の埋め方だと
+      // 1チャンネルのビューは全画素が同じ値になり、全クラスを同色で塗る実装も
+      // 定数で選んだ凡例も区別できない）。(2) 転置に対して非対称であること
+      // ——`(row + col) % 4` は (row 1, col 2) と (row 2, col 1) が同じクラスに
+      // なるため行と列の取り違えを検出できない（実測: 対称な埋め方でマスクを
+      // 対角へ置くと24件すべて通る）。(3) フレーム内のクラス数がラベル数より
+      // 少ないこと——4クラス揃ったフレームでは画素から再計算したレンジも
+      // {0, 3} になり、「レンジはペイロード由来」という検査が落ちなくなる
+      // （実測: 24/24 のまま通った）。実フレームが全クラスを含むとは限らない
+      // 以上、こちらのほうが正直でもある。
       for (let row = 0; row < H; row++) {
-        for (let col = 0; col < W; col++) data[row * W + col] = (row * 3 + col) % 4;
+        for (let col = 0; col < W; col++) data[row * W + col] = (row * 2 + col) % 3;
       }
       data[2 * W + 1] = NaN;
     } else if (interleaved) {
@@ -1169,6 +1200,19 @@ globalThis.fetch = async (url, options) => {
 
 // ------------------------------------------------------------------- driver
 await import(pathToFileURL(path.join(STATIC_DIR, "js", "main.js")).href);
+
+// The shipped shader module, imported for the one thing only it can answer:
+// whether the GLSL palette the GPU compiles is the same set of colours the
+// sidebar legend draws.
+//
+// `tests/test_web_golden.py` reads `shaders.js` as *text* and therefore sees
+// `${CLASS_PALETTE_GLSL}`, not the numbers it expands to. Evaluating the module
+// is the only way to compare the two consumers of `CLASS_COLORS` against each
+// other, and node is where that can happen.
+// シェーダのモジュールを評価して読み込む。ゴールデンテストはテキストとして
+// 読むので `${CLASS_PALETTE_GLSL}` しか見えず、展開後の数値を凡例と突き合わせ
+// られるのはここだけである。
+const shaders = await import(pathToFileURL(path.join(STATIC_DIR, "js", "shaders.js")).href);
 
 async function waitFor(predicate, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
@@ -1312,6 +1356,14 @@ const colHeads = () => el("tile-grid").children
   .filter((e) => e.className === "col-head mono")
   .map((e) => e.textContent);
 
+// The caption under each tile, which is where computeRanges writes what the
+// tile is showing. Read separately from the column heading above it: the two
+// are written by different functions and say different things.
+// 各タイルの下の見出し。上の列見出しとは別の関数が別のことを書くので分けて読む。
+const tileCaptions = () => el("tile-grid").children
+  .filter((e) => e.className === "tile")
+  .map((cell) => (cell.children.find((c) => c.className === "tile-cap mono") ?? {}).textContent);
+
 // The class legend, read back the way the page presents it.
 //
 // Three separate readings, because three separate things can be wrong and
@@ -1325,9 +1377,38 @@ const legendRows = () => el("class-legend").children;
 const legendLabels = () => legendRows().map((row) => row.children[1].textContent);
 const legendSwatches = () => legendRows().map((row) => row.children[0].style.background);
 
+// The palette the *shader* carries, read out of the expanded FRAG_SRC and
+// quantised the way the framebuffer quantises it -- so it can be compared,
+// byte for byte, with what `classColorCss` gives the legend.
+//
+// The two are supposed to be one array: `CLASS_PALETTE_GLSL` is generated from
+// `CLASS_COLORS`, and the legend derives its swatches from the same. Typing the
+// GLSL out by hand instead is the drift this reads back, and it is invisible
+// from everywhere else: the legend still shows four distinct colours and the
+// picture still shows four flat regions, they are just no longer the same four.
+// シェーダ側のパレットを展開後のソースから読み、フレームバッファと同じ量子化を
+// 掛けて凡例の色と突き合わせる。GLSLを手書きに戻すと両者はずれるが、凡例は
+// 4色、絵も4領域のままなので他のどこからも見えない。
+const shaderPalette = () =>
+  [...shaders.FRAG_SRC.matchAll(/if \(i == (\d+)\) return vec3\(([^)]*)\);/g)]
+    .map((m) => {
+      const to8 = (v) => Math.round(Math.min(Math.max(Number(v), 0), 1) * 255);
+      const [r, g, b] = m[2].split(",").map((s) => to8(s.trim()));
+      return { index: Number(m[1]), css: `rgb(${r}, ${g}, ${b})` };
+    });
+
 // The tone-chain controls' enabled state, as one object so a failure names
 // which control is wrong rather than just "false".
-// トーン系コントロールの状態。失敗時にどれが違うか分かるようまとめて返す。
+//
+// A copy of main.js's TONE_CONTROL_IDS, and necessarily one: a test that read
+// the list out of the code under test would agree with it by construction. The
+// cost is that a control added to one and not the other goes unwatched, which
+// is why both sides carry a pointer to the other. `el(id)` returning null is
+// left to throw here for the same reason main.js throws: the lists having come
+// apart is the finding.
+// main.js の TONE_CONTROL_IDS の写しであり、写しであることに意味がある
+// （コード側の一覧を読むテストは構造上必ず一致する）。片方だけ足すと見落とすので
+// 双方に相互参照を置く。
 const TONE_IDS = ["ev-slider", "gamma-input", "gamma-slider", "dither-check"];
 const toneDisabled = () =>
   Object.fromEntries(TONE_IDS.map((id) => [id, el(id) ? el(id).disabled : "missing"]));
@@ -2162,7 +2243,7 @@ if (SCENARIO === "gamut") {
   // 赤成分だけに番号が入った状態で描けてしまう。
   check("the single tile carries the whole class-index plane",
     JSON.stringify(uploadedPlanes())
-      === JSON.stringify([{ length: H * W, first: 0, last: 1, head: [0, 1, 2, 3, 0, 3] }]),
+      === JSON.stringify([{ length: H * W, first: 0, last: 1, head: [0, 1, 2, 0, 1, 2] }]),
     JSON.stringify(uploadedPlanes()));
   check("class indices are uploaded as R32F/RED, not as a colour",
     JSON.stringify(uploadedFormats())
@@ -2185,11 +2266,36 @@ if (SCENARIO === "gamut") {
   // ±1, and neither derivable from it. views/gamut.py takes the range from
   // its LABELS rather than from the pixels precisely so an all-in-gamut frame
   // does not collapse to vmin == vmax == 0; a client that recomputed it from
-  // the data would undo that from the other side.
-  // レンジはヘッダの 0/3（このハーネスの既定 ±1 のどちらでもない）。
+  // the data would undo that from the other side, and **the fixture's frame
+  // holds only classes 0-2 so that such a client is visible here** (with all
+  // four classes present the data-derived range is {0, 3} too, and this check
+  // measured 24/24 green against exactly that mutation).
+  // レンジはヘッダの 0/3（このハーネスの既定 ±1 のどちらでもない）。フレームが
+  // クラス0〜2しか持たないのは、画素から再計算する実装をここで見えるように
+  // するためである（4クラス揃っていると再計算しても {0, 3} になり通ってしまう）。
   check("the categorical range is the class index range from the payload",
     JSON.stringify(state.ranges) === JSON.stringify([{ vmin: 0, vmax: 3 }]),
     JSON.stringify(state.ranges));
+
+  // ...and it is *worded* as a class count rather than as an interval.
+  //
+  // The other half of `labelsAreClasses`, and the half nothing was watching.
+  // `[0.0000, 3.0000]` is what the shared-range branch writes for an rgb view,
+  // and it invites the reading that 1.5 is a value this view can hold. The
+  // tile caption is the same decision one line down: `labels.join(" ")` there
+  // -- again correct for rgb, where the labels are R/G/B -- puts all four class
+  // names under the tile, restating the legend in the one place with no room
+  // for it. Measured before these two existed: forcing the `classes` ternary
+  // false, and reverting the caption, each left the scenario 24/24 green.
+  // レンジの「言い方」も見る。`[0.0000, 3.0000]` は rgb 用の書き方で、1.5 という
+  // 値がありうるかのように読める。タイル見出しの `labels.join(" ")` も同様に
+  // rgb 用で、幅の無い場所に凡例を書き写すことになる。実測: この2件が無い状態
+  // では、どちらへ戻しても24件すべて通っていた。
+  check("the display range is worded as a class count, not as an interval",
+    el("range-info").textContent === "クラス 0–3", el("range-info").textContent);
+  check("the tile caption does not restate the legend under the tile",
+    JSON.stringify(tileCaptions()) === JSON.stringify(["4 クラス（凡例参照）"]),
+    JSON.stringify(tileCaptions()));
 
   // --- the legend
   //
@@ -2220,6 +2326,36 @@ if (SCENARIO === "gamut") {
     new Set(legendSwatches()).size === legendRows().length
       && legendSwatches().every((c) => typeof c === "string" && c.length > 0),
     JSON.stringify(legendSwatches()));
+  // ...and it is the *shader's* colour, not a second palette that agrees today.
+  //
+  // `CLASS_COLORS` is supposed to be one array with two consumers: the GLSL is
+  // generated from it, and `classColorCss` quantises it for the swatch. Typing
+  // the GLSL out beside the array instead is a change nothing else here can
+  // see -- the legend still lists four distinct colours, the picture still has
+  // four flat regions, and only a GPU readback would show that they are no
+  // longer the same four. Compared after 8-bit quantisation, which is the
+  // precision at which "the swatch is the pixel" either holds or does not.
+  // 凡例の色がシェーダの色そのものであること。GLSLを手書きに戻しても、凡例は
+  // 4色のまま・絵も4領域のままで、他のどこからも差が見えない。比較は8bit量子化
+  // 後に行う（「スウォッチ＝画素」が成り立つかどうかはその精度で決まる）。
+  check("the legend's colours are the palette the shader compiles",
+    (() => {
+      // A missing export is a failing check, not an exception. Everywhere else
+      // this harness lets a missing thing throw, because throwing names it --
+      // but this check sits in the middle of the scenario and an abort here
+      // would take the twenty-odd results after it with it, which reports less
+      // than "this one is false" does.
+      // 輸出が無い場合は例外ではなく失敗として扱う。ここで中断すると後続の
+      // 20件あまりの結果ごと失われ、かえって分からなくなる。
+      const palette = shaders.CLASS_COLORS;
+      if (!Array.isArray(palette) || typeof shaders.classColorCss !== "function") return false;
+      const glsl = shaderPalette();
+      if (glsl.length !== palette.length) return false;
+      return glsl.every((entry, i) => entry.index === i
+        && entry.css === shaders.classColorCss(i));
+    })(),
+    `${JSON.stringify(shaderPalette())} vs `
+      + JSON.stringify((shaders.CLASS_COLORS ?? []).map((_, i) => shaders.classColorCss?.(i))));
   // ...and it has to be where the picture is being looked at.
   //
   // The sidebar is `overflow-y: auto`, and with a target and a LUT loaded its
@@ -2257,8 +2393,8 @@ if (SCENARIO === "gamut") {
   // labels: the per-channel reading every other kind uses prints `labels[0]`
   // -- "色域外" -- beside the correct number, under the correct heading, for
   // every pixel in the frame. The fixture's class at (col 2, row 1) is 1, so
-  // the two readings disagree here, and its transpose (col 1, row 2) is the
-  // masked pixel, so a swapped index disagrees too.
+  // the two readings disagree here (`labels[0]` is 色域外), and its transpose
+  // (col 1, row 2) is the masked pixel, so a swapped index disagrees too.
   // チャンネルで引く読み方は全画素で `labels[0]` を出す。フィクスチャの
   // (col 2, row 1) はクラス1、その転置 (col 1, row 2) はマスク画素なので、
   // ラベルの軸と添字の順序の両方について食い違いが出る。

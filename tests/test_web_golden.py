@@ -129,6 +129,40 @@ def _rgb_body(source: str) -> str:
     return source[at:]
 
 
+def _categorical_body(source: str) -> str:
+    """Return ``categoricalColor()``'s definition, which sits last in the file.
+
+    Scoped for the same reason ``_rgb_body`` is, and it matters more here: the
+    ``isNaNBits`` and tone-chain assertions elsewhere in this module are pinned
+    to the *scalar* region (everything before ``rgbColor()``) and to
+    ``_rgb_body``'s **first** occurrences. The categorical definition sits after
+    both, so neither reaches it -- which is exactly how three separate
+    categorical regressions were measured to leave this file at 6 passed.
+
+    ``categoricalColor()`` の定義。スカラー経路の検査は ``rgbColor()`` より前に、
+    rgb 経路の検査は「最初の出現」に限定されているため、どちらもここには届か
+    ない。実際、categorical 側の退行3種はこのファイルを緑のまま通していた。
+    """
+    at = source.find("vec3 categoricalColor() {")
+    assert at != -1, "the shader has no categoricalColor() definition"
+    return source[at:]
+
+
+def _strip_comments(glsl: str) -> str:
+    """Drop ``//`` comments, so a prose mention is not read as a use.
+
+    The "does not read the tone uniforms" assertion below would otherwise be
+    satisfiable, or broken, by a comment: the block above
+    ``categoricalColor()`` names ``u_exposure``/``u_gamma``/``u_dither`` in the
+    course of saying they are not read. Today that block sits outside the
+    function, so the raw body would pass too -- but a future comment moved
+    inside it would fail this test for the wrong reason, and the point is to
+    assert about code.
+    ``//`` コメントを落とす。文中の言及を「使用」と読まないため。
+    """
+    return re.sub(r"//[^\n]*", "", glsl)
+
+
 def _scalar_region(source: str) -> str:
     """Return everything before ``rgbColor()``'s definition: the scalar path.
 
@@ -280,6 +314,80 @@ def test_rgb_branch_is_guarded_and_sits_after_the_scalar_one() -> None:
     srgb_at = body.index("rgb = srgbEncode(rgb);")
     dither_at = body.index("u_dither / 255.0")
     assert exposure_at < gamma_at < srgb_at < dither_at
+
+
+def test_categorical_branch_is_dispatched_masked_and_tone_free() -> None:
+    """The class-index branch must be reachable, NaN-masked, and tone-free.
+
+    Until this test existed the branch had no automated cover of any kind.
+    Measured, each mutation on its own: removing ``isNaNBits(v)`` from
+    ``categoricalColor()``, adding the tone chain to it, and deleting the
+    ``u_mode == 2`` dispatch from ``main()`` **each left this module at 6
+    passed and the frontend harness at 24/24**. ``categoricalColor``,
+    ``CLASS_COLORS`` and ``u_mode == 2`` appeared in no file under ``tests/``.
+
+    Why each of the three:
+
+    - **The dispatch.** Without it a categorical payload falls through to the
+      scalar branch, which runs the diverging colormap over 0..3: four flat
+      regions in four shades of one ramp. It draws, and it looks like a working
+      view of a classification. Nothing else in the suite sees it, because
+      ``glview.js`` still sets ``u_mode`` from the trait row and the harness
+      still records a 2.
+    - **``isNaNBits``.** ``isnan(v)`` reads like the standard spelling and the
+      pair reads like a redundancy, so this is the half most likely to be
+      "cleaned up". Both ``isnan(v)`` and ``v != v`` were measured folding away
+      on this machine (Chrome / ANGLE D3D11 / RTX 3060 Ti), and with the bit
+      test gone every masked pixel renders as **class 0 -- 範囲内, "the
+      compensation is representable here"** -- in the same green as a genuine
+      in-gamut region, over the part of the frame the projector never lit. On
+      ``data/linear_pipeline_1080/matrices_linear_gamma.npy`` that is 1,552,316
+      of 2,073,600 pixels. This is the third recurrence of this fold in the
+      project.
+    - **No tone chain.** A class index has no exposure and no gamma. If the
+      chain comes back, the four colours move away from the four the sidebar
+      legend is drawing from the same array, and the legend stops explaining
+      the picture the moment anyone touches a slider. ``main.js`` disabling the
+      controls does not protect this: ``window.__viewer.display`` and any
+      future code path can still push the uniforms, which is why the shader
+      ignoring them is the half that holds.
+
+    This does not replace reading the framebuffer back on a real GPU, which
+    stays a manual step as it did for plan B1. It closes the gap between "the
+    manual check was run once" and "the property is still true".
+
+    クラス番号の経路には自動テストが1つも無かった（``isNaNBits`` の削除・トーン
+    チェーンの追加・``u_mode == 2`` の分岐削除のいずれもこのファイルを6件通過、
+    ハーネスを24/24のまま通していた）。分岐が無ければ発散カラーマップで
+    「それらしい」4段階が描かれ、ビット判定が無ければ有効領域外がすべて
+    クラス0「範囲内」になり、トーンチェーンが戻れば凡例と色が食い違う。
+    """
+    source = _fragment_source()
+
+    # Reachable at all. Asserted against the whole source, because the dispatch
+    # lives in main() and not in the body scoped below.
+    assert "if (u_mode == 2) { fragColor = vec4(categoricalColor(), 1.0); return; }" in source, (
+        "main() does not dispatch to the categorical branch, so a class-index "
+        "payload would be drawn through the scalar colormap"
+    )
+
+    body = _strip_comments(_categorical_body(source))
+
+    # The ANGLE/D3D11 workaround, in the branch where a fold-away means every
+    # unanswerable pixel is reported as "in gamut".
+    assert "isNaNBits(v)" in body, (
+        "the categorical path does not bit-test for NaN; isnan() alone folds "
+        "away on ANGLE/D3D11 and the masked region renders as class 0"
+    )
+    assert "u_nanColor" in body, "the categorical path never paints the mask colour"
+
+    # ...and nothing that would move the palette away from the legend.
+    for uniform in ("u_exposure", "u_gamma", "u_dither", "u_colormap"):
+        assert uniform not in body, (
+            f"the categorical path reads {uniform}; a class index has no tone, "
+            "and the sidebar legend is drawn from the palette this branch must "
+            "return unchanged"
+        )
 
 
 def test_srgb_oetf_matches_hand_computed_values_on_both_branches() -> None:

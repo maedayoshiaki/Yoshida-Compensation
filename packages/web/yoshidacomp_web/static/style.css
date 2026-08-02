@@ -200,6 +200,31 @@ canvas.lut-curve {
 .legend-swatch.nan { background: var(--nan); }
 .legend-swatch.grad { background: linear-gradient(to right, #3b4cbf, #fff, #b5051f); }
 
+/* A disabled control has to look disabled.
+
+   `disabled` alone removes the accent colour from a range thumb and a
+   checkbox, which is a change of a few pixels; the γ number box is visually
+   identical to its live state, and the labels 露出 / γ / カラーマップ stay at
+   full brightness above controls that no longer do anything. On a
+   `categorical` view all four are off at once (see setToneControlsEnabled in
+   js/main.js), so this is not an edge case -- it is what the whole view looks
+   like.
+
+   The label is dimmed with the control rather than separately: `:has()` on the
+   group means the two cannot disagree about whether the control is live, which
+   a hand-toggled class would eventually do. The ディザ checkbox is inside its
+   own label, hence the third selector.
+
+   無効なコントロールは無効に見えること。`disabled` だけではγの数値入力は
+   見た目が変わらず、見出しも明るいままになる。categorical では4つとも同時に
+   無効になるので、これは例外的な状態ではなくこのビューの見た目そのものである。
+   見出しは `:has()` でコントロールに追従させる（別途クラスを付ける方式だと
+   いずれ食い違う）。 */
+input:disabled, select:disabled { opacity: 0.45; cursor: not-allowed; }
+.group:has(> input:disabled) > .lbl,
+.group:has(> select:disabled) > .lbl,
+label:has(> input:disabled) { opacity: 0.45; }
+
 /* The class legend for a `categorical` view.
 
    Note what is *not* here: any colour. Each row's swatch gets its background
