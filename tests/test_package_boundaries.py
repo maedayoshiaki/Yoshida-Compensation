@@ -216,6 +216,57 @@ def test_importing_pipeline_does_not_pull_torch() -> None:
     assert reported["cv2"] == "True", out.stdout
 
 
+def test_building_the_web_app_pulls_no_torch() -> None:
+    """``create_app()`` の時点で torch / psutil / color_mixing_matrix / scipy の
+    いずれも sys.modules に無いこと。
+
+    The web layer's half of the constraint, which had no test until
+    ``views/compensation.py`` (plan B3 Task 3) became the first web module to
+    import ``yoshidacomp.compensation.pipeline`` at module scope. Before that
+    the guard would have had nothing to guard: ``test_importing_pipeline_does_
+    not_pull_torch`` above covers ``pipeline`` itself, and this file's other
+    web check only greps the tree for matplotlib/PyQt. Neither would notice a
+    web module importing ``color_mixing_matrix`` -- the one import the plan's
+    Global Constraints name explicitly -- or a future view reaching for torch
+    directly.
+
+    Importing is not enough: ``create_app()`` is what walks the router and view
+    registries, so a lazily-imported offender inside a ``register`` call or a
+    router module is only pulled in here.
+
+    Web層側の同じ制約。``views/compensation.py`` が ``pipeline`` を module
+    scope で import する最初のweb層モジュールになった時点で意味を持つ。
+    ``import`` だけでなく ``create_app()`` まで走らせるのは、ルータと
+    ビューのレジストリを実際に辿らせるためである。
+
+    Run in a subprocess for the same reason as the tests above: in-process,
+    another test may already have imported these.
+    """
+    code = (
+        "import sys\n"
+        "from yoshidacomp_web.app import create_app\n"
+        "create_app()\n"
+        "mods = sys.modules\n"
+        "print('color_mixing_matrix=%s' % any('color_mixing_matrix' in m for m in mods))\n"
+        "print('psutil=%s' % ('psutil' in mods))\n"
+        "print('scipy=%s' % any('scipy' in m for m in mods))\n"
+        "print('torch=%s' % ('torch' in mods))\n"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        check=True,
+        cwd=_REPO_ROOT,
+    )
+    reported = dict(line.split("=", 1) for line in out.stdout.strip().splitlines())
+
+    assert reported["color_mixing_matrix"] == "False", out.stdout
+    assert reported["psutil"] == "False", out.stdout
+    assert reported["scipy"] == "False", out.stdout
+    assert reported["torch"] == "False", out.stdout
+
+
 @pytest.mark.parametrize("linearizer", ["gamma", "none"])
 def test_generate_projection_image_first_call_pulls_no_torch(linearizer: str) -> None:
     """``generate_projection_image(...)`` の初回呼び出し後、torch・psutil・

@@ -506,7 +506,14 @@ def test_an_unknown_target_id_is_refused(tmp_path, stand_in_projector_config) ->
 
 
 def test_a_missing_target_is_refused(tmp_path, stand_in_projector_config) -> None:
-    """``target`` を指定しない要求は断る。既定のターゲットは存在しない。"""
+    """``target`` を指定しない要求は断る。既定のターゲットは存在しない。
+
+    空欄・空白のみ・パラメータ自体の省略はすべて同じ「未指定」であり、
+    「id '  ' は存在しない」ではなく「target=<id> を渡せ」と言わねばならない。
+    そこまで見ないと、``_identifier`` の ``.strip()`` を外しても
+    *未知のid* の経路が 400 と `"target"` の両方を満たしてしまい、この
+    テストは通ってしまう（レビュー Minor 1）。
+    """
     client, matrix_id, _, _, _ = _prepared(tmp_path, stand_in_projector_config)
     for url in (
         f"/api/matrix/{matrix_id}/view/compensation",
@@ -515,7 +522,45 @@ def test_a_missing_target_is_refused(tmp_path, stand_in_projector_config) -> Non
     ):
         response = client.get(url)
         assert response.status_code == 400, (url, response.text)
-        assert "target" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert "target" in detail
+        # The *missing* wording, not the *unknown-id* wording.
+        assert "POST /api/target" in detail, (url, detail)
+        assert "no target image with id" not in detail, (url, detail)
+
+
+def test_a_matrix_loaded_under_another_projector_config_is_refused_not_500(
+    tmp_path, stand_in_projector_config
+) -> None:
+    """読み込み後に config が変わった行列は 400 で断る（500 にしない）。
+
+    ``MatrixContext.space`` は**読み込み時**の判定であり、``reload_config``
+    は公開APIで、このリポジトリの ``config.toml`` には現在8つの姉妹版が
+    作業ツリーに置かれている。フレームが食い違ったまま
+    ``generate_projection_image`` へ進むと ``calc_compensation_image`` が
+    numpy の形状 ``ValueError`` を投げ、router はそれを（ビューの
+    ``ValueError`` ＝サーバのバグという規約どおりに）500 のまま通す。
+    利用者から見れば「自分が変えた設定のせいでサーバが壊れた」と告げられる
+    ことになる。
+
+    これが ``_render`` の ``classify_space`` 再判定を唯一検証しているテスト
+    である。再判定を削ると、この1件だけが落ちる。
+    """
+    client, matrix_id, target_id, _, _ = _prepared(tmp_path, stand_in_projector_config)
+    # Sanity: it really was projector space when it was loaded, and it renders.
+    assert client.get(f"/api/matrix/{matrix_id}/meta").json()["space"] == "projector"
+    assert client.get(_url(matrix_id, target=target_id)).status_code == 200
+
+    # The projector frame changes under a still-valid matrix id.
+    stand_in_projector_config(width=_FRAME_WIDTH + 2, height=_FRAME_HEIGHT + 1)
+
+    # The stored classification still says "projector" -- that is the whole
+    # point: only a re-check against the *current* config can see the problem.
+    assert client.get(f"/api/matrix/{matrix_id}/meta").json()["space"] == "projector"
+
+    response = client.get(_url(matrix_id, target=target_id))
+    assert response.status_code == 400, response.text
+    assert "compensation" in response.json()["detail"]
 
 
 def test_inverse_lut_without_a_lut_is_refused(
@@ -620,7 +665,7 @@ def test_the_view_result_itself_is_hwc_float32(
     from yoshidacomp_web.matrix import load_matrix
     from yoshidacomp_web.views import REGISTRY
 
-    _, _, target_id, matrices, _ = _prepared(tmp_path, stand_in_projector_config)
+    _, _, target_id, matrices, image = _prepared(tmp_path, stand_in_projector_config)
     context = load_matrix(tmp_path / "m.npy", get_config().projector)
     result = REGISTRY["compensation"].render(context, {"target": target_id})
 
@@ -628,6 +673,20 @@ def test_the_view_result_itself_is_hwc_float32(
     assert result.data.dtype == np.float32
     assert result.labels == ["R", "G", "B"]
     assert result.vmax > result.vmin
+
+    # A direct call passes no parameter but ``target``, so this is the only
+    # place the *in-function* fallbacks are visible: over HTTP the router
+    # always fills the declared default, which would hide a drift between the
+    # two copies of each default (review Minor 3). Asserting the answer equals
+    # the declared defaults' answer pins them equal.
+    # HTTP経由では router が宣言側の既定を必ず埋めるため、関数内フォールバック
+    # がずれても表に出ない。直接呼び出しだけがそれを見られる場所である。
+    inside = _inside_mask()
+    np.testing.assert_array_equal(
+        result.data[inside],
+        _reference(image, matrices, linearizer="none", output="linear",
+                   target_decode="srgb", target_gamma=2.2)[inside],
+    )
 
 
 def test_an_unrecognised_output_is_refused_on_a_direct_render_call(

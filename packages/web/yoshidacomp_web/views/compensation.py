@@ -7,8 +7,10 @@
 **このモジュールに補償の数式は無い。** 計算は
 ``yoshidacomp.compensation.pipeline.generate_projection_image()`` -- CLI
 （``examples/python/rebuild_compensation_with_map.py``）が呼ぶのと同じ関数、
-同じ引数 -- を1回呼ぶだけで、このモジュールがするのは引数を組み立てること、
-戻り値2つのうち片方を選ぶこと、有効領域の外を NaN にすることの3つである。
+同じ引数 -- を1回呼ぶだけである。このモジュールがするのは (a) 引数の組み立てと
+検証、(b) その1回の呼び出し、(c) 戻り値2つのうち片方を名前で選ぶこと、
+(d) 有効領域の外を NaN にすること、(e) ``vmin``/``vmax`` を決めること の5つで、
+そのそれぞれに名指しのテストがある。
 ``tests/test_web_compensation_view.py::
 test_view_matches_generate_projection_image_exactly`` が、ビューの画素が
 その関数の戻り値と**完全一致**することを linearizer × output の4通りで
@@ -23,12 +25,26 @@ numpy 実装へ切り替えたため、``generate_projection_image`` の呼び�
 （ターゲットは ``embed_in_active_region`` で投影フレームへ収まるだけで、
 座標系のワープは計画B4の仕事である）。``color_mixing_matrix`` の直接
 import は引き続き禁止で、ガンマは ``LINEARIZERS["gamma"]`` 経由でのみ使う。
+
+``target``/``lut`` が ``type="text"`` である理由（``base.ParamSpec.type`` が
+参照している議論の本体）: 有効なidは実行時に増える。``ParamSpec.choices`` は
+静的な ``list[str]`` であり ``ViewSpec`` は frozen なので、``/api/views`` を
+叩いた時点の一覧を返す形にすると、レジストリを毎回組み直すか frozen を
+破ることになる。しかもフロントは ``buildServerParams`` の1回でコントロールを
+作るため、その後に読み込んだターゲットは再読込まで選べず、「一覧に無いidは
+使えない」という失敗はどのみち残る。空の ``choices`` を持つ ``select`` は
+``static/js/main.js::buildServerParams`` で**選択肢ゼロのドロップダウン**に
+なり、値を入れる手段が無い。``"text"`` は JavaScript の変更を要さない
+（同関数の ``else`` 枝が既に ``<input type="text">`` を作り、
+``routers/view.py`` は number/select 以外を生の文字列として渡す）。
+不正なidは ``ViewNotApplicable`` にする -- ``select`` の ``choices`` 外を
+router が 400 にするのと、利用者から見て同じ結果になる。
 """
 
 from __future__ import annotations
 
 import math
-from typing import get_args
+from typing import NoReturn, get_args
 
 import numpy as np
 
@@ -46,15 +62,48 @@ from .base import ParamSpec, ViewNotApplicable, ViewResult, ViewSpec, register
 LABELS = ["R", "G", "B"]
 
 # The two arrays ``generate_projection_image`` returns, in the order it returns
-# them. ``output`` indexes this tuple by name rather than by a boolean flag:
-# a boolean has to be inverted somewhere between the control and the tuple, and
-# an inverted one still returns a full, plausible frame -- silently the wrong
-# one. Naming both ends the same way means the mapping is one substitution, and
-# the equality test above pins it for each name separately.
+# them. ``output`` names one of them rather than being a boolean flag: a boolean
+# has to be inverted somewhere between the control and the tuple, and an
+# inverted one still returns a full, plausible frame -- silently the wrong one.
+# Naming both ends the same way, and pairing them with ``dict(zip(...))`` below,
+# makes the mapping one substitution;
+# ``test_view_matches_generate_projection_image_exactly`` then pins it for each
+# name separately. (That parametrization is what catches a swap: the
+# "linear differs from code" test passes under one, since both are still
+# different from each other.)
 #
 # 戻り値2つを名前で選ぶ。真偽値だとどこかで反転させることになり、反転した
 # ままでも「もっともらしいフレーム」が返るため誤りが表に出ない。
 _OUTPUTS = ("linear", "code")
+
+# Every parameter's default, in one place.
+#
+# Each of these used to be written twice -- once in the ``ParamSpec`` the GUI
+# reads and once as the fallback in ``params.get(name, ...)`` -- and only the
+# declared copy was pinned by a test. Over HTTP the router always fills the
+# declared default, so the fallback is unreachable there and the two could drift
+# apart silently; a direct ``render()`` call, which this module supports (see
+# the ``output`` guard), would then get the drifted value. One dict, read by
+# both, removes the question.
+#
+# 既定値は1箇所にまとめる。以前は ``ParamSpec`` と ``params.get`` の
+# フォールバックに二重に書いており、routerが常に宣言側の既定を埋めるため
+# フォールバック側は HTTP からは到達不能で、静かにずれても誰も気付かない。
+# ``render()`` を直接呼ぶ経路だけがそのずれた値を受け取ることになる。
+_DEFAULTS: dict[str, object] = {
+    "target": "",
+    "linearizer": "none",
+    "lut": "",
+    "output": _OUTPUTS[0],
+    "target_decode": "srgb",
+    "target_gamma": 2.2,
+}
+
+
+def _param(params: dict, name: str) -> object:
+    """Read *name* from *params*, falling back to its declared default."""
+    value = params.get(name)
+    return _DEFAULTS[name] if value is None else value
 
 
 # Why a camera-space matrix is refused, in one place so the router's 400 and
@@ -93,10 +142,13 @@ def _identifier(params: dict, name: str) -> str:
     ``""`` means "not given". The router supplies the declared default for a
     parameter absent from the query string, so an omitted ``target`` and an
     empty box arrive here identically -- and both mean the same thing.
-    未指定と空欄は同じ意味なので同じ ``""`` に落とす。
+    ``.strip()`` for the same reason: a box the user cleared with the space bar
+    is an empty box, and telling them "no target with id '  '" instead of "pass
+    target=<id>" answers a question they did not ask.
+    未指定と空欄は同じ意味なので同じ ``""`` に落とす。空白だけの入力も同様で、
+    「id '  ' は存在しない」ではなく「target=<id> を渡せ」と言うべきである。
     """
-    value = params.get(name)
-    return "" if value is None else str(value).strip()
+    return str(_param(params, name)).strip()
 
 
 def _require_target(params: dict) -> np.ndarray:
@@ -127,8 +179,15 @@ def _require_target(params: dict) -> np.ndarray:
         ) from None
 
 
-def _require_lut(params: dict) -> object:
+def _require_lut(params: dict) -> NoReturn:
     """Resolve ``lut`` for ``linearizer="inverse_lut"`` -- today, always refuse.
+
+    ``NoReturn`` is the honest annotation *today* and is meant to change: every
+    path raises because there is nothing to look a lut id up in yet. Task 4
+    turns this into ``-> InverseLut``, at which point the ``lut=lut`` argument
+    at the call site -- provably ``None`` while this is ``NoReturn``, and kept
+    deliberately -- starts carrying a value.
+    ``NoReturn`` は今日の事実であり、変わることを前提にした注釈である。
 
     There is no LUT store yet: ``POST /api/lut`` and ``store.luts`` arrive in
     plan B3 Task 4, so *every* lut id is unknown at the moment. Refusing with
@@ -188,8 +247,8 @@ def _target_decode(params: dict) -> tuple[str, float]:
             those, which would be a 500; typing 0 into a number box is a
             routine mistake, not a server bug.
     """
-    mode = str(params.get("target_decode", "srgb"))
-    gamma = float(params.get("target_gamma", 2.2))
+    mode = str(_param(params, "target_decode"))
+    gamma = float(_param(params, "target_gamma"))  # type: ignore[arg-type]
     if mode == "gamma" and not (math.isfinite(gamma) and gamma > 0.0):
         raise ViewNotApplicable(
             f'view "compensation": target_gamma must be a finite positive '
@@ -213,25 +272,41 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     projector = get_config().projector
     height, width = int(context.array.shape[0]), int(context.array.shape[1])
     region = context.active_region
-    # ``context.space`` was decided when the matrix was loaded, against the
-    # config in force *then*. Re-deciding it against the config in force *now*
-    # is what keeps a mismatched frame from reaching ``calc_compensation_image``
-    # as a numpy shape ``ValueError`` -- a 500 blaming the server for a
-    # configuration that changed under a still-valid matrix id. The two agree
-    # in the shipped app (nothing reloads the config in-process); they do not
-    # agree in a test suite that swaps projector configs per test.
-    # ``context.space`` は読み込み時の判定なので、現在の config でもう一度
-    # 判定する。食い違ったまま進むと numpy の形状 ``ValueError``（＝500）に
-    # なるが、それはサーバのバグではない。
-    if (
-        region is None
-        or context.space == "camera"
-        or classify_space(height, width, projector) == "camera"
-    ):
+    # Two clauses, both load-bearing, and deliberately not three.
+    #
+    # ``region is None`` *is* "the matrix is in camera space": ``matrix.py``
+    # sets ``active_region`` from ``resolve_active_region`` only when the space
+    # is ``"projector"``, and to ``None`` otherwise, so testing
+    # ``context.space == "camera"`` as well says the same thing a second time.
+    # This condition used to carry that third clause; it was removed after a
+    # review measured that reducing the whole condition to ``region is None``
+    # left every test green. ``region is None`` is the clause kept because it
+    # is also what narrows ``region`` to a tuple for everything below.
+    #
+    # The ``classify_space`` call is the one that adds behaviour, and it is a
+    # *different* question: ``context.space`` was decided when the matrix was
+    # loaded, against the config in force **then**. Re-deciding it against the
+    # config in force **now** is what keeps a mismatched frame from reaching
+    # ``calc_compensation_image`` as a numpy shape ``ValueError`` -- a 500
+    # blaming the server for a configuration the user changed under a matrix id
+    # that is still perfectly valid. ``reload_config`` is a public API and this
+    # repository's ``config.toml`` has eight sibling variants in the working
+    # tree right now. Pinned by
+    # ``test_a_matrix_loaded_under_another_projector_config_is_refused_not_500``.
+    #
+    # 2条件であって3条件ではない。``region is None`` は「カメラ座標である」
+    # ことそのもの（``matrix.py`` がプロジェクタ座標のときだけ領域を入れる）
+    # なので、``context.space == "camera"`` を併記しても同じことを2度言うだけ
+    # である。実際レビューが「全条件を ``region is None`` だけに縮めても
+    # 全テストが通る」ことを実測したため削除した。``classify_space`` の方は
+    # 別の問いで、読み込み時ではなく**現在の** config との一致を見る。
+    # 食い違ったまま進むと numpy の形状 ``ValueError``（＝500）になるが、
+    # それはサーバのバグではない。
+    if region is None or classify_space(height, width, projector) == "camera":
         raise ViewNotApplicable(_CAMERA_SPACE_REFUSAL)
 
     target_image = _require_target(params)
-    linearizer = str(params.get("linearizer", "none"))
+    linearizer = str(_param(params, "linearizer"))
     lut = _require_lut(params) if linearizer == "inverse_lut" else None
     decode_mode, decode_gamma = _target_decode(params)
 
@@ -259,24 +334,31 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     # returns the object it was given. That is a true statement about the
     # pipeline, not a defect, and the copy below means neither is written to.
     # ``linearizer="none"`` では両者は同一オブジェクトである。
-    output = str(params.get("output", _OUTPUTS[0]))
-    if output not in _OUTPUTS:
+    by_name = dict(zip(_OUTPUTS, (linear, code)))
+    output = str(_param(params, "output"))
+    if output not in by_name:
         # Unreachable over HTTP -- ``routers/view.py`` rejects a ``select``
         # value outside ``choices`` with its own 400 -- but not unreachable
         # from a direct ``render()`` call, which is how another view or a later
         # task would reuse this. Without it, a misspelled ``output`` silently
-        # falls through to ``code`` and returns a full, plausible frame of the
-        # wrong image. ``linearizer`` needs no such guard: an unknown one
-        # reaches ``generate_projection_image`` and raises there, loudly.
+        # falls through to whichever image the ``else`` happens to name and
+        # returns a full, plausible frame of the wrong one. ``linearizer`` needs
+        # no such guard: an unknown one reaches ``generate_projection_image``
+        # and raises there, loudly.
         # HTTP経由では router が弾くので到達しないが、``render()`` を直接
-        # 呼ぶ経路では到達する。無いと綴り間違いが黙って ``code`` に落ち、
-        # 「もっともらしい別の画像」が返る。
+        # 呼ぶ経路では到達する。無いと綴り間違いが黙って別の画像に落ち、
+        # 「もっともらしい別の絵」が返る。
         raise ViewNotApplicable(
             f'view "compensation": output must be one of {list(_OUTPUTS)}, got '
             f"{output!r}. "
             f"（output は {list(_OUTPUTS)} のいずれかです。）"
         )
-    data = np.array(linear if output == _OUTPUTS[0] else code, dtype=np.float32)
+    # A lookup, not an ``if/else``: with a third entry in ``_OUTPUTS`` an
+    # ``else`` would silently hand back the second image for it, which is the
+    # exact class of failure the named-select decision exists to prevent.
+    # ``if/else`` ではなく引き当てにする。``_OUTPUTS`` が3つになったとき
+    # ``else`` は黙って2番目を返すが、それは名前で選ぶ設計が避けたい失敗そのもの。
+    data = np.array(by_name[output], dtype=np.float32)
 
     # Outside the active region there is no answer, and it must not be black.
     # ``generate_projection_image`` already returns 0 there
@@ -293,10 +375,17 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     inside[y : y + h, x : x + w] = True
     data[~inside] = np.nan
 
-    if inside.any():
-        low, high = (float(v) for v in np.nanpercentile(data, [1, 99]))
-    else:
-        low, high = 0.0, 1.0
+    # No ``if inside.any()`` guard around this, unlike ``surface``, because here
+    # it cannot be false: ``resolve_active_region`` returns the full frame when
+    # the configured active width or height is non-positive and otherwise
+    # validates a rectangle with ``w, h >= 1``, so at least one pixel is always
+    # inside. ``surface``'s equivalent branch is genuinely reachable -- an
+    # all-singular matrix leaves nothing usable even inside the region -- and
+    # that difference is why it has one and this does not.
+    # ``surface`` と違いここには ``inside.any()`` の分岐を置かない。
+    # ``resolve_active_region`` が幅・高さ1以上を保証するため常に真になる。
+    # ``surface`` 側は全画素が特異な行列で偽になりうるので分岐が要る。
+    low, high = (float(v) for v in np.nanpercentile(data, [1, 99]))
 
     # ``surface``'s compromise, for ``surface``'s reason: the rgb branch maps
     # ``[vmin, vmax]`` onto ``[0, 1]``, so ``vmin`` is the black point, and all
@@ -329,14 +418,23 @@ SPEC = register(
         # so the readout's second panel says something its 4x3 table cannot.
         # 描いているのは行列そのものではないので、読み取り欄の2枚目の板は残す。
         values_are_matrix=False,
+        # Every ``default`` below is read from ``_DEFAULTS``, which ``_render``
+        # also reads. See that dict for why they are not written twice.
+        # 既定値はすべて ``_DEFAULTS`` から引く（``_render`` も同じ辞書を読む）。
         params=[
-            # Runtime ids: free text, no choices. See ``base.ParamSpec.type``.
-            ParamSpec(name="target", label="ターゲットID", type="text", default=""),
+            # Runtime ids: free text, no choices. See ``base.ParamSpec.type``
+            # for why a ``select`` cannot express them.
+            ParamSpec(
+                name="target",
+                label="ターゲットID",
+                type="text",
+                default=_DEFAULTS["target"],
+            ),
             ParamSpec(
                 name="linearizer",
                 label="線形化",
                 type="select",
-                default="none",
+                default=_DEFAULTS["linearizer"],
                 # Taken from the pipeline's own registry rather than written
                 # out again: a linearizer added there appears here without a
                 # second edit, and cannot be offered here without existing
@@ -346,25 +444,30 @@ SPEC = register(
                 # 古いまま静かにずれる。
                 choices=list(LINEARIZERS),
             ),
-            ParamSpec(name="lut", label="LUT ID", type="text", default=""),
+            ParamSpec(
+                name="lut", label="LUT ID", type="text", default=_DEFAULTS["lut"]
+            ),
             ParamSpec(
                 name="output",
                 label="出力",
                 type="select",
-                default=_OUTPUTS[0],
+                default=_DEFAULTS["output"],
                 choices=list(_OUTPUTS),
             ),
             ParamSpec(
                 name="target_decode",
                 label="ターゲット復号",
                 type="select",
-                default="srgb",
+                default=_DEFAULTS["target_decode"],
                 # Same source-of-truth argument as ``linearizer`` above; this
                 # one is a ``Literal`` rather than a registry.
                 choices=list(get_args(TargetDecodeMode)),
             ),
             ParamSpec(
-                name="target_gamma", label="ターゲットγ", type="number", default=2.2
+                name="target_gamma",
+                label="ターゲットγ",
+                type="number",
+                default=_DEFAULTS["target_gamma"],
             ),
         ],
         render=_render,

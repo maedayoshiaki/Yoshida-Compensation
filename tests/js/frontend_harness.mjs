@@ -437,6 +437,44 @@ const VIEWS = [
       { name: "p_b", label: "投影 B", type: "number", default: 1.0, choices: [] },
     ],
   },
+  // The only view with a `text` parameter, and the reason it is registered.
+  //
+  // `buildServerParams`' `else` branch -- the one that builds
+  // `<input type="text">` -- had no execution anywhere until `compensation`
+  // (plan B3 Task 3) declared the first `type: "text"` ParamSpec, for a target
+  // id that only exists at runtime and so cannot be a static `choices`. Every
+  // earlier param was `number` (`surface`'s three) or `select` (`normalize`),
+  // both of which take other branches.
+  //
+  // That branch is now the *only* way to reach the view at all: without a
+  // usable text input there is no way to name a target, and the server refuses
+  // every request with "needs a target image". Narrowing the branch -- to
+  // `"hidden"`, or to an `else if` that leaves unknown types with no element --
+  // still passes every Python test and every other check here, while the
+  // ターゲットID box silently disappears from the page.
+  //
+  // Same standard as `legacy_tiles` above: a fourth kind of parameter gets its
+  // own registration rather than being bolted onto `surface`, whose three
+  // number controls are what its own staging checks count.
+  //
+  // `text` パラメータを持つ唯一のビュー。`buildServerParams` の
+  // `<input type="text">` を作る `else` 枝は、`compensation`（計画B3 Task 3）が
+  // 最初の `type: "text"` を宣言するまでどこからも実行されていなかった
+  // （それ以前は number か select のみ）。しかもこの枝は今やビューへ到達する
+  // 唯一の道である——テキスト入力が使えなければターゲットidを指定できず、
+  // サーバは全要求を「ターゲットが要る」と断る。枝を狭めても Python 側も
+  // 他のチェックも全て通り、ターゲットID欄だけが黙って消える。
+  {
+    key: "compensation", label: "補償画像", kind: "rgb", channels: 3,
+    values_are_matrix: false,
+    params: [
+      { name: "target", label: "ターゲットID", type: "text", default: "", choices: [] },
+      {
+        name: "output", label: "出力", type: "select",
+        default: "linear", choices: ["linear", "code"],
+      },
+    ],
+  },
   // Three channels that are three unrelated pictures. This differs from
   // `surface` in `kind` and in nothing else, which is the whole reason it is
   // here: layoutFor decides the tile count from `kind` *and* `channels`, and
@@ -522,6 +560,7 @@ const LABELS_BY_KEY = {
   legacy_tiles: TILE_LABELS,
   gamut: ["色域外", "1超クリップ", "両方", "範囲内, 補正可"],
   surface: ["R", "G", "B"],
+  compensation: ["R", "G", "B"],
   // Deliberately *not* ["R","G","B"]: `tri_scalar` must reach its 1x3 grid
   // through fallbackAxes on its own merits, not by borrowing `surface`'s.
   tri_scalar: ["ch0", "ch1", "ch2"],
@@ -1028,7 +1067,8 @@ if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
     options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,surface,"
-      + "tri_scalar,bad_rgb,mangled_layout,mono_scalar,headerless_tiles,refused_view",
+      + "compensation,tri_scalar,bad_rgb,mangled_layout,mono_scalar,"
+      + "headerless_tiles,refused_view",
     options.join(","));
   check("a second registered view is reachable from the selector",
     options.includes("plain_tiles"), options.join(","));
@@ -1518,6 +1558,50 @@ if (SCENARIO === "rgb") {
   check("an rgb view that is not 3 channels is refused before the transfer, naming the count",
     /チャンネル数が 4/.test(statusText()) && badRgbFetches.length === 0,
     `${statusText()} | fetches=${badRgbFetches.length}`);
+
+  // --- a `text` parameter must produce a control a user can actually type in
+  //
+  // The id of a stored target only exists at runtime, so `compensation`
+  // declares it `type: "text"` with no `choices` -- see the fixture's comment
+  // in VIEWS for why a `select` cannot express it. Three things have to be
+  // true for that to be usable, and each fails silently on its own: the
+  // control has to exist, it has to be a *text* input (a `hidden` or `number`
+  // one is either invisible or refuses the characters an id is made of), and
+  // what is typed has to reach the query string.
+  // 実行時にしか存在しないidのための `text` パラメータ。存在すること・
+  // テキスト入力であること・打った値がクエリ文字列に届くこと、の3つとも
+  // 単独では静かに壊れる。
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await settled();
+
+  const targetControl = el("sp-target");
+  check("the view with a text param builds a control for it",
+    targetControl !== null);
+  check("the ターゲットID control is a text input, not a select or a hidden field",
+    targetControl && targetControl.tagName === "INPUT" && targetControl.type === "text",
+    `tag=${targetControl && targetControl.tagName} type=${targetControl && targetControl.type}`);
+  // The select beside it still has to be a real dropdown: one `else` branch
+  // serves both, so a change that fixes one can break the other.
+  // 隣の select が本物のドロップダウンのままであることも見る。
+  check("a select param next to a text one is still a populated dropdown",
+    el("sp-output") && el("sp-output").tagName === "SELECT"
+      && el("sp-output").children.length === 2,
+    `tag=${el("sp-output") && el("sp-output").tagName}`);
+
+  const beforeTyping = viewRequestCount();
+  stageParam("target", "target7");
+  stageParam("output", "code");
+  await sleep(60);
+  check("typing a target id stages it without fetching",
+    viewRequestCount() === beforeTyping, `${beforeTyping} -> ${viewRequestCount()}`);
+  applyParams();
+  await settled();
+  const withTarget = requestLog[requestLog.length - 1];
+  check("the typed target id reaches the query string",
+    /target=target7/.test(withTarget), withTarget);
+  check("the select next to it is submitted in the same group",
+    /output=code/.test(withTarget), withTarget);
 }
 
 if (SCENARIO === "probe") {

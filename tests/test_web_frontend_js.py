@@ -452,8 +452,44 @@ _MUTATIONS = [
             # And Enter's `change` fires a second fetch behind the keydown's.
             # Enter では keydown の1回に続いて change がもう1回撃つ。
             "Enter in a server-param field submits exactly one fetch",
+            # The text control stages through the same listener as the number
+            # ones, so it observes this guard too -- listed rather than allowed
+            # to be an "unexpected" failure, which is the point of the pinned
+            # set. It is not a duplicate: the three above are number controls,
+            # and a change that special-cased `type === "number"` would leave
+            # them staging while the text box fetched on every keystroke.
+            # テキスト欄も同じリスナで置かれるためこのガードを観測する。
+            # 上の3つは number 欄なので重複ではない（number だけを特別扱い
+            # する変更なら、テキスト欄だけが1文字ごとに取得することになる）。
+            "typing a target id stages it without fetching",
         ),
         id="each_server_param_control_fetches_on_its_own",
+    ),
+    # ---- the text-input branch of buildServerParams, narrowed
+    #
+    # ``ParamSpec(type="text")`` exists because a stored target or lut id only
+    # comes into being at runtime and cannot be a static ``choices``. The
+    # frontend serves it with the ``else`` branch that every non-number,
+    # non-select type falls into -- a branch that had no execution anywhere
+    # until ``views/compensation.py`` declared the first one.
+    #
+    # Narrowing it to ``"hidden"`` is the shape this fails in: the element is
+    # still created, still registered, still submitted, so every other check in
+    # every scenario passes and the Python suite cannot see the frontend at all.
+    # In a browser the ターゲットID box is simply not there, ``serverParams()``
+    # sends the default ``""``, and the view answers "needs a target image"
+    # forever with no way to give it one.
+    #
+    # ``type="text"`` を出す ``else`` 枝を ``"hidden"`` に狭める。要素は作られ
+    # 登録もされ送信もされるため、他のチェックもPython側も一切気付かない。
+    # ブラウザ上ではターゲットID欄が消え、既定の ``""`` が送られ続けて
+    # ビューは永遠に「ターゲットが要る」と断る。
+    pytest.param(
+        "rgb",
+        [("js/main.js", 'el.type = p.type === "number" ? "number" : "text";',
+          'el.type = p.type === "number" ? "number" : "hidden";')],
+        ("the ターゲットID control is a text input",),
+        id="text_param_renders_as_a_hidden_field",
     ),
     # ---- the "not applied" indicator, which used to be armed by events
     #
