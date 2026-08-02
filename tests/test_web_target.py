@@ -70,8 +70,7 @@ def test_single_file_reports_matching_shape(tmp_path) -> None:
 
 
 def test_directory_lists_all_images_with_correct_count_and_order(tmp_path) -> None:
-    """Verifies the *reported* order and count match ``load_target_images``'s
-    casefold-sorted contract.
+    """Verifies the *reported* order and count are casefold-sorted.
 
     This does **not**, by itself, prove the product's ``sorted(...)`` call is
     what produces that order: on NTFS, ``os.listdir`` already returns
@@ -82,6 +81,13 @@ def test_directory_lists_all_images_with_correct_count_and_order(tmp_path) -> No
     ``test_directory_listing_is_sorted_even_when_the_filesystem_already_sorts_it``
     below is the one with actual judgment power over the sort's existence,
     via a monkeypatched ``os.listdir`` that the filesystem cannot normalise.
+
+    The sort under test is ``yoshidacomp_web.target._listing``'s. It was
+    ``pipeline.load_target_images``' until the web layer stopped decoding
+    every image in a directory to find out their names (see
+    ``test_a_directory_pass_decodes_one_image_per_selection``); the order it
+    reports is unchanged, and is still the same ``sorted(os.listdir(...),
+    key=str.casefold)`` filtered by ``SUPPORTED_TARGET_IMAGE_SUFFIXES``.
     """
     targets.clear()
     directory = tmp_path / "targets"
@@ -107,15 +113,19 @@ def test_directory_listing_is_sorted_even_when_the_filesystem_already_sorts_it(
     """The genuine mutation-detection test for directory ordering.
 
     This is the brief's Step 5 mutation 2, run as written (remove
-    ``sorted(..., key=str.casefold)`` from
-    ``yoshidacomp.compensation.pipeline.load_target_images``), made able to
+    ``sorted(..., key=str.casefold)`` from the listing), made able to
     actually catch it. The test above cannot: NTFS's ``os.listdir`` already
     returns entries in name order regardless of creation order, so no
     on-disk write pattern can present the product with genuinely scrambled
     input. Intercepting ``os.listdir`` itself is the only way to do that.
 
     Removing the product's ``sorted()`` call makes this test fail while
-    leaving the test above green -- confirmed (task-2-report.md addendum).
+    leaving the test above green -- confirmed (task-2-report.md addendum),
+    and re-confirmed against ``yoshidacomp_web.target._listing``, which is
+    where that call moved when the web layer stopped decoding a whole
+    directory to list it. The patch is on ``os.listdir`` itself, so it
+    reaches the listing wherever it lives -- which is why this test kept its
+    judgment power across that move rather than quietly losing it.
     """
     targets.clear()
     directory = tmp_path / "targets"
@@ -169,6 +179,117 @@ def test_directory_index_selects_a_specific_image(tmp_path) -> None:
     assert body["meta"]["shape"] == [second_height, second_width, 3]
 
 
+def test_a_directory_pass_decodes_one_image_per_selection(tmp_path, monkeypatch) -> None:
+    """Choosing an image must cost one decode, and choosing it again none.
+
+    The sidebar's image picker re-POSTs here on every selection, so this
+    endpoint's cost per click is the picker's cost per click. It used to call
+    ``pipeline.load_target_images``, which decodes **every** image in the
+    directory and keeps one, and then stored the result under a fresh id: a
+    pass over an N-image directory was N**2 decodes and N retained
+    full-resolution copies, growing without bound in clicks. On the shipped
+    default (5 x 512x512) that is 0.08 s and 3.8 MB and nobody notices; on a
+    directory of 4K captures it is seconds and hundreds of megabytes per
+    click (task-4 final review, Minor 7).
+
+    Counting ``cv2.imread`` calls is what makes this able to fail. Asserting
+    only the ids would pass against an implementation that decoded the whole
+    directory and then threw it away, which is precisely the implementation
+    being replaced.
+
+    一覧から選び直す操作1回あたりの復号回数を数える。以前はディレクトリの
+    全画像を復号して1枚だけ残していたため、一巡で N**2 回の復号と N 枚の
+    恒久保持になっていた。IDだけを見るテストでは、全部復号して捨てる実装と
+    区別が付かない。
+    """
+    targets.clear()
+    directory = tmp_path / "targets"
+    directory.mkdir()
+    names = ["a.png", "b.png", "c.png"]
+    for i, name in enumerate(names):
+        _write_image(directory / name, _HEIGHT + i, _WIDTH, seed=i)
+
+    import yoshidacomp_web.target as web_target
+
+    real_imread = web_target.cv2.imread
+    decodes: list[str] = []
+
+    def counting_imread(filename, *args, **kwargs):
+        decodes.append(str(filename))
+        return real_imread(filename, *args, **kwargs)
+
+    monkeypatch.setattr(web_target.cv2, "imread", counting_imread)
+
+    client = TestClient(create_app())
+    first_pass = []
+    for index in range(3):
+        response = client.post(
+            "/api/target", json={"path": str(directory), "index": index}
+        )
+        assert response.status_code == 200, response.text
+        first_pass.append(response.json())
+
+    # One decode per selection, and the file decoded is the one selected.
+    assert len(decodes) == 3, decodes
+    assert [os.path.basename(d) for d in decodes] == names, decodes
+    # Each selection really did select its own image (different heights).
+    assert [b["meta"]["shape"][0] for b in first_pass] == [
+        _HEIGHT, _HEIGHT + 1, _HEIGHT + 2
+    ]
+    assert [b["meta"]["index"] for b in first_pass] == [0, 1, 2]
+    ids = [b["id"] for b in first_pass]
+    assert len(set(ids)) == 3, ids
+
+    # A second pass costs nothing: same ids, same metadata, no further decode.
+    decodes.clear()
+    for index in range(3):
+        body = client.post(
+            "/api/target", json={"path": str(directory), "index": index}
+        ).json()
+        assert body["id"] == ids[index]
+        assert body["meta"] == first_pass[index]["meta"]
+    assert decodes == [], decodes
+
+
+def test_a_replaced_file_is_read_again_rather_than_served_from_the_cache(
+    tmp_path,
+) -> None:
+    """Reusing a loaded target must key on the file, not merely on its path.
+
+    The reuse above is what stops the picker from growing the store without
+    bound; keyed on the path alone it would also stop an edited file from ever
+    being re-read, and the viewer would keep drawing a picture that no longer
+    exists on disk -- a silent wrong answer, which is worse than the leak the
+    reuse exists to fix. The identity therefore carries the file's size and
+    modification time.
+
+    パスだけを鍵にすると、差し替えられたファイルが二度と読み直されず、
+    ディスク上に無い絵を描き続けることになる。同一性にサイズと更新時刻を
+    含める理由がこれである。
+    """
+    targets.clear()
+    path = tmp_path / "target.png"
+    _write_image(path, _HEIGHT, _WIDTH, seed=1)
+
+    client = TestClient(create_app())
+    first = client.post("/api/target", json={"path": str(path)}).json()
+    assert first["meta"]["shape"] == [_HEIGHT, _WIDTH, 3]
+
+    # Same path, different content *and* a different size, written far enough
+    # ahead in time that no filesystem timestamp granularity can hide it.
+    replaced_height, replaced_width = _HEIGHT + 4, _WIDTH + 6
+    _write_image(path, replaced_height, replaced_width, seed=2)
+    os.utime(path, ns=(os.stat(path).st_atime_ns, os.stat(path).st_mtime_ns + 10**9))
+
+    second = client.post("/api/target", json={"path": str(path)}).json()
+    assert second["id"] != first["id"]
+    assert second["meta"]["shape"] == [replaced_height, replaced_width, 3]
+    # The first id still resolves, and still describes what it loaded.
+    still_there = client.get(f"/api/target/{first['id']}/meta")
+    assert still_there.status_code == 200
+    assert still_there.json()["shape"] == [_HEIGHT, _WIDTH, 3]
+
+
 def test_out_of_range_index_is_400(tmp_path) -> None:
     targets.clear()
     directory = tmp_path / "targets"
@@ -184,7 +305,7 @@ def test_out_of_range_index_is_400(tmp_path) -> None:
 def test_nonzero_index_on_a_single_file_is_400(tmp_path) -> None:
     """A single file has exactly one selectable entry (index 0). Any other
     value must be rejected, not silently ignored -- see
-    ``models.py::LoadTargetRequest`` and ``target.py::load_target``'s
+    ``models.py::LoadTargetRequest`` and ``target.py::resolve_target``'s
     docstrings, which this pins so the three no longer disagree
     (task-2-review.md Important 3).
     """

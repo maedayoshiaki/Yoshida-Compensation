@@ -15,7 +15,7 @@ from fastapi import APIRouter, HTTPException
 from ..deps import require_target
 from ..models import LoadTargetRequest
 from ..store import targets
-from ..target import TargetContext, load_target
+from ..target import TargetContext, load_resolved, resolve_target
 
 router = APIRouter()
 
@@ -48,14 +48,47 @@ def load_session_target(request: LoadTargetRequest) -> dict[str, Any]:
             detail="path is empty; expected the path of an image file or a "
             "directory of images",
         )
+    # Resolved before it is read, so an image already in the store is answered
+    # without decoding it a second time.
+    #
+    # This endpoint is not only the 読み込み button: the sidebar's directory
+    # picker re-POSTs on every selection, so flipping through a directory used
+    # to decode all of its images once per click and leave one more full-size
+    # copy in the store each time -- unbounded in clicks, and O(N) decodes per
+    # click (measured: a full pass over a 3-image directory called
+    # ``cv2.imread`` 9 times and grew the store to 3). Now the identity says
+    # whether this is a thing already loaded, so a pass costs one decode per
+    # image and a second pass costs none at all. What is stored is bounded by
+    # the images actually selected rather than by how often they were.
+    #
+    # The identity carries the selected file's size and mtime, so a file
+    # replaced on disk is a different target and is read again -- serving a
+    # stale picture from a cache would be a far worse failure than the leak
+    # this replaces.
+    #
+    # 一覧から選び直すたびにこのエンドポイントが呼ばれる。以前は1クリックごとに
+    # ディレクトリ内の全画像を復号し、店には毎回1枚ずつ積み上がっていた
+    # （実測: 3枚を一巡して ``cv2.imread`` 9回、店は3件）。同一性で引き当てる
+    # ことで、一巡は1枚1回の復号になり、2周目は復号ゼロになる。
+    # 同一性にはサイズと更新時刻が入るので、差し替えられたファイルは別物として
+    # 読み直される（古い絵をキャッシュから出すほうが害が大きい）。
     try:
-        context = load_target(Path(request.path), index=request.index)
+        source = resolve_target(Path(request.path), index=request.index)
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (OSError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    loaded = targets.get_by_key(source.identity)
+    if loaded is not None:
+        return {"id": loaded, "meta": _build_meta(loaded, targets.get(loaded))}
+
+    try:
+        context = load_resolved(source)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    target_id = targets.put(context)
+    target_id = targets.put(context, key=source.identity)
     return {"id": target_id, "meta": _build_meta(target_id, context)}
 
 

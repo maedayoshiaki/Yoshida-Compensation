@@ -84,6 +84,11 @@ def test_the_stores_do_not_share_state() -> None:
             assert a._items is not b._items, (a_kind, b_kind)
             assert a._lock is not b._lock, (a_kind, b_kind)
             assert a._counter is not b._counter, (a_kind, b_kind)
+            # The cache-key index is per-instance for the same reason, and is
+            # listed here rather than left implicit: a shared one would hand a
+            # ``TargetStore`` key an id issued by another store, and
+            # ``get_by_key`` would answer with it.
+            assert a._ids_by_key is not b._ids_by_key, (a_kind, b_kind)
 
             issued = a.put(object())
             assert issued not in b._items, (a_kind, b_kind)
@@ -96,6 +101,57 @@ def test_the_stores_do_not_share_state() -> None:
                     f"the {b_kind} store resolved {issued!r}, an id it never "
                     f"issued -- it is sharing state with the {a_kind} store"
                 )
+
+
+def test_a_keyed_put_is_found_again_and_an_unkeyed_one_is_not() -> None:
+    """``put(key=...)``/``get_by_key`` must reuse, and only where asked.
+
+    This is what stops ``POST /api/target`` from storing another copy of an
+    image it already holds every time the sidebar's picker is clicked. Both
+    directions matter: a key must find its id, and a context stored without a
+    key must not be reachable by any key at all (a store that answered
+    ``get_by_key`` from ``_items`` would hand back whatever it last stored,
+    and the router would then serve one target's pixels under another's
+    request).
+    """
+    store = TargetStore()
+    first = store.put(object(), key=("a.png", 1, 100))
+    assert store.get_by_key(("a.png", 1, 100)) == first
+    # A different key is a different thing, even one that only differs in the
+    # part that says "which file version".
+    assert store.get_by_key(("a.png", 1, 101)) is None
+    assert store.get_by_key(("b.png", 1, 100)) is None
+
+    unkeyed = store.put(object())
+    assert store.get(unkeyed) is not None
+    assert store.get_by_key(("a.png", 1, 100)) == first  # not the newest put
+
+
+def test_clear_drops_the_cache_keys_with_the_contexts() -> None:
+    """A key surviving ``clear()`` would name an id that no longer resolves.
+
+    ``get_by_key`` would then return an id whose ``get`` raises, and
+    ``routers/target.py``, which calls the two in sequence, would answer a
+    routine reload with a 500 instead of reading the file again.
+
+    This is the *only* guard: ``get_by_key`` deliberately does not re-check
+    ``_items``. It used to, and the two clauses masked each other -- removing
+    either on its own left this file green (measured), so nothing held either
+    of them to anything. See ``_IdStore.get_by_key``.
+
+    Both halves are asserted, because the first alone passes against a store
+    that never stores keys at all.
+    """
+    store = TargetStore()
+    key = ("a.png", 0, 7)
+    assert store.put(object(), key=key) == "target1"
+    assert store.get_by_key(key) == "target1"  # it was really stored
+    store.clear()
+    assert store.get_by_key(key) is None
+    # And the next load stores it afresh, under a new id (the counter does not
+    # rewind -- see test_clear_does_not_reset_the_counter).
+    assert store.put(object(), key=key) == "target2"
+    assert store.get_by_key(key) == "target2"
 
 
 def test_put_is_thread_safe_and_issues_no_duplicate_or_lost_ids() -> None:

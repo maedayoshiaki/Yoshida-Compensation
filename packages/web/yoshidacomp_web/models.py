@@ -18,7 +18,7 @@ class LoadTargetRequest(BaseModel):
     ``path`` is a directory (0 = first, casefold-sorted). When ``path`` is a
     single file, only ``0`` is valid -- a single file has exactly one
     selectable entry, so any other value is rejected (400), not silently
-    ignored (``target.py::load_target``).
+    ignored (``target.py::resolve_target``).
     """
 
     path: str
