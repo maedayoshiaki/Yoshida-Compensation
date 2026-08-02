@@ -22,10 +22,10 @@ router = APIRouter()
 
 def _build_meta(target_id: str, context: TargetContext) -> dict[str, Any]:
     """Build the JSON-serialisable metadata for a stored target."""
-    height, width = context.image.shape[0], context.image.shape[1]
+    height, width, channels = context.image.shape
     return {
         "id": target_id,
-        "shape": [height, width, 3],
+        "shape": [height, width, channels],
         "dtype": str(context.image.dtype),
         "path": str(context.path),
         "is_directory": context.is_directory,

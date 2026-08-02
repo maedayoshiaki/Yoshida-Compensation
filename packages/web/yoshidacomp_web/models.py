@@ -15,8 +15,10 @@ class LoadTargetRequest(BaseModel):
     """Body of ``POST /api/target``.
 
     ``index`` selects which image becomes the *currently selected* one when
-    ``path`` is a directory (0 = first, casefold-sorted). Ignored when
-    ``path`` is a single file.
+    ``path`` is a directory (0 = first, casefold-sorted). When ``path`` is a
+    single file, only ``0`` is valid -- a single file has exactly one
+    selectable entry, so any other value is rejected (400), not silently
+    ignored (``target.py::load_target``).
     """
 
     path: str

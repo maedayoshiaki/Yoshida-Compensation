@@ -75,19 +75,24 @@ def load_target(path: Path, index: int = 0) -> TargetContext:
     """Load a target image file or a directory of them.
 
     ディレクトリの場合は ``load_target_images`` で全画像を読み、``index``
-    番目（既定 0 = 先頭）を選択中の画像とする。単一ファイルの場合
-    ``index`` は無視できる位置（常に 0）以外を渡すとエラーにする必要は
-    無いが、範囲外の指定はディレクトリと同じ扱いで弾く。
+    番目（既定 0 = 先頭）を選択中の画像とする。単一ファイルには index が
+    1つ（0）しか存在しないため、0 以外を渡すと範囲外のディレクトリindex
+    と同じ扱いで拒否する（無視はしない -- 呼び出し側の状態不整合を
+    サイレントに飲み込まないため）。
 
     Raises:
         FileNotFoundError: ``path`` does not exist. 存在しないパス。
         ValueError: ``path`` exists but cannot become a target image --
-            an empty directory, an out-of-range ``index``, an unsupported
-            file extension, or a file ``cv2.imread`` cannot decode. The
-            message always names ``path`` since the router hands it
-            straight to the user.
-            ディレクトリが空、``index`` が範囲外、拡張子非対応、
-            デコード不能のいずれか。メッセージには必ずパスを含める。
+            an empty directory, an out-of-range ``index`` (for a directory:
+            outside ``[0, len(entries))``; for a single file: anything other
+            than ``0``, since a single file has exactly one selectable
+            entry), an unsupported file extension, or a file ``cv2.imread``
+            cannot decode. The message always names ``path`` since the
+            router hands it straight to the user.
+            ディレクトリが空、``index`` が範囲外（ディレクトリなら
+            ``[0, len(entries))`` の外、単一ファイルなら 0 以外すべて）、
+            拡張子非対応、デコード不能のいずれか。メッセージには必ず
+            パスを含める。
     """
     if not path.exists():
         raise FileNotFoundError(str(path))
@@ -114,6 +119,11 @@ def load_target(path: Path, index: int = 0) -> TargetContext:
         raise ValueError(
             f"not a file or directory: {path} -- expected an image file or a "
             "directory of images"
+        )
+    if index != 0:
+        raise ValueError(
+            f"index {index} is invalid for {path}: a single image file has "
+            "only index 0"
         )
     image = _load_single_image(path)
     return TargetContext(
