@@ -23,13 +23,7 @@ from typing import Literal, Optional, Protocol, Tuple, cast
 import cv2
 import numpy as np
 
-from yoshidacomp.compensation.color_mixing_matrix import (
-    apply_inverse_gamma_correction,
-)
 from yoshidacomp.compensation.inverse_lut import InverseLut, apply_inverse_lut
-from yoshidacomp.compensation.photometric_compensation import (
-    calc_compensation_image,
-)
 from yoshidacomp.compensation.projection_region import (
     embed_in_active_region,
     mask_to_active_region,
@@ -269,6 +263,96 @@ def _linearize_none(
     return image
 
 
+def _apply_inverse_gamma_numpy(
+    image: np.ndarray,
+    gamma: float,
+) -> np.ndarray:
+    """Raise a normalized RGB image to *gamma*, clamped to [0, 1].
+
+    ``color_mixing_matrix.apply_inverse_gamma_correction`` の numpy 版。
+    *gamma* はそのまま指数として使うので、明るくするには 1/projector.gamma を
+    渡す。入力の dtype を保つ。
+
+    torch 版は 600 万画素の冪乗のために CUDA を初期化する。対話的GUIでは
+    初回に数秒止まり、プロジェクタを駆動しているのと同じGPUのメモリを取るため
+    割に合わない。加えて torch は module scope で psutil ごと web 層へ漏れる。
+
+    **Not wired into ``LINEARIZERS["gamma"]``.** Measured against the torch
+    implementation (see ``.superpowers/sdd/2026-08-02-target-and-lut/
+    task-1-report.md`` for the full numbers): uint8 output matches
+    byte-for-byte over all 256 input values in both directions, on both the
+    CPU and CUDA torch backends. Float32 output does **not** match
+    bit-for-bit -- ``np.power`` and ``torch.pow`` disagree by up to 1 ULP
+    (~5.96e-8 in this range) on roughly 6% of a fine [0, 1] grid; torch's own
+    CUDA and CPU backends disagree with *each other* by the same margin, so
+    this is intrinsic to differing ``powf`` implementations, not a bug in
+    either version. An exhaustive uint16 sweep also turned up a handful of
+    1-LSB disagreements (45/196608 brightening, 21/196608 darkening) that a
+    coarser sample would have missed. Because the web layer this task exists
+    to unblock specifically wants float output (an unquantized preview, per
+    :func:`generate_projection_image`'s *dtype* docs), ``_linearize_gamma``
+    keeps calling the torch implementation (lazily imported so it stays out
+    of this module's import chain) rather than switching to this function.
+    This function is kept for the web layer's own direct use, where a
+    sub-ULP difference from what torch would have produced is immaterial.
+
+    ``LINEARIZERS["gamma"]`` には配線していない。torch 版との実測比較
+    （詳細は上記レポート）では、uint8 出力は 256 値×両方向×CPU/CUDA
+    いずれでもバイト単位で一致した。しかし float32 出力はビット単位で
+    一致しない -- ``np.power`` と ``torch.pow`` は [0, 1] を細かく刻んだ
+    グリッドの約6%で最大1ULP（このレンジで ~5.96e-8）ずれる。torch の
+    CUDA版とCPU版同士でさえ同程度ずれるため、これはどちらかの実装の
+    バグではなく ``powf`` 実装差に起因する。uint16 を全数検査すると
+    1LSB の相違が明方向45/196608・暗方向21/196608件見つかり、粗いサンプル
+    では見逃していた。このタスクが解放しようとしているweb層はまさに
+    float 出力（量子化前のプレビュー、:func:`generate_projection_image`
+    の *dtype* 説明を参照）を必要とするため、``_linearize_gamma`` は
+    torch 実装を呼び続ける（遅延importでこのモジュールの import 連鎖
+    からは外す）。この関数は web 層が直接使う用途として残す -- そこでは
+    torch が出したはずの値とのサブULPの差は無視できる。
+
+    Args:
+        image: RGB image, shape ``(H, W, 3)``. uint8 in [0, 255], uint16 in
+            [0, 65535], or float already normalized to roughly [0, 1]
+            (values outside that range are accepted; the result is NaN for
+            a negative base with a non-integer *gamma*, matching torch, and
+            clamps to 1.0 above 1.0).
+            形状 ``(H, W, 3)`` の RGB 画像。uint8 は [0, 255]、uint16 は
+            [0, 65535]、float はおおむね [0, 1] に正規化済み（範囲外も
+            受け付ける。負の底に非整数 *gamma* を与えると torch と同様
+            NaN になり、1超は 1.0 にクランプされる）。
+        gamma: Exponent applied directly to the normalized image -- **not**
+            inverted for you. Brightening a projector whose response is
+            ``t ** projector.gamma`` requires passing ``1 / projector.gamma``.
+            正規化画像に直接適用される指数。呼び出し側で反転しない。
+            応答が ``t ** projector.gamma`` のプロジェクタを明るくするには
+            ``1 / projector.gamma`` を渡す。
+
+    Returns:
+        Array of the same dtype as *image*.
+        *image* と同じ dtype の配列。
+    """
+    dtype = image.dtype
+    if dtype == np.uint8:
+        normalized = image.astype(np.float32) / 255.0
+    elif dtype == np.uint16:
+        normalized = image.astype(np.float32) / 65535.0
+    else:
+        normalized = image.astype(np.float32)
+
+    # A negative base with a non-integer exponent is undefined for reals;
+    # matching torch's behaviour means propagating NaN rather than raising.
+    with np.errstate(invalid="ignore"):
+        corrected = np.power(normalized, np.float32(gamma), dtype=np.float32)
+    corrected = np.clip(corrected, 0.0, 1.0)
+
+    if dtype == np.uint8:
+        return (corrected * 255.0).astype(np.uint8)
+    if dtype == np.uint16:
+        return (corrected * 65535.0).astype(np.uint16)
+    return corrected.astype(dtype)
+
+
 def _linearize_gamma(
     image: np.ndarray,
     *,
@@ -286,7 +370,21 @@ def _linearize_gamma(
     注: apply_inverse_gamma_correction() は与えた指数をそのまま使うため、
     明るくするには 1 / projector.gamma を渡す必要がある。入力の dtype を
     保つため、*dtype* はプロトコル整合のためだけに受け取る。
+
+    This imports ``color_mixing_matrix`` (and therefore ``torch`` and
+    ``psutil``) lazily, inside the call, specifically so that importing
+    this module does not pull torch in -- see
+    :func:`_apply_inverse_gamma_numpy` for why the numpy reimplementation
+    is not used here instead.
+    ``color_mixing_matrix``（延いては ``torch`` と ``psutil``）はこの
+    呼び出しの中で遅延importする。このモジュールを import しても torch を
+    引かないようにするためで、なぜここで numpy 再実装を使わないかは
+    :func:`_apply_inverse_gamma_numpy` を参照。
     """
+    from yoshidacomp.compensation.color_mixing_matrix import (
+        apply_inverse_gamma_correction,
+    )
+
     return apply_inverse_gamma_correction(image, gamma=1.0 / projector.gamma)
 
 
@@ -403,6 +501,14 @@ def generate_projection_image(
             "undefined for values outside [0, 1] -- exactly the values "
             "clip=False exists to preserve."
         )
+
+    # Lazily imported for the same reason as _linearize_gamma's import of
+    # apply_inverse_gamma_correction: photometric_compensation imports torch
+    # at module scope, and this module must not pull torch in just from
+    # being imported.
+    from yoshidacomp.compensation.photometric_compensation import (
+        calc_compensation_image,
+    )
 
     target_linear = decode_target(
         target_uint8,
