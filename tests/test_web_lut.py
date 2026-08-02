@@ -175,16 +175,39 @@ def test_the_curve_carries_the_configured_projector_gamma(tmp_path) -> None:
 
     フロントには他に知る手段が無く、違う指数を重ねれば「定量的に見えるが
     そうではない比較」になる。
+
+    **判別力について。** 実 ``config.toml`` の ``gamma`` は 2.2 であり、それは
+    ちょうど「よくある指数」でもある。設定を読まず ``2.2`` を直書きした実装で
+    も、実configのまま比べる限り区別が付かない（実測: ``"gamma":
+    float(get_config().projector.gamma)`` を ``2.2`` に置き換えても
+    このファイルの19件すべてが通った）。2.2 でない値を設定してから確認する。
     """
+    from yoshidacomp.config import reload_config
+
     luts.clear()
     path = _write_lut(tmp_path / "inverse_lut.npz")
+
+    # Deliberately neither 2.2 nor 1.0: the first is the default a hard-coded
+    # implementation would use, the second is the value an implementation that
+    # forgot the exponent entirely would produce.
+    # 2.2 でも 1.0 でもない値にする（前者は直書き、後者は指数を忘れた実装）。
+    unusual_gamma = 1.7
+    config_path = tmp_path / "unusual_gamma.toml"
+    config_path.write_text(
+        f"[projector]\nwidth = 64\nheight = 48\ngamma = {unusual_gamma}\n",
+        encoding="utf-8",
+    )
+    # The autouse ``_restore_real_config`` fixture puts the real config back
+    # after this test, on both sides -- see tests/conftest.py.
+    reload_config(config_path)
+    assert float(get_config().projector.gamma) == pytest.approx(unusual_gamma)
 
     client = TestClient(create_app())
     body = _load(client, path).json()
     payload = client.get(f"/api/lut/{body['id']}/curve").json()
 
-    assert payload["gamma"] == pytest.approx(float(get_config().projector.gamma))
-    assert payload["gamma"] > 0.0
+    assert payload["gamma"] == pytest.approx(unusual_gamma)
+    assert payload["gamma"] != pytest.approx(2.2)
 
 
 def test_post_reports_the_path_and_shape(tmp_path) -> None:
