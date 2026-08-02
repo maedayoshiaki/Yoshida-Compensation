@@ -47,14 +47,37 @@ class ParamSpec:
     Attributes:
         name: Parameter key passed back as a query string.
         label: Human-readable label.
-        type: "number" | "select" | "rgb".
+        type: "number" | "select" | "text" | "rgb".
+
+            ``"text"`` is for a value whose valid set only exists at runtime --
+            a stored ``target`` or ``lut`` id, which is minted by a POST after
+            this registry was built. ``choices`` is a static ``list[str]`` and
+            ``ViewSpec`` is frozen, so those cannot be offered as a
+            ``"select"``: an empty ``choices`` renders an empty ``<select>`` in
+            ``static/js/main.js::buildServerParams``, a control that can never
+            be given a value at all. The view validates the string it receives
+            and raises ``ViewNotApplicable`` for an id it cannot resolve, which
+            is the same 400-with-a-reason the router already produces for a
+            value outside a ``select``'s ``choices``.
+
+            No JavaScript change was needed for it: ``buildServerParams``
+            already renders every non-``"number"``, non-``"select"`` type as
+            ``<input type="text">``, and ``routers/view.py`` already passes
+            such a parameter through as the raw string.
+
+            ``"text"`` は「有効な値の集合が実行時にしか存在しない」もの
+            （``target``/``lut`` の id）のための型。``choices`` は静的な
+            ``list[str]`` で ``ViewSpec`` は frozen なので、これらを
+            ``"select"`` にすると空のドロップダウンになり値を入れる手段が
+            無くなる。ビュー側が受け取った文字列を検証し、解決できない id は
+            ``ViewNotApplicable``（router が 400 に写す）にする。
         default: Default value.
         choices: Options when ``type == "select"``.
     """
 
     name: str
     label: str
-    type: Literal["number", "select", "rgb"]
+    type: Literal["number", "select", "text", "rgb"]
     default: object
     choices: list[str] = field(default_factory=list)
 
