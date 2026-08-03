@@ -98,8 +98,19 @@
 | 3 | 負と1超の両方がある | `両方` |
 
 **境界は閉区間である。** ちょうど 0 とちょうど 1 は `範囲内` に入る。
-`<` と `<=` を取り違えると、飽和した画素が大量に誤分類される
-（実データでは白飛び付近が 1.0 ちょうどに張り付く）。
+0.0 と 1.0 はプロジェクタが正確に再現する2つの値であり、定義上「表現できる」
+側だからである。
+
+> **計画時の理由付けは誤っていた（実装時に実測して訂正）。** ここには
+> 「実データでは白飛び付近が 1.0 ちょうどに張り付くので `<`/`<=` の取り違えで
+> 大量に誤分類される」と書いていたが、その張り付きを作っているのは
+> `calc_compensation_image` のクリップであり、このビューは `clip=False` で
+> それを止めている。実測（実行列×実写12組、1組あたり276万チャンネル値）では
+> **この経路でちょうど 0.0 / 1.0 になる値は 0 件**（1組だけ 1.0 が1件）。
+> つまり `<=` へ退行しても実データでは1画素も誤分類されず、GUI を眺めても
+> 気付けない。守っているのは境界をちょうど構成する合成フィクスチャだけである
+> （`views/gamut.py` の該当コメントと
+> `test_pixels_at_exactly_zero_and_exactly_one_are_in_range` を参照）。
 
 有効投影領域の外は **NaN**。クラス番号ではない。
 
@@ -303,14 +314,19 @@ git commit -m "feat(web): 離散クラスを凡例つきで描く categorical ki
 
 ```
 <output_dir>/
-├── linear/compensation_image_00.png       線形補償画像
-├── projector/<suffix>_comp_image_00.png   投影画像（suffix は linearizer 由来）
+├── compensation_linear/compensation_image_00.png       線形補償画像
+├── compensation_projector/<prefix>_comp_image_00.png   投影画像（prefix は linearizer 由来）
 └── generate_metadata.json
 ```
 
-`suffix` は `{"none": "no_gamma", "gamma": "inv_gamma", "inverse_lut": "inv_lut"}`。
-**この辞書は CLI 側にも同じものがある。** 片方だけ変えると出力名が食い違うので、
-どちらか一方を輸入するか、**同じであることをテストで固定すること。**
+> **実装後の実際の並び。** 計画時は `linear/` / `projector/` と書いていたが、
+> CLI が使っているのは `compensation_linear/` / `compensation_projector/` で
+> あり、そちらに合わせた（`test_the_saved_layout_is_the_cli_layout` が固定）。
+
+`prefix` は `{"none": "no_gamma", "gamma": "inv_gamma", "inverse_lut": "inv_lut"}`。
+**実装では辞書を写さず、core の `LINEARIZER_FILENAME_PREFIXES` を両方の書き出し
+側が import する形にした**（`pipeline.py`）。名前を glob する下流の4スクリプトも
+同じ辞書を読む。
 
 **ディレクトリを渡された target の扱い**
 
@@ -459,4 +475,7 @@ Task 4 の「生成の設定をどこから取るか」は意図的に実装者�
 **Type consistency:** `gamut` は `channels=1`、`kind="categorical"`、
 `vmin=0`/`vmax=3`、`labels` 4要素。`KIND_TRAITS.categorical` の
 `texture` は R32F/RED で、`channels=1` と整合する。
-`generate.py` の `suffix` 辞書は `rebuild_compensation_with_map.py` と同一。
+投影画像のファイル名接頭辞は、`generate.py` と
+`rebuild_compensation_with_map.py` が core の
+`LINEARIZER_FILENAME_PREFIXES` を同一オブジェクトとして import する
+（計画時は「両者に同じ辞書がある」前提で書いていたが、写しを持たない形にした）。

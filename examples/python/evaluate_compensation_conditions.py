@@ -30,6 +30,12 @@ if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 from examples.python import sample
+# The one map both writers use. Globbed here rather than restated: these
+# names are how this script finds the images another tool wrote, so a
+# literal copy is a filename agreement with nothing keeping it.
+# 書き出し側と同じ辞書を読む（ここでの literal は「誰も守っていない
+# ファイル名の取り決め」になる）。
+from yoshidacomp.compensation.pipeline import LINEARIZER_FILENAME_PREFIXES
 from yoshidacomp.config import reload_config
 
 
@@ -194,19 +200,22 @@ def main() -> None:
             ),
             "comp_no_gamma": _load_first_rgb(
                 args.raw_comp_dir,
-                f"no_gamma_comp_image_{index:02d}.png",
-                f"inv_lut_comp_image_{index:02d}.png",
+                f"{LINEARIZER_FILENAME_PREFIXES['none']}_comp_image_{index:02d}.png",
+                f"{LINEARIZER_FILENAME_PREFIXES['inverse_lut']}_comp_image_{index:02d}.png",
             ),
             "comp_gamma": _load_rgb(
-                args.gamma_comp_dir / f"inv_gamma_comp_image_{index:02d}.png"
+                args.gamma_comp_dir
+                / f"{LINEARIZER_FILENAME_PREFIXES['gamma']}_comp_image_{index:02d}.png"
             ),
             "comp_inverse_lut": _load_rgb(
-                args.lut_comp_dir / f"inv_lut_comp_image_{index:02d}.png"
+                args.lut_comp_dir
+                / f"{LINEARIZER_FILENAME_PREFIXES['inverse_lut']}_comp_image_{index:02d}.png"
             ),
         }
         if args.gray_lut_comp_dir is not None:
             condition_patterns["comp_inverse_lut_gray"] = _load_rgb(
-                args.gray_lut_comp_dir / f"inv_lut_comp_image_{index:02d}.png"
+                args.gray_lut_comp_dir
+                / f"{LINEARIZER_FILENAME_PREFIXES['inverse_lut']}_comp_image_{index:02d}.png"
             )
         for condition in conditions:
             patterns.append(condition_patterns[condition])

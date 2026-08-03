@@ -1344,7 +1344,13 @@ _MUTATIONS = [
             "    text.textContent = payload.labels[i];",
             '    text.textContent = ["範囲内", "負クリップ", "1超クリップ", "両方"][i];',
         )],
-        ("the legend's labels are the payload's",),
+        (
+            "the legend's labels are the payload's",
+            # The hard-coded list has four entries, so on the three-class view
+            # it is a row count error as well as a wrong label.
+            # 直書きの一覧は4つなので、3クラスのビューでは行数の誤りにもなる。
+            "the legend's row count is the payload's class count",
+        ),
         id="the_class_legend_hardcodes_the_shipped_labels",
     ),
     # The colormap control left live over a discrete palette.
@@ -1465,6 +1471,10 @@ _MUTATIONS = [
         (
             "the display range is worded as a class count, not as an interval",
             "the tile caption does not restate the legend under the tile",
+            # The same two strings, read again on the three-class view: both
+            # are built from the class count, so both are wrong there too.
+            # 同じ2つの文字列を3クラスのビューでも読んでいる。
+            "the caption and range of a three-class view count three classes",
         ),
         id="the_categorical_range_and_caption_lose_their_class_wording",
     ),
@@ -1495,6 +1505,10 @@ _MUTATIONS = [
         (
             "the display range is worded as a class count, not as an interval",
             "the tile caption does not restate the legend under the tile",
+            # The same two strings, read again on the three-class view: both
+            # are built from the class count, so both are wrong there too.
+            # 同じ2つの文字列を3クラスのビューでも読んでいる。
+            "the caption and range of a three-class view count three classes",
         ),
         id="categorical_takes_a_per_channel_range_instead_of_a_shared_one",
     ),
@@ -1891,7 +1905,15 @@ _MUTATIONS = [
             '  $("gen-info").textContent = reason ? reason.short : generateOutcome;',
             '  if (reason) $("gen-info").textContent = reason.short;',
         )],
-        ("the line beside 生成 names the obstacle",),
+        (
+            "the line beside 生成 names the obstacle",
+            # The success check makes the same round trip through `gamut`, so
+            # the missing `else` strands the refusal there too. Two checks watch
+            # this one branch from its two sides, which is the point of both.
+            # 成功側のチェックも `gamut` を往復するので、同じ `else` の欠落で
+            # 落ちる。1つの枝を両側から見ている。
+            "a successful save is what the line beside 生成 says",
+        ),
         id="the_reason_line_beside_generate_is_never_cleared",
     ),
     # The disabled button, left looking exactly like a live one.
@@ -1991,6 +2013,52 @@ _MUTATIONS = [
             "the line beside 生成 names the obstacle",
         ),
         id="a_confirmed_overwrite_is_remembered_for_every_later_press",
+    ),
+    # The other half of the line beside 生成: what it says after a save.
+    #
+    # The refusal half was fixed by making `refreshGenerateButton` write on both
+    # branches; what `generateOutcome` *holds* after a success went unasserted in
+    # the same edit, which is where the second instance of a two-branch defect
+    # hides -- the fix reads as coverage. Removing the recording produces the
+    # exact inverse of the defect it was written for: three absolute paths
+    # appear under a line still reading 未生成, because the `finally`'s
+    # `refreshGenerateButton()` restores the stale outcome over 「生成中…」.
+    # 断りの側を直した編集で、成功の側は誰も読んでいなかった。記録を外すと、
+    # 3つの絶対パスの脇に 未生成 と出る（直した欠陥のちょうど裏返し）。
+    pytest.param(
+        "generate",
+        [(
+            "js/main.js",
+            "    setGenerateOutcome(`${(result.files || []).length} 件を保存`);\n",
+            "",
+        )],
+        ("a successful save is what the line beside 生成 says",),
+        id="a_successful_save_is_not_recorded_as_the_outcome",
+    ),
+    # ---- the class legend, driven off the palette instead of the payload
+    #
+    # `renderClassLegend` loops `payload.labels.length`; the swatches come from
+    # `CLASS_COLORS`. Looping the palette instead is invisible on `gamut`, which
+    # has four classes against a four-entry palette -- the fixture was symmetric
+    # in exactly this dimension until `gamut_lite` (three classes) was added.
+    #
+    # `routers/view.py` admits any categorical view at `len(labels) >= 2` and
+    # names the consumer that will break the four-class assumption: "the second
+    # categorical view". Against a three-class view this build draws a fourth
+    # row whose label is the string `undefined`, beside a colour no pixel in the
+    # picture carries -- in the one place the class-to-colour mapping is stated
+    # in words.
+    # 凡例をパレット側から作る変異。`gamut`（4クラス）だけでは4===4で見えない。
+    # 3クラスのビューでは「undefined」という行が、絵に無い色の隣に並ぶ。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "  for (let i = 0; i < payload.labels.length; i++) {",
+            "  for (let i = 0; i < CLASS_COLORS.length; i++) {",
+        )],
+        ("the legend's row count is the payload's class count",),
+        id="the_class_legend_is_drawn_from_the_palette_not_the_payload",
     ),
 ]
 

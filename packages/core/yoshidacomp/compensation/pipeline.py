@@ -584,11 +584,19 @@ LINEARIZERS: dict[str, Linearizer] = {
 # the CLI's private literal until the web endpoint needed the same names; a
 # second copy there would have been two dicts that must agree and nothing
 # making them, so the GUI and the CLI could come to write different filenames
-# for the same run. Downstream tools glob these names --
-# ``examples/python/evaluate_compensation_conditions.py`` looks for
-# ``no_gamma_comp_image_{index:02d}.png`` / ``inv_gamma_...`` / ``inv_lut_...``
-# and finds nothing, silently, if they change -- so the *values* are pinned by
-# a test as well.
+# for the same run.
+#
+# **The readers import it too**, and that took a second pass: the four scripts
+# that glob or clear these files -- ``evaluate_compensation_conditions.py``,
+# ``evaluate_recalibrated_compensation.py``, ``sample.py`` and
+# ``sample_inverse_lut.py`` -- went on spelling the names out after the writers
+# were unified, so "one place" was true of the two files that write and false of
+# the four that read. A glob that misses returns nothing *silently*, which in an
+# evaluation script means a condition quietly missing from the comparison rather
+# than an error. Pinned by
+# ``test_web_generate.py::test_no_downstream_tool_spells_a_compensation_filename_itself``;
+# the *values* are pinned by
+# ``test_the_filename_prefixes_are_the_names_downstream_tools_glob``.
 #
 # 投影画像のファイル名接頭辞。書き出し側が CLI と Web の2つあるため、
 # 片方に literal を置くと2つの辞書が食い違いうる。値は下流のツールが

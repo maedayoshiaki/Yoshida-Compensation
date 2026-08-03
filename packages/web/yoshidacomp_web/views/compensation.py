@@ -28,7 +28,7 @@ numpy 実装へ切り替えたため、``generate_projection_image`` の呼び�
 ``pipeline.prepare_target_image_for_compensation`` は今も ``geometry.warp``
 経由で torch を引き初回に約7秒かかる。このビューはそれを呼ばない
 （ターゲットは ``embed_in_active_region`` で投影フレームへ収まるだけで、
-座標系のワープは計画B4の仕事である）。``color_mixing_matrix`` の直接
+座標系のワープは計画B5の仕事である）。``color_mixing_matrix`` の直接
 import は引き続き禁止で、ガンマは ``LINEARIZERS["gamma"]`` 経由でのみ使う。
 
 ``target``/``lut`` が ``type="text"`` である理由（``base.ParamSpec.type`` が

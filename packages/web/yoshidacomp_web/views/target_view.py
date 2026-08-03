@@ -83,12 +83,20 @@ def _camera_space_refusal(view: str) -> str:
     return (
         f'view "{view}" needs a projector-space matrix; this one is in camera '
         "space, where there is no active region to place the target image in. "
+        # **B5, not B4.** B4 is the plan this view shipped in, and it defers the
+        # warp to B5 (a background job, `POST /api/matrix/{id}/warp`). Naming B4
+        # here would point every user at a plan that has already shipped without
+        # the feature -- and this sentence is the only pointer inside the
+        # product.
+        # ここは B5 である（B4 はこのビューが載った計画そのもので、ワープは
+        # B5 へ送られている）。製品内で唯一の案内なので、済んだ計画を指しては
+        # ならない。
         "Warping a camera-space matrix into projector space is planned for "
-        "B4 -- until then, load a matrix whose frame matches the configured "
+        "B5 -- until then, load a matrix whose frame matches the configured "
         "projector. "
         f"（{view} はプロジェクタ座標の行列を必要とします。カメラ座標では"
         "ターゲットを収める有効領域が存在しません。カメラ座標からのワープは"
-        "計画B4の予定です。）"
+        "計画B5の予定です。）"
     )
 
 

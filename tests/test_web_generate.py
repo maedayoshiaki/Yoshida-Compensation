@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from pathlib import Path
 
 import cv2
@@ -565,6 +566,55 @@ def test_the_filename_prefixes_are_the_names_downstream_tools_glob() -> None:
     }
 
 
+# The scripts that read (or clear) the files the two writers produce. Named
+# individually rather than globbed over ``examples/python/`` so that adding a
+# script is a deliberate decision to add it here, not a silent inheritance.
+_DOWNSTREAM_READERS = (
+    "evaluate_compensation_conditions.py",
+    "evaluate_recalibrated_compensation.py",
+    "sample.py",
+    "sample_inverse_lut.py",
+)
+
+
+def test_no_downstream_tool_spells_a_compensation_filename_itself() -> None:
+    """"一箇所" の主張を、辞書を読む側についても本当にする。
+
+    ``pipeline.py`` は接頭辞を core に置いた理由として「下流のツールがこの名前を
+    glob している」ことを挙げ、``evaluate_compensation_conditions.py`` を名指し
+    している。その名指しされたファイルを含む4つが、移行後も三つの接頭辞を直書き
+    したままだった——``LINEARIZER_FILENAME_PREFIXES`` は書き出し側2つでは1つの
+    辞書だが、読み出し側4つでは依然として写しであり、「一箇所」ではなかった。
+
+    値そのものは上のテストが固定しているので、直書きが**今日**壊れているわけ
+    ではない。壊れるのは接頭辞を変えたときで、そのとき上のテストを書き換えた人が
+    直すべき場所は5つある——うち4つはどこからも指されていない。しかも失敗の
+    仕方が悪い: glob が静かに0件を返し、評価スクリプトは「その条件の画像が無い」
+    のではなく「条件が1つ足りない」まま走る。
+
+    ここで見ているのは合成後の名前（``<prefix>_comp_image_``）である。接頭辞
+    単体の literal では ``inv_gamma_pattern_*``（別系統のファイル名で、この辞書
+    とは無関係）と区別が付かない。
+    """
+    scripts = _CLI_SOURCE.parent
+    offenders = []
+    for name in _DOWNSTREAM_READERS:
+        text = (scripts / name).read_text(encoding="utf-8")
+        for key, prefix in LINEARIZER_FILENAME_PREFIXES.items():
+            spelled = f"{prefix}_comp_image_"
+            for line in text.splitlines():
+                # The commented-out example path in `project_and_capture.py` is
+                # the shape this skips; a comment is not a filename anything
+                # builds. コメントは何も組み立てないので対象外。
+                if spelled in line and not line.lstrip().startswith("#"):
+                    offenders.append(f"{name}: {key} -> {line.strip()[:90]}")
+    assert not offenders, (
+        "these downstream tools spell a compensation filename instead of "
+        "reading LINEARIZER_FILENAME_PREFIXES, so the 'one place' the core's "
+        "comment claims is not one place:\n  " + "\n  ".join(offenders)
+    )
+
+
 def test_every_linearizer_has_a_filename_prefix() -> None:
     """``LINEARIZERS`` に足して接頭辞を足し忘れると落ちること。
 
@@ -626,14 +676,20 @@ def test_the_metadata_records_the_actual_request(
     assert [t["name"] for t in written["targets"]] == ["target.png"]
     assert [t["index"] for t in written["targets"]] == [0]
 
-    # Two clocks measuring two things, as the CLI's do: ``seconds`` is this
-    # target's work, ``total_seconds`` is the whole call. Both were timed from
-    # the same instant in the first version of this file, which made the CLI's
-    # per-image / per-run distinction a duplication (measured: they differed by
-    # 1.1 microseconds). Strict ``<`` is what catches that, and it is not
-    # timing-sensitive: ``total_seconds`` starts before the path resolution and
-    # the directory scan, so it is ahead by at least one filesystem call.
-    # 2つの時計が別のものを測っていること。同じ起点だと厳密不等号で落ちる。
+    # Both clocks are present, positive, and in the only order they can be in.
+    #
+    # **This line does not see a merged origin**, and the comment that used to
+    # claim it did was wrong: ``total_seconds`` is read later in the function
+    # than ``target_seconds`` whichever instant either one started from, so
+    # ``seconds < total_seconds`` is a statement about statement order. Both
+    # reversions of the two-clock fix left this file at 50 passed. What the two
+    # clocks *measure* is pinned by
+    # ``test_the_two_clocks_start_at_different_instants`` below, which puts a
+    # measurable delay in the part of the call that precedes the per-target
+    # clock. Kept here as the shape check it actually is.
+    # ここは「両方あって、正で、この順序である」までしか見ていない。起点を
+    # 揃えても ``total_seconds`` のほうが後で読まれるので落ちない（実測: 2通りの
+    # 差し戻しとも 50 passed）。何を測っているかは下の専用テストで固定する。
     assert 0 < written["targets"][0]["seconds"] < written["total_seconds"]
 
     # The ``projector`` block. ``generate.py`` justifies it twice as "the only
@@ -661,6 +717,76 @@ def test_the_metadata_records_the_actual_request(
     # ``resolve_active_region`` -- writing ``(0, 0, width, height)`` -- would
     # agree with it.
     assert list(_REGION) != [0, 0, _FRAME_WIDTH, _FRAME_HEIGHT]
+
+
+def test_the_two_clocks_start_at_different_instants(
+    tmp_path, stand_in_projector_config, monkeypatch
+) -> None:
+    """``seconds`` は1枚ぶんの仕事、``total_seconds`` は呼び出し全体であること。
+
+    ``generate.py`` はこの2つを「CLI が立てている per-image / per-run の区別の
+    再現」と説明しており、最初の版では**同じ起点から測っていた**（実測差
+    1.1us）。その差し戻しは2通りあり（``target_started = started`` と
+    ``target_seconds = ... - started``）、**どちらもこのファイルを 50 passed の
+    まま通していた**。順序の不等号では見えないためである——起点を揃えても
+    ``total_seconds`` のほうが後で読まれる。
+
+    測っているものが違うことを見るには、**片方の時計だけが含む区間**に測れる
+    長さを入れるしかない。空判定（``existing_entries``）は解決の直後・
+    ``target_started`` より前にあり、実物では 99 GB の木を相手にしうる区間
+    なので、ここを遅くする。正しい実装では ``total_seconds - seconds`` がその
+    遅延を丸ごと含み、起点が揃った実装では両方に入って差は消える
+    （残るのはメタデータの組み立てと書き込みだけで、ミリ秒未満である）。
+
+    この区別が壊れると何が起きるか: ``generate_metadata.json`` の
+    ``targets[0].seconds`` が「1枚あたり」の名前で呼び出し全体を報告する。
+    GUI と CLI の ``rebuild_metadata.json`` を突き合わせた人は、ディレクトリ
+    走査ぶん水増しされた1枚あたりの値を読み、GUI 経路が遅いと結論する。
+    """
+    prepared = _prepared(tmp_path, stand_in_projector_config)
+    output_dir = tmp_path / "out"
+
+    # Long enough to dwarf everything either clock legitimately contains on a
+    # 9x6 fixture (the pipeline call and two PNG writes are microseconds), and
+    # short enough not to slow the suite. Compared against 80% of itself so the
+    # assertion is about where the delay landed, not about clock granularity.
+    # 9x6 のフィクスチャで両方の時計が正当に含みうる時間を大きく上回り、かつ
+    # スイートを遅くしない長さ。判定は 80% で行う（測るのは「遅延がどちら側に
+    # 入ったか」であって時計の分解能ではない）。
+    scan_delay = 0.25
+    real_existing_entries = generate_module.existing_entries
+
+    def slow_existing_entries(path):
+        time.sleep(scan_delay)
+        return real_existing_entries(path)
+
+    monkeypatch.setattr(generate_module, "existing_entries", slow_existing_entries)
+
+    response = prepared["client"].post(
+        "/api/generate", json=_body(prepared, output_dir)
+    )
+    assert response.status_code == 200, response.text
+    written = json.loads(
+        (output_dir / "generate_metadata.json").read_text(encoding="utf-8")
+    )
+    seconds = written["targets"][0]["seconds"]
+    total = written["total_seconds"]
+
+    assert total - seconds >= scan_delay * 0.8, (
+        f"the emptiness scan took at least {scan_delay}s and it is not on the "
+        f"per-target clock's side of the call, so total_seconds ({total}) has "
+        f"to exceed targets[0].seconds ({seconds}) by about that much. It "
+        f"exceeds it by {total - seconds}, which means the two clocks share an "
+        "origin and 'per image' and 'the whole call' are the same number"
+    )
+    # The complement, stated separately so a failure says which half is wrong:
+    # the per-target clock must not have run through the scan at all.
+    # 補集合を別に言う（どちら側が壊れているか失敗文で分かるように）。
+    assert seconds < scan_delay, (
+        f"targets[0].seconds ({seconds}) is at least as long as the delay "
+        f"injected into the emptiness scan ({scan_delay}s), so the per-target "
+        "clock is running through work that is not this target's"
+    )
 
 
 def test_the_metadata_records_the_lut_path_when_one_is_used(

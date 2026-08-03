@@ -570,6 +570,34 @@ const VIEWS = [
       { name: "target_gamma", label: "ターゲットγ", type: "number", default: 2.2 },
     ],
   },
+  // A second `categorical` view, and its only job is to have a class count that
+  // is **not** the palette's length.
+  //
+  // `gamut` declares four classes and `CLASS_COLORS` has four entries, so on
+  // that fixture alone `legendRows().length === payload.labels.length` is
+  // `4 === 4` whichever array `renderClassLegend` loops over. Driving the legend
+  // off `CLASS_COLORS.length` -- the palette instead of the server's answer --
+  // left the whole `gamut` scenario green (measured). That is the same symmetry
+  // the `gamut` fixture's own note warns about one axis over (labels vs
+  // channels), and this closes the other axis.
+  //
+  // Three classes, not four, and not two: `routers/view.py` admits any
+  // categorical view at `len(labels) >= 2` and says in its own comment that the
+  // consumer which will violate the four-class assumption is "the second
+  // categorical view". This is that view, and it is the first time the client
+  // side of that clause is exercised at all. A legend built from the palette
+  // draws a fourth row here whose label is the string `undefined` beside a
+  // colour no pixel carries.
+  //
+  // 2つ目の `categorical` ビュー。役目は「クラス数がパレットの長さと違うこと」
+  // だけである。`gamut` は4クラスで `CLASS_COLORS` も4要素なので、凡例の行数を
+  // どちらから取っても `4 === 4` になり、パレット側から作る実装でも通ってしまう
+  // （実測で確認）。`routers/view.py` は `len(labels) >= 2` を認めており、その
+  // コメント自身が「破るのは2つ目の categorical ビューだ」と書いている。
+  {
+    key: "gamut_lite", label: "3クラスの色域外", kind: "categorical", channels: 1,
+    values_are_matrix: false, params: [],
+  },
   // A kind no frontend implements, and the only reason it exists.
   //
   // `gamut` used to be this fixture -- `categorical` was the unimplemented
@@ -762,6 +790,9 @@ const LABELS_BY_KEY = {
   // する。最後の要素にカンマを入れてあるのは、連結や分割で作った凡例が偶然
   // 正しく見えないようにするためである。
   gamut: ["色域外", "1超クリップ", "両方", "範囲内, 補正可"],
+  // Three, against a four-entry palette. See the registration for why the count
+  // itself is the fixture.
+  gamut_lite: ["範囲内", "クリップ", "答えなし"],
   vector_field: ["u", "v"],
   surface: ["R", "G", "B"],
   compensation: ["R", "G", "B"],
@@ -1327,7 +1358,13 @@ globalThis.fetch = async (url, options) => {
     // categorical のレンジはクラス番号の範囲であり、他のフィクスチャの ±1 とは
     // 別物である。0/3 はどちらの既定値でもないので、ヘッダを読まない実装が
     // 見える。
-    const range = key === "gamut"
+    // Keyed on the *kind*, not on `gamut`'s key: `gamut_lite` is categorical
+    // too, and a range that did not follow its label count would be a fixture
+    // disagreeing with the contract `routers/view.py` enforces
+    // (`vmax == len(labels) - 1`) rather than exercising it.
+    // キーではなく kind で決める。`gamut_lite` も categorical であり、ラベル数に
+    // 従わないレンジはルータが強制している契約と食い違うだけになる。
+    const range = spec.kind === "categorical"
       ? { vmin: "0.0", vmax: String(viewLabels(spec).length - 1) }
       : { vmin: "-1.0", vmax: "1.0" };
     const headers = {
@@ -1791,9 +1828,9 @@ if (SCENARIO === "ordering") {
 if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
-    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,vector_field,"
-      + "surface,compensation,tri_scalar,bad_rgb,mangled_layout,mono_scalar,"
-      + "headerless_tiles,refused_view",
+    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,gamut_lite,"
+      + "vector_field,surface,compensation,tri_scalar,bad_rgb,mangled_layout,"
+      + "mono_scalar,headerless_tiles,refused_view",
     options.join(","));
   check("a second registered view is reachable from the selector",
     options.includes("plain_tiles"), options.join(","));
@@ -2578,6 +2615,51 @@ if (SCENARIO === "gamut") {
     JSON.stringify(viewValueNumbers()) === JSON.stringify(["NaN"])
       && JSON.stringify(viewValueClasses()) === JSON.stringify(["vv-num nan"]),
     `${JSON.stringify(viewValueNumbers())} ${JSON.stringify(viewValueClasses())}`);
+
+  // --- a categorical view whose class count is not the palette's length
+  //
+  // Every legend assertion above runs on `gamut`, which has four classes
+  // against a four-entry `CLASS_COLORS`. On that fixture alone,
+  // `rows === payload.labels.length` is `4 === 4` whichever array the loop
+  // reads, so a legend driven off the *palette* -- the obvious wrong build,
+  // since the swatches come from there -- passed every one of them (measured:
+  // `payload.labels.length` -> `CLASS_COLORS.length` left the scenario green).
+  //
+  // The failure that hides there is not this view's: it is the next
+  // categorical view's. `routers/view.py` admits any of them at
+  // `len(labels) >= 2`, so a three-class view draws four rows -- three right,
+  // and a fourth whose label is the string `undefined` beside a colour no pixel
+  // in the picture carries. The legend is the only place the mapping is stated
+  // in words, so it would be asserting a class that does not exist.
+  //
+  // The asymmetry is asserted here as well as arranged in the fixture,
+  // otherwise a later edit could quietly restore the four-class symmetry and
+  // take this check's discrimination with it while leaving it green.
+  // 上の凡例の検査はすべて `gamut`（4クラス）で走っており、`CLASS_COLORS` も
+  // 4要素なので、行数をどちらから取っても同じ数になる。ここでクラス数の違う
+  // ビューに切り替えて、行数がペイロード由来であることを見る。非対称であること
+  // 自体もチェックに書く（フィクスチャが対称に戻れば判別力が消えるため）。
+  el("view-select").value = "gamut_lite";
+  el("view-select").__fire("change");
+  await settled();
+  const paletteLength = Array.isArray(shaders.CLASS_COLORS)
+    ? shaders.CLASS_COLORS.length : -1;
+  check("the legend's row count is the payload's class count, not the palette's",
+    state.payload.labels.length === 3
+      && paletteLength !== state.payload.labels.length
+      && legendRows().length === state.payload.labels.length
+      && JSON.stringify(legendLabels()) === JSON.stringify(state.payload.labels)
+      && new Set(legendSwatches()).size === legendRows().length,
+    `labels=${JSON.stringify(state.payload.labels)} palette=${paletteLength} `
+      + `rows=${legendRows().length} shown=${JSON.stringify(legendLabels())}`);
+  // The two other places the class count is read, on the same view: a caption
+  // and a range that came from the palette would be wrong in the same way and
+  // are not covered by the `gamut` checks above for the same reason.
+  // クラス数を読む残り2箇所も同じビューで見る。
+  check("the caption and range of a three-class view count three classes",
+    el("range-info").textContent === "クラス 0–2"
+      && JSON.stringify(tileCaptions()) === JSON.stringify(["3 クラス（凡例参照）"]),
+    `range=${el("range-info").textContent} captions=${JSON.stringify(tileCaptions())}`);
 
   // --- and every one of those has to be given back on the way out
   //
@@ -3865,6 +3947,43 @@ if (SCENARIO === "generate") {
     JSON.stringify(shownFiles) === JSON.stringify(generateFiles("data/out_generated"))
       && statusText().includes(generateAbsolute("data/out_generated")),
     `files=${JSON.stringify(shownFiles)} status=${statusText()}`);
+
+  // ...and the line beside the button says a save happened.
+  //
+  // The other half of §8's line, and the half that was unasserted after the
+  // refusal half was fixed: `refreshGenerateButton` was corrected to write
+  // `generateOutcome` on both branches, but *what that variable holds after a
+  // success* was read by nothing. Deleting the success `setGenerateOutcome`
+  // left all 17 checks green (measured), and what it produces is the exact
+  // inverse of the defect that fix was for: three absolute paths appear under a
+  // line still reading 未生成, because the `finally`'s
+  // `refreshGenerateButton()` restores the stale outcome over 「生成中…」.
+  //
+  // Read again after a round trip through a view that cannot generate, because
+  // that is the path that overwrites the line -- a success asserted only
+  // immediately after the press would not see the restore at all.
+  // 断りの側を直したときに、成功の側は誰も読んでいなかった。成功時の
+  // `setGenerateOutcome` を消しても17件すべて緑だった（実測）。生じるのは
+  // 直した欠陥のちょうど裏返しで、3つの絶対パスの脇に 未生成 と出る
+  // （`finally` の `refreshGenerateButton()` が古い結果で「生成中…」を上書き
+  // するため）。行を書き換えるのはその復元経路なので、ビューを往復してから
+  // もう一度読む。
+  const genInfoAfterSuccess = el("gen-info").textContent;
+  el("view-select").value = "gamut";
+  el("view-select").__fire("change");
+  await settled();
+  const genInfoOnGamutAfterSuccess = el("gen-info").textContent;
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await settled();
+  check("a successful save is what the line beside 生成 says, and keeps saying",
+    genInfoAfterSuccess === "3 件を保存"
+      && genInfoOnGamutAfterSuccess === "このビューでは生成できません"
+      && el("gen-info").textContent === "3 件を保存"
+      && el("btn-generate").disabled === false,
+    `after the press="${genInfoAfterSuccess}" on gamut="${genInfoOnGamutAfterSuccess}" `
+      + `back on compensation="${el("gen-info").textContent}" `
+      + `disabled=${el("btn-generate").disabled}`);
 
   // --- 2. "on screen" means the picture, not the boxes
   //

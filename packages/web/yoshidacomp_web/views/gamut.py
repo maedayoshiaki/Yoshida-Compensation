@@ -38,7 +38,7 @@ test_the_view_classifies_the_unclipped_values_not_the_clipped_ones`` が、
 
 ``pipeline.prepare_target_image_for_compensation`` は今も ``geometry.warp``
 経由で torch を引き初回に約7秒かかるが、このビューはそれを呼ばない
-（座標系のワープは計画B4の仕事である）。レンダ実測 0.015s。
+（座標系のワープは計画B5の仕事である）。レンダ実測 0.015s。
 """
 
 from __future__ import annotations
@@ -231,9 +231,10 @@ def _render(context: MatrixContext, params: dict) -> ViewResult:
     # above), so neither extreme is "the common case" and neither should set
     # the scale.
     #
-    # Pinned by ``test_the_display_range_survives_an_entirely_in_gamut_frame``,
-    # which renders such a frame; the four-class fixture alone cannot fail for
-    # this, since its own min and max happen to be 0 and 3.
+    # Pinned by ``test_the_display_range_is_the_class_range_not_the_frame_s_own``
+    # (``tests/test_web_gamut_view.py``), which renders such a frame; the
+    # four-class fixture alone cannot fail for this, since its own min and max
+    # happen to be 0 and 3.
     #
     # Derived from ``LABELS`` rather than written as 3.0: adding a class means
     # adding a label, and the display range has to follow it in the same edit.
