@@ -73,8 +73,25 @@ def _parse_args() -> argparse.Namespace:
 
 
 def _save_rgb(path: Path, image: np.ndarray) -> None:
+    """Write an ``(H, W, 3)`` uint8 RGB array as a PNG.
+
+    Raises:
+        OSError: ``cv2.imwrite`` refused the path. It signals failure by
+            returning ``False`` rather than raising, and the return value used
+            to be discarded here -- so a run that could not write (a locked
+            file, a full disk, a read-only directory) still reached the end of
+            ``main()`` and printed a complete metadata JSON to stdout,
+            describing files that are not there. This writes into the same
+            99 GB tree the web endpoint does, and prints success more loudly.
+            ``packages/web/yoshidacomp_web/generate.py::_save_rgb`` checks the
+            same value for the same reason.
+            ``cv2.imwrite`` は失敗しても例外を出さず ``False`` を返す。戻り値を
+            捨てていたため、書けなかった実行でもメタデータJSONを「成功」として
+            表示していた。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR))
+    if not cv2.imwrite(str(path), cv2.cvtColor(image, cv2.COLOR_RGB2BGR)):
+        raise OSError(f"could not write {path} (cv2.imwrite refused the path)")
 
 
 def main() -> None:

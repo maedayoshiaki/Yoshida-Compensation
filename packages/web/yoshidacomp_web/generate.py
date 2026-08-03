@@ -64,6 +64,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -96,13 +97,24 @@ PROJECTOR_SUBDIR = "compensation_projector"
 METADATA_NAME = "generate_metadata.json"
 
 
+# How many existing names a refusal names before it says "and more". Defined
+# above the class that reads it: it resolves at call time either way, but a
+# constant used by the line above its own definition is one more thing the next
+# reader has to check.
+_ENTRY_LIMIT = 5
+
+
 class OutputDirNotEmpty(Exception):
     """``output_dir`` already holds something. Nothing has been written.
 
     Attributes:
-        output_dir: The directory, resolved.
-        entries: Up to ``limit + 1`` names found in it, so the caller can say
-            "and more" without having listed a 99 GB directory.
+        output_dir: The directory, **absolute** -- see
+            ``write_projection_images``, which resolves it before anything
+            else. A refusal that named a relative path would be naming a
+            location only the server can interpret, and every safety argument
+            in this module rests on refusals naming the path they refused.
+        entries: Up to ``_ENTRY_LIMIT + 1`` names found in it, so the message
+            can say "and more" without having listed a 99 GB directory.
     """
 
     def __init__(self, output_dir: Path, entries: list[str]) -> None:
@@ -122,18 +134,22 @@ class OutputDirNotEmpty(Exception):
         )
 
 
-_ENTRY_LIMIT = 5
-
-
-def existing_entries(output_dir: Path, limit: int = _ENTRY_LIMIT) -> list[str]:
-    """Names already in *output_dir*: at most ``limit + 1`` of them.
+def existing_entries(output_dir: Path) -> list[str]:
+    """Names already in *output_dir*: at most ``_ENTRY_LIMIT + 1`` of them.
 
     Stops early on purpose. The one number the caller needs beyond the names is
-    "are there more than I am showing", and that is ``len(result) > limit`` --
-    listing a directory of 99 GB of RAW files to build a refusal message would
-    be paying an unbounded cost to say the same sentence.
+    "are there more than I am showing", and that is
+    ``len(result) > _ENTRY_LIMIT`` -- listing a directory of 99 GB of RAW files
+    to build a refusal message would be paying an unbounded cost to say the
+    same sentence.
     途中で打ち切る。断り文に必要なのは「表示した以上にあるか」だけで、
     全件を数える理由が無い。
+
+    The limit is not a parameter. It was, and only the test ever passed it --
+    a knob no caller turns is a second code path with one user, and the
+    behaviour it varies is already stated by the constant.
+    上限は引数にしない。テストからしか渡されない引数は、利用者が1人の分岐で
+    しかない。
 
     Returns:
         ``[]`` when *output_dir* does not exist. A non-directory path is the
@@ -144,14 +160,20 @@ def existing_entries(output_dir: Path, limit: int = _ENTRY_LIMIT) -> list[str]:
     if not output_dir.exists():
         return []
     with os.scandir(output_dir) as entries:
-        return [entry.name for _, entry in zip(range(limit + 1), entries)]
+        return [entry.name for _, entry in zip(range(_ENTRY_LIMIT + 1), entries)]
 
 
 def _save_rgb(path: Path, image: np.ndarray) -> None:
     """Write an ``(H, W, 3)`` uint8 **RGB** array as a PNG.
 
-    The CLI's ``_save_rgb``, kept byte-identical in behaviour. The
-    ``COLOR_RGB2BGR`` is not decoration: ``cv2.imwrite`` writes channel 0 as
+    The CLI's ``_save_rgb``. The bytes it writes are identical (verified in
+    review: 3 linearizers x 2 images, all 6 files byte-for-byte the same as the
+    CLI's); the *behaviour* deliberately is not, in that this one raises where
+    the CLI used to return quietly -- see ``Raises`` below. That difference has
+    since been closed from the other side too: the CLI now checks the same
+    return value.
+
+    The ``COLOR_RGB2BGR`` is not decoration: ``cv2.imwrite`` writes channel 0 as
     blue, so dropping it saves a file whose red and blue are swapped -- a
     perfectly valid PNG of the wrong image, which nothing downstream can
     detect. ``tests/test_web_generate.py::
@@ -204,9 +226,10 @@ def write_projection_images(
         overwrite: Replace files of the same name. Never deletes anything else.
 
     Returns:
-        ``{"output_dir": str, "files": [str, ...], "meta": {...}}``. ``files``
-        lists every path written, the metadata JSON included, so a caller can
-        check that what was reported and what is on disk are the same set.
+        ``{"output_dir": str, "files": [str, ...], "meta": {...}}``. Every path
+        is absolute, and ``files`` lists every path written, the metadata JSON
+        included, so a caller can check that what was reported and what is on
+        disk are the same set.
 
     Raises:
         OutputDirNotEmpty: *output_dir* holds files and *overwrite* is false.
@@ -214,10 +237,45 @@ def write_projection_images(
         OSError: the path could not be created or written -- a mistyped drive,
             a name Windows will not accept, a permission. The router reports
             these as 400: they are almost always the path the user typed, and
-            the OS message names it.
+            the OS message names it. **Anything this call had already written
+            is removed first**, so the identical request can simply be sent
+            again; without that, a transient failure would leave debris that
+            turns the retry into a 409 whose only in-GUI answer is
+            ``overwrite=True``.
     """
     started = time.perf_counter()
-    output_dir = Path(output_dir).expanduser()
+    # ``.resolve()``, not just ``.expanduser()``. A relative ``output_dir`` is
+    # resolved by the *server*, against its working directory -- which for this
+    # GUI is the repository root, with ``data/`` and ``.git`` under it. Without
+    # this line ``data/out_20260803`` writes there and every path this function
+    # reports -- the response, ``files``, and the ``OutputDirNotEmpty``
+    # message -- echoes the relative string back, so the user is told a
+    # location only the server can interpret. **Every safety argument in this
+    # module rests on refusals naming the path they refused**, which a relative
+    # path cannot do. Resolved here, once, before the emptiness check, so the
+    # check, the refusal and the response all speak about the same absolute
+    # place.
+    # 相対パスはサーバの作業ディレクトリ（＝リポジトリのルート）基準で解決
+    # される。ここで絶対化しておかないと、断り文も応答も「サーバにしか
+    # 解釈できない場所」を名指しすることになる。
+    output_dir = Path(output_dir).expanduser().resolve()
+
+    # Which of these existed before this call. Used only if a write fails: a
+    # path that was already there is not this call's to remove, even though
+    # ``overwrite=True`` was about to replace it -- deleting a file we failed to
+    # replace is strictly worse than leaving it. With ``overwrite=False`` the
+    # emptiness check below makes both sets empty, so everything written is
+    # ours.
+    # 失敗時に消してよいのは「この呼び出しが作ったもの」だけである。
+    dirs_before = {
+        directory
+        for directory in (
+            output_dir,
+            output_dir / LINEAR_SUBDIR,
+            output_dir / PROJECTOR_SUBDIR,
+        )
+        if directory.exists()
+    }
 
     # Before any mkdir, and before any pixel is computed. ``mkdir(parents=True)``
     # on a mistyped path creates the whole tree, so even the directory itself is
@@ -230,6 +288,7 @@ def write_projection_images(
         if entries:
             raise OutputDirNotEmpty(output_dir, entries)
 
+    target_started = time.perf_counter()
     linear, projector_image = generate_projection_image(
         target.image,
         matrix.array,
@@ -258,10 +317,105 @@ def write_projection_images(
     projector_path = (
         output_dir / PROJECTOR_SUBDIR / f"{prefix}_comp_image_{index:02d}.png"
     )
-    _save_rgb(linear_path, linear)
-    _save_rgb(projector_path, projector_image)
+    metadata_path = output_dir / METADATA_NAME
+    # Read before the first write and therefore still the pre-call state. See
+    # ``dirs_before``: only what this call creates may be removed if a later
+    # write fails.
+    files_before = {
+        path
+        for path in (linear_path, projector_path, metadata_path)
+        if path.exists()
+    }
 
-    meta: dict[str, Any] = {
+    # Appended *before* each attempt, not after: a write that fails partway
+    # leaves a truncated file behind, and that file is exactly the one that has
+    # to go.
+    attempted: list[Path] = []
+    try:
+        for path, image in ((linear_path, linear), (projector_path, projector_image)):
+            attempted.append(path)
+            _save_rgb(path, image)
+        target_seconds = time.perf_counter() - target_started
+        meta = _build_metadata(
+            matrix=matrix,
+            target=target,
+            projector=projector,
+            active_region=active_region,
+            linearizer=linearizer,
+            lut=lut,
+            target_decode=target_decode,
+            target_gamma=target_gamma,
+            index=index,
+            target_seconds=target_seconds,
+            total_seconds=time.perf_counter() - started,
+        )
+        attempted.append(metadata_path)
+        metadata_path.write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
+    except OSError:
+        # Undo this call's half of the work, and only this call's half.
+        #
+        # Not because the debris is unrecoverable -- it is not -- but because
+        # of what it does to the *next* request. Without this, one transient
+        # failure (an antivirus lock, a momentarily full disk) leaves the first
+        # PNG on disk, and the identical retry comes back 409. The only
+        # recovery available inside the GUI is then ``overwrite: true`` -- the
+        # exact flag the frontend is told never to send by default. A user who
+        # meets this twice has learned to reach for the override, and that is a
+        # habit to keep well away from a 99 GB tree.
+        #
+        # Still nothing is deleted that was not created here: ``files_before``
+        # and ``dirs_before`` were read before the first write. A file we
+        # failed to replace stays -- losing the old copy as well as the new one
+        # would be the worse half of both outcomes.
+        #
+        # 残骸そのものは回復可能だが、残ると再実行が 409 になり、GUI 内での
+        # 唯一の回復手段が ``overwrite: true`` になってしまう。それは
+        # 「上書きを押す習慣」を育てる。消すのはこの呼び出しが作ったものだけ。
+        for path in reversed(attempted):
+            if path not in files_before:
+                with suppress(OSError):
+                    path.unlink()
+        # Deepest first, and ``rmdir`` rather than ``rmtree``: it refuses a
+        # non-empty directory, so anything unexpectedly present survives
+        # without this needing to know what it is.
+        for directory in (
+            output_dir / PROJECTOR_SUBDIR,
+            output_dir / LINEAR_SUBDIR,
+            output_dir,
+        ):
+            if directory not in dirs_before:
+                with suppress(OSError):
+                    directory.rmdir()
+        raise
+
+    return {
+        "output_dir": str(output_dir),
+        "files": [str(linear_path), str(projector_path), str(metadata_path)],
+        "meta": meta,
+    }
+
+
+def _build_metadata(
+    *,
+    matrix: MatrixContext,
+    target: TargetContext,
+    projector: ProjectorConfig,
+    active_region: tuple[int, int, int, int],
+    linearizer: str,
+    lut: LutContext | None,
+    target_decode: str,
+    target_gamma: float,
+    index: int,
+    target_seconds: float,
+    total_seconds: float,
+) -> dict[str, Any]:
+    """The document written to ``generate_metadata.json`` and returned as ``meta``.
+
+    ここに計算は無い。呼び出し側が決めた値を、CLI と同じ綴りで並べるだけ。
+    """
+    return {
         # The CLI's key names wherever the concept is the same, so the two
         # metadata documents can be diffed key by key. Absent here and present
         # there: ``config`` (the GUI has no config path to record --
@@ -293,25 +447,24 @@ def write_projection_images(
             "height": int(projector.height),
             "gamma": float(projector.gamma),
         },
+        # The CLI's two clocks, measuring the CLI's two things. ``seconds`` is
+        # the per-target work (compensate + save the two PNGs, timed from just
+        # before the pipeline call); ``total_seconds`` is the whole call,
+        # including the emptiness scan and the metadata write. They were both
+        # timed from the same instant in the first version of this file, which
+        # made the distinction the CLI draws -- per image versus the run --
+        # a duplication rather than a reproduction: measured, they differed by
+        # 1.1 microseconds.
+        # 2つの時計は別のものを測る。以前は同じ起点から測っており、CLI が
+        # 立てている「1枚あたり／全体」の区別が複製になっていた（実測差 1.1us）。
         "targets": [
             {
                 "name": target.names[index],
                 "index": index,
-                "seconds": time.perf_counter() - started,
+                "seconds": target_seconds,
             }
         ],
-        "total_seconds": time.perf_counter() - started,
-    }
-
-    metadata_path = output_dir / METADATA_NAME
-    metadata_path.write_text(
-        json.dumps(meta, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
-    )
-
-    return {
-        "output_dir": str(output_dir),
-        "files": [str(linear_path), str(projector_path), str(metadata_path)],
-        "meta": meta,
+        "total_seconds": total_seconds,
     }
 
 

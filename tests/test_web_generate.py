@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 from pathlib import Path
 
 import cv2
@@ -69,6 +68,24 @@ _REGION = (2, 1, 5, 4)
 # (7 -> 5 wide, 3 -> 4 tall).
 _TARGET_HEIGHT, _TARGET_WIDTH = 3, 7
 
+# The projector gamma the stand-in config carries. Deliberately not 2.2: that
+# value is simultaneously ``ProjectorConfig``'s compiled-in default,
+# ``--target-gamma``'s default and ``decode_target``'s, so a metadata assertion
+# expecting 2.2 would agree with a gamma read out of any of them -- "an
+# expected value that coincides with a real default", the third of this plan's
+# recurring shapes.
+_PROJECTOR_GAMMA = 2.35
+
+# The CLI, read as text by the two tests that pin GUI/CLI agreement on names.
+# Executing ``main()`` would need ``p2c_map``, the GrayCode submodule and a
+# torch warp over real data, and the repository has no such test either.
+_CLI_SOURCE = (
+    Path(__file__).resolve().parents[1]
+    / "examples"
+    / "python"
+    / "rebuild_compensation_with_map.py"
+)
+
 # A deliberately non-symmetric affine, scaled so ``[t, 1] @ M`` mostly lands
 # inside [0, 1] -- a fixture that clipped everywhere would hide every
 # difference this file is trying to see.
@@ -106,19 +123,23 @@ def _matrices(height: int, width: int) -> np.ndarray:
     return matrices
 
 
-def _target_image(height: int, width: int) -> np.ndarray:
+def _target_image(height: int, width: int, variant: int = 0) -> np.ndarray:
     """A multi-coloured ``(H, W, 3)`` uint8 RGB image, deterministic.
 
     R と B は別の式で、しかも互いに反転している（R は増加、B は減少）。
     ``_save_rgb`` の ``COLOR_RGB2BGR`` を落とした実装を捕まえるには、
     R と B が違う値を持っていなければならない。
+
+    *variant* は互いに**別の絵**を作るためにある。同じ絵を複数枚書くと、
+    「どの絵がどのスロットに書かれたか」を見るテストが書けない
+    （フィクスチャが検証対象の次元について対称になる）。
     """
     rows = np.arange(height)[:, None]
     cols = np.arange(width)[None, :]
     image = np.empty((height, width, 3), dtype=np.uint8)
-    image[:, :, 0] = (37 * cols + 11 * rows) % 256
-    image[:, :, 1] = (17 * cols + 53 * rows + 90) % 256
-    image[:, :, 2] = 255 - (29 * cols + 7 * rows) % 256
+    image[:, :, 0] = (37 * cols + 11 * rows + 83 * variant) % 256
+    image[:, :, 1] = (17 * cols + 53 * rows + 90 + 29 * variant) % 256
+    image[:, :, 2] = 255 - (29 * cols + 7 * rows + 61 * variant) % 256
     return image
 
 
@@ -175,6 +196,7 @@ def _prepared(tmp_path, stand_in_projector_config):
         active_y=y,
         active_width=w,
         active_height=h,
+        gamma=_PROJECTOR_GAMMA,
     )
     client = TestClient(create_app())
 
@@ -226,23 +248,27 @@ def _reference(
     linearizer: str = "none",
     target_decode: str = "srgb",
     target_gamma: float = 2.2,
-    with_lut: bool = False,
+    image: np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """What the CLI would compute, via the real pipeline function.
 
     期待値はここで作る。エンドポイントと同じ引数を同じ関数へ渡し、返ってきた
     2配列をそのまま返す。定数を書き写す余地を残さない。
+
+    *image* を渡せるのは、ディレクトリから**選択中の1枚**を書いているという
+    主張を、名前ではなく画素で確かめるためである。
     """
-    lut = None
-    if with_lut or linearizer == "inverse_lut":
-        lut = luts.get(prepared["lut_id"]).lut
     return generate_projection_image(
-        prepared["image"],
+        prepared["image"] if image is None else image,
         prepared["matrices"],
         projector=get_config().projector,
         active_region=_REGION,
         linearizer=linearizer,  # type: ignore[arg-type]
-        lut=lut,
+        # No ``with_lut`` flag. There was one, defaulting to False and never
+        # passed; the LUT is needed exactly when the linearizer is
+        # ``inverse_lut`` and never otherwise, so a second way to ask for it
+        # was a branch with no caller.
+        lut=luts.get(prepared["lut_id"]).lut if linearizer == "inverse_lut" else None,
         target_decode=target_decode,  # type: ignore[arg-type]
         target_gamma=target_gamma,
         dtype=np.uint8,
@@ -255,8 +281,25 @@ def _reference(
 
 
 @pytest.mark.parametrize("linearizer", ["none", "gamma", "inverse_lut"])
+@pytest.mark.parametrize(
+    "target_decode,target_gamma",
+    # The default pair first, then two that are not the default. The endpoint
+    # takes a decode mode and an exponent and must actually *decode with them*;
+    # running this comparison only at the default lets an implementation that
+    # ignores both -- while writing them faithfully into
+    # ``generate_metadata.json`` -- pass every test in this file. That is
+    # wrong pixels plus a document certifying they are right, and this
+    # parametrization is the only thing standing between it and a green suite.
+    # 既定の組だけで画素を比べると、復号設定を無視しつつメタデータには忠実に
+    # 書く実装が全件を通ってしまう（＝画素が別物なのに来歴だけ正しい）。
+    [("srgb", 2.2), ("gamma", 1.8), ("none", 2.2)],
+)
 def test_saved_images_match_generate_projection_image_exactly(
-    tmp_path, stand_in_projector_config, linearizer: str
+    tmp_path,
+    stand_in_projector_config,
+    linearizer: str,
+    target_decode: str,
+    target_gamma: float,
 ) -> None:
     """The two PNGs, read back, must equal ``generate_projection_image()``.
 
@@ -267,6 +310,11 @@ def test_saved_images_match_generate_projection_image_exactly(
     2つの取り違えはこの比較でしか捕まらない（``generate_projection_image``
     は ``(linear, projector)`` の順に返す）。片方だけを見るテストや、
     「2枚が互いに違う」だけを見るテストは、入れ替えても通ってしまう。
+
+    ``target_decode`` / ``target_gamma`` を跨いでいるのも同じ理由による。
+    このプロジェクトは linear-fit と sRGB-fit の比較のためにその設定を
+    持っており（``docs/compensation-pipeline-findings``）、復号を取り違えた
+    PNG は「もっともらしい別の絵」として投影される。
     """
     prepared = _prepared(tmp_path, stand_in_projector_config)
     output_dir = tmp_path / "out"
@@ -278,11 +326,18 @@ def test_saved_images_match_generate_projection_image_exactly(
             output_dir,
             linearizer=linearizer,
             lut_id=prepared["lut_id"] if linearizer == "inverse_lut" else None,
+            target_decode=target_decode,
+            target_gamma=target_gamma,
         ),
     )
     assert response.status_code == 200, response.text
 
-    expected_linear, expected_projector = _reference(prepared, linearizer=linearizer)
+    expected_linear, expected_projector = _reference(
+        prepared,
+        linearizer=linearizer,
+        target_decode=target_decode,
+        target_gamma=target_gamma,
+    )
     prefix = LINEARIZER_FILENAME_PREFIXES[linearizer]
     saved_linear = _read_png(
         output_dir / "compensation_linear" / "compensation_image_00.png"
@@ -311,6 +366,16 @@ def test_saved_images_match_generate_projection_image_exactly(
         "H/W transposition"
     )
     assert expected_projector.shape == (_FRAME_HEIGHT, _FRAME_WIDTH, 3)
+    # And this parametrization is only worth its runtime if the non-default
+    # decodes actually move the pixels. A decode mode that produced the same
+    # uint8 frame as the default would make its row of this table decorative.
+    if (target_decode, target_gamma) != ("srgb", 2.2):
+        default_linear, _ = _reference(prepared, linearizer=linearizer)
+        assert not np.array_equal(expected_linear, default_linear), (
+            f"target_decode={target_decode!r}/{target_gamma} produces the same "
+            "pixels as the default srgb/2.2, so this row cannot detect an "
+            "implementation that ignores the requested decode"
+        )
 
 
 def test_the_linear_and_projector_images_are_not_the_same_file(
@@ -381,10 +446,18 @@ def test_the_response_lists_exactly_the_files_that_were_written(
     assert response.status_code == 200, response.text
     payload = response.json()
 
-    reported = {Path(p).resolve() for p in payload["files"]}
+    # No ``.resolve()`` on the reported side. There was one on both sides of
+    # this comparison, and it hid the fact that a relative ``output_dir`` was
+    # echoed back relative: calling ``.resolve()`` on what the server said made
+    # the test agree with a server that had said something the user cannot act
+    # on. What is asserted is that the response is already absolute.
+    # 比較の両辺に ``.resolve()`` を掛けると、相対パスをそのまま返す実装と
+    # 区別が付かなくなる。応答が**既に絶対**であることを見る。
+    reported = {Path(p) for p in payload["files"]}
+    assert all(p.is_absolute() for p in reported), payload["files"]
     on_disk = {(output_dir / name).resolve() for name in _tree(output_dir)}
     assert reported == on_disk
-    assert Path(payload["output_dir"]).resolve() == output_dir.resolve()
+    assert Path(payload["output_dir"]) == output_dir.resolve()
 
 
 @pytest.mark.parametrize(
@@ -443,6 +516,39 @@ def test_the_cli_and_the_endpoint_share_one_filename_prefix_map() -> None:
     assert (
         generate_module.LINEARIZER_FILENAME_PREFIXES is LINEARIZER_FILENAME_PREFIXES
     ), "generate.py must read the core's mapping, not a copy of it"
+
+
+def test_the_cli_uses_the_prefix_map_it_imports() -> None:
+    """CLI の**使用箇所**が辞書を引いていること。
+
+    同一性の assert（上）はモジュール属性を固定するだけで、``main()`` が
+    その属性を**使う**ことは言っていない。実測: import はそのまま残して
+    ``main()`` の中だけを辞書リテラルに戻すと、CLI が
+    ``GAMMA_TYPO_comp_image_00.png`` を書き GUI が
+    ``inv_gamma_comp_image_00.png`` を書く状態で、このファイルは全件緑だった。
+    「ずれが起こりえない」と書いたのは値についてであって、実際に書かれる
+    ファイル名についてではなかった。
+
+    ソースを読む形にしているのは、``main()` のエンドツーエンド実行が
+    ``p2c_map``・GrayCode サブモジュール・実データの torch ワープを要求し、
+    このリポジトリにもその テストが無いためである
+    （``tests/test_rebuild_compensation_with_map.py`` は import のみ）。
+    ``test_the_output_subdirectory_names_are_the_cli_ones`` と同じ方式。
+    """
+    text = _CLI_SOURCE.read_text(encoding="utf-8")
+
+    assert "LINEARIZER_FILENAME_PREFIXES[args.linearizer]" in text, (
+        "the CLI no longer looks the prefix up in the imported mapping at the "
+        "point where it builds the filename"
+    )
+    # And no literal may come back anywhere in the file. This is the stronger
+    # half: the line above can be satisfied while a second, inline dict decides
+    # a different filename a few lines later.
+    for literal in LINEARIZER_FILENAME_PREFIXES.values():
+        assert f'"{literal}"' not in text, (
+            f"the CLI contains the literal {literal!r} again -- the prefix map "
+            "is meant to exist in exactly one place"
+        )
 
 
 def test_the_filename_prefixes_are_the_names_downstream_tools_glob() -> None:
@@ -515,30 +621,46 @@ def test_the_metadata_records_the_actual_request(
     assert written["matrix_shape"] == [_FRAME_HEIGHT, _FRAME_WIDTH, 4, 3]
     assert Path(written["matrix"]) == prepared["matrix_path"]
     assert Path(written["target_path"]) == prepared["target_path"]
+    assert written["target_is_directory"] is False
     assert written["inverse_lut"] is None
     assert [t["name"] for t in written["targets"]] == ["target.png"]
     assert [t["index"] for t in written["targets"]] == [0]
 
+    # Two clocks measuring two things, as the CLI's do: ``seconds`` is this
+    # target's work, ``total_seconds`` is the whole call. Both were timed from
+    # the same instant in the first version of this file, which made the CLI's
+    # per-image / per-run distinction a duplication (measured: they differed by
+    # 1.1 microseconds). Strict ``<`` is what catches that, and it is not
+    # timing-sensitive: ``total_seconds`` starts before the path resolution and
+    # the directory scan, so it is ahead by at least one filesystem call.
+    # 2つの時計が別のものを測っていること。同じ起点だと厳密不等号で落ちる。
+    assert 0 < written["targets"][0]["seconds"] < written["total_seconds"]
 
-def test_the_metadata_active_region_is_the_configured_one_not_the_frame(
-    tmp_path, stand_in_projector_config
-) -> None:
-    """有効領域がフレーム全体と**違う**ことを明示的に確認する。
-
-    ``active_region`` の期待値がフレーム全体だと、``resolve_active_region``
-    を呼ばず ``(0, 0, width, height)`` を書いた実装と区別が付かない。
-    """
-    prepared = _prepared(tmp_path, stand_in_projector_config)
-    output_dir = tmp_path / "out"
-
-    response = prepared["client"].post(
-        "/api/generate", json=_body(prepared, output_dir)
+    # The ``projector`` block. ``generate.py`` justifies it twice as "the only
+    # record of which projector these images were computed for" -- for a while
+    # nothing held it to anything, and hard-coding 1920x1080 / 9.99 left this
+    # whole file green. Width and height differ from each other, so a
+    # transposition shows; the gamma is ``_PROJECTOR_GAMMA``, deliberately not
+    # 2.2, because 2.2 is simultaneously ``ProjectorConfig``'s compiled-in
+    # default, ``--target-gamma``'s default and ``decode_target``'s -- an
+    # expected value of 2.2 would agree with a gamma read from any of them.
+    # 「どのプロジェクタ向けに計算したか」の唯一の記録。gamma を 2.2 以外に
+    # してあるのは、2.2 だと他の既定値と一致して判別力が無くなるため。
+    assert written["projector"] == {
+        "width": _FRAME_WIDTH,
+        "height": _FRAME_HEIGHT,
+        "gamma": _PROJECTOR_GAMMA,
+    }
+    assert _PROJECTOR_GAMMA != 2.2, (
+        "the fixture gamma equals every other default in this pipeline, so the "
+        "assertion above cannot tell where the recorded value came from"
     )
-    assert response.status_code == 200, response.text
 
-    region = response.json()["meta"]["active_region"]
-    assert region == list(_REGION)
-    assert region != [0, 0, _FRAME_WIDTH, _FRAME_HEIGHT]
+    # The fixture's own discriminating power for ``active_region``: had it been
+    # the whole frame, an implementation that never called
+    # ``resolve_active_region`` -- writing ``(0, 0, width, height)`` -- would
+    # agree with it.
+    assert list(_REGION) != [0, 0, _FRAME_WIDTH, _FRAME_HEIGHT]
 
 
 def test_the_metadata_records_the_lut_path_when_one_is_used(
@@ -637,22 +759,44 @@ def test_a_directory_holding_our_own_output_is_also_refused(
 def test_overwrite_true_replaces_the_files(
     tmp_path, stand_in_projector_config
 ) -> None:
-    """``overwrite: true`` のときだけ上書きされること。"""
+    """``overwrite: true`` のときだけ上書きされること。**2枚とも**確認する。
+
+    以前は linear だけを事前に置いていたため、projector 画像が古いファイルを
+    置換することは誰も見ていなかった。
+    """
     prepared = _prepared(tmp_path, stand_in_projector_config)
     output_dir = tmp_path / "out"
     linear_path = output_dir / "compensation_linear" / "compensation_image_00.png"
+    projector_path = (
+        output_dir / "compensation_projector" / "no_gamma_comp_image_00.png"
+    )
+    metadata_path = output_dir / "generate_metadata.json"
     linear_path.parent.mkdir(parents=True)
-    _write_png(linear_path, np.zeros((2, 3, 3), dtype=np.uint8))
-    stale = linear_path.read_bytes()
+    projector_path.parent.mkdir(parents=True)
+    # Stale content that is a valid PNG of the wrong picture, and of the wrong
+    # size, so "left untouched" and "rewritten" cannot be confused.
+    _write_png(linear_path, _target_image(2, 3, variant=1))
+    _write_png(projector_path, _target_image(2, 3, variant=2))
+    metadata_path.write_text('{"stale": true}\n', encoding="utf-8")
+    stale = {
+        linear_path: linear_path.read_bytes(),
+        projector_path: projector_path.read_bytes(),
+        metadata_path: metadata_path.read_bytes(),
+    }
 
     response = prepared["client"].post(
         "/api/generate", json=_body(prepared, output_dir, overwrite=True)
     )
     assert response.status_code == 200, response.text
 
-    assert linear_path.read_bytes() != stale
-    expected_linear, _ = _reference(prepared, linearizer="none")
+    for path, old in stale.items():
+        assert path.read_bytes() != old, f"{path.name} was not replaced"
+    expected_linear, expected_projector = _reference(prepared, linearizer="none")
     np.testing.assert_array_equal(_read_png(linear_path), expected_linear)
+    np.testing.assert_array_equal(_read_png(projector_path), expected_projector)
+    assert json.loads(metadata_path.read_text(encoding="utf-8")) == (
+        response.json()["meta"]
+    )
 
 
 def test_overwrite_true_leaves_unrelated_files_alone(
@@ -726,45 +870,91 @@ def test_an_empty_output_dir_is_refused(
     assert "output_dir" in response.json()["detail"]
 
 
-def test_the_repository_root_is_refused_rather_than_written_into(
-    tmp_path, stand_in_projector_config
+def test_a_dot_output_dir_resolves_to_the_servers_cwd_and_is_refused(
+    tmp_path, stand_in_projector_config, monkeypatch
 ) -> None:
-    """``"."`` （＝サーバの作業ディレクトリ）は 409 で止まること。
+    """``"."`` はサーバの作業ディレクトリに解決され、空でなければ 409。
 
     空欄チェックを外しても、非空ディレクトリの判定がもう一段の防壁として
-    効いていることを固定する。**このテストは実際にリポジトリのルートを
-    ``output_dir`` に指定する。** 通ってしまう実装だと、リポジトリに
-    ``compensation_linear/`` と ``generate_metadata.json`` が現れる。
+    効いていることを固定する。
+
+    ``monkeypatch.chdir(tmp_path)`` で作業ディレクトリを移してから叩く。
+    以前はこのテストが**実際にリポジトリのルート**を ``output_dir`` に
+    指定しており、判定を壊す変異の下で `compensation_linear/` などが
+    99GB のツリーのルートに現れた（`finally` の掃除で対処していた）。
+    証明したい性質は「``.`` はサーバの cwd であり、空でなければ断られる」で
+    あって「そのcwdがリポジトリのルートである」ではないので、cwd を
+    差し替えれば**露出ゼロで同じことが言える**。
     """
     prepared = _prepared(tmp_path, stand_in_projector_config)
-    # ``"."`` is resolved by the *server*, i.e. against the process working
-    # directory -- the same one this test has to inspect for the assertion to
-    # be about the directory that was at risk.
-    cwd = Path.cwd()
-    before = sorted(p.name for p in cwd.iterdir())
+    # ``_prepared`` has already written the matrix, the target and the LUT
+    # here, so the new cwd is non-empty -- which is the condition under test.
+    monkeypatch.chdir(tmp_path)
+    before = _tree(tmp_path)
     assert before, "cwd is empty, so this test cannot detect a write into it"
 
     body = _body(prepared, tmp_path / "unused")
     body["output_dir"] = "."
-    try:
-        response = prepared["client"].post("/api/generate", json=body)
-        assert response.status_code == 409, response.text
-        assert sorted(p.name for p in cwd.iterdir()) == before
-    finally:
-        # A broken guard leaves its output in the working directory, which
-        # here is a 99 GB repository someone has to clean by hand while
-        # reading a red suite. Remove only the three names this endpoint
-        # writes, and only if they were not there beforehand.
-        # 壊れた実装はここ（＝リポジトリのルート）に出力を残す。書き得る3つの
-        # 名前だけを、元から無かった場合に限って片付ける。
-        for name in (
-            generate_module.LINEAR_SUBDIR,
-            generate_module.PROJECTOR_SUBDIR,
-            generate_module.METADATA_NAME,
-        ):
-            stray = cwd / name
-            if name not in before and stray.exists():
-                shutil.rmtree(stray) if stray.is_dir() else stray.unlink()
+    response = prepared["client"].post("/api/generate", json=body)
+
+    assert response.status_code == 409, response.text
+    assert _tree(tmp_path) == before
+    # The refusal names an absolute path, not ``.``. A message saying
+    # ``. is not empty`` tells the user nothing about *where* that is.
+    assert str(tmp_path.resolve()) in response.json()["detail"]
+
+
+def test_a_relative_output_dir_is_reported_as_the_absolute_path_it_wrote_to(
+    tmp_path, stand_in_projector_config, monkeypatch
+) -> None:
+    """相対 ``output_dir`` でも、応答は**絶対パス**で答えること。
+
+    相対パスはサーバの作業ディレクトリ基準で解決される。このGUIではそこが
+    リポジトリのルート（``data/`` と ``.git`` を抱える 99GB のツリー）である。
+    利用者が ``data/out_20260803`` と打ったとき、200 の応答が同じ相対文字列を
+    返すだけでは「どこに保存されたのか」を知る手段が無い。
+
+    このモジュールの防御論はすべて「断り文・応答がパスを名指しする」ことに
+    乗っているので、そのパスが相対であることは論の前提を崩す。
+    """
+    prepared = _prepared(tmp_path, stand_in_projector_config)
+    monkeypatch.chdir(tmp_path)
+
+    body = _body(prepared, tmp_path / "unused")
+    body["output_dir"] = "relative_out"
+    response = prepared["client"].post("/api/generate", json=body)
+    assert response.status_code == 200, response.text
+    payload = response.json()
+
+    expected_dir = (tmp_path / "relative_out").resolve()
+    assert Path(payload["output_dir"]) == expected_dir
+    assert Path(payload["output_dir"]).is_absolute()
+    assert [Path(p) for p in payload["files"]] == [
+        expected_dir / "compensation_linear" / "compensation_image_00.png",
+        expected_dir / "compensation_projector" / "no_gamma_comp_image_00.png",
+        expected_dir / "generate_metadata.json",
+    ]
+    assert all(Path(p).is_file() for p in payload["files"])
+
+
+def test_a_relative_output_dir_is_refused_by_its_absolute_name(
+    tmp_path, stand_in_projector_config, monkeypatch
+) -> None:
+    """409 の断り文も絶対パスで名乗ること（上と同じ理由）。"""
+    prepared = _prepared(tmp_path, stand_in_projector_config)
+    occupied = tmp_path / "relative_out"
+    occupied.mkdir()
+    (occupied / "IMG_0001.CR3").write_bytes(b"irreplaceable")
+    monkeypatch.chdir(tmp_path)
+
+    body = _body(prepared, tmp_path / "unused")
+    body["output_dir"] = "relative_out"
+    response = prepared["client"].post("/api/generate", json=body)
+
+    assert response.status_code == 409, response.text
+    detail = response.json()["detail"]
+    assert str(occupied.resolve()) in detail, detail
+    assert (occupied / "IMG_0001.CR3").read_bytes() == b"irreplaceable"
 
 
 def test_an_output_dir_that_is_a_file_is_refused(
@@ -805,6 +995,90 @@ def test_a_refused_write_is_reported_not_swallowed(
     assert "compensation_image_00.png" in response.json()["detail"]
     # And nothing may be reported as saved.
     assert "files" not in response.json()
+    # Nor may the directory tree it started to build be left standing: an empty
+    # ``compensation_linear/`` is enough to make the retry a 409.
+    assert not output_dir.exists()
+
+
+def test_a_failure_on_the_second_image_leaves_nothing_behind(
+    tmp_path, stand_in_projector_config, monkeypatch
+) -> None:
+    """途中で失敗したら、この呼び出しが作ったものを消してから断ること。
+
+    残骸そのものは回復可能だが、残ると**同じ要求の再送が 409 になる**。
+    そのときGUI内での唯一の回復手段は ``overwrite: true`` — Task 4 への
+    申し送りが「既定で送ってはならない」と書いた、まさにその操作である。
+    ウイルス対策ソフトが一瞬ファイルをロックしただけで、利用者は
+    「上書きを押す」習慣を身につけてしまう。
+
+    ここで見るのは3つ: 400 であること、ディスクに何も残らないこと、そして
+    **同じ要求をそのまま再送すると 200 になること**（3つ目が本題で、
+    最初の2つはその理由である）。
+    """
+    prepared = _prepared(tmp_path, stand_in_projector_config)
+    output_dir = tmp_path / "out"
+
+    real_imwrite = cv2.imwrite
+    calls = {"n": 0}
+
+    def fail_on_second(*args, **kwargs):
+        calls["n"] += 1
+        return False if calls["n"] == 2 else real_imwrite(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "imwrite", fail_on_second)
+    first = prepared["client"].post("/api/generate", json=_body(prepared, output_dir))
+
+    assert first.status_code == 400, first.text
+    assert calls["n"] == 2, "the fixture did not reach the second image"
+    assert _tree(output_dir) == {}, (
+        "the first PNG was left behind; the identical retry is now a 409 whose "
+        "only in-GUI answer is overwrite=true"
+    )
+    assert not output_dir.exists()
+
+    monkeypatch.undo()
+    retry = prepared["client"].post("/api/generate", json=_body(prepared, output_dir))
+    assert retry.status_code == 200, retry.text
+
+
+def test_a_partial_write_does_not_delete_a_file_it_failed_to_replace(
+    tmp_path, stand_in_projector_config, monkeypatch
+) -> None:
+    """後片付けは「この呼び出しが作ったもの」だけ。
+
+    ``overwrite=True`` で置換に失敗した既存ファイルまで消すと、新しいほうも
+    古いほうも失う。片付けの範囲は書き込み前に確定した集合で決める。
+    """
+    prepared = _prepared(tmp_path, stand_in_projector_config)
+    output_dir = tmp_path / "out"
+    projector_path = (
+        output_dir / "compensation_projector" / "no_gamma_comp_image_00.png"
+    )
+    projector_path.parent.mkdir(parents=True)
+    _write_png(projector_path, _target_image(2, 3, variant=1))
+    stale = projector_path.read_bytes()
+
+    real_imwrite = cv2.imwrite
+    calls = {"n": 0}
+
+    def fail_on_second(*args, **kwargs):
+        calls["n"] += 1
+        return False if calls["n"] == 2 else real_imwrite(*args, **kwargs)
+
+    monkeypatch.setattr(cv2, "imwrite", fail_on_second)
+    response = prepared["client"].post(
+        "/api/generate", json=_body(prepared, output_dir, overwrite=True)
+    )
+
+    assert response.status_code == 400, response.text
+    assert projector_path.read_bytes() == stale, (
+        "the pre-existing file this call failed to replace was deleted; losing "
+        "the old copy as well as the new one is the worse half of both outcomes"
+    )
+    # What this call did create is gone.
+    assert not (
+        output_dir / "compensation_linear" / "compensation_image_00.png"
+    ).exists()
 
 
 def test_an_unknown_matrix_id_is_404(tmp_path, stand_in_projector_config) -> None:
@@ -943,21 +1217,50 @@ def test_a_directory_target_generates_only_the_selected_image(
 ) -> None:
     """ディレクトリを読み込んでも、書き出すのは**選択中の1枚**だけ。
 
-    決定の理由は ``generate.py`` の冒頭にある。ここで固定するのは、
+    決定の理由は ``generate.py`` の冒頭にある。ここで固定するのは3つ:
     (a) 出力が1組であること、(b) 番号が ``TargetContext.index``
-    （＝CLI が同じディレクトリに対して付ける番号）であること の2つ。
+    （＝CLI が同じディレクトリに対して付ける番号）であること、
+    (c) **その番号のファイルの画素が、その名前の画像から計算されている**こと。
+
+    3枚は互いに**別の絵**である。以前はバイト同一の3枚を書いていたため、
+    番号と名前は固定されていても「書かれた画素」と「記録された名前」を結ぶ
+    assert が存在しなかった — 決定1の全体が乗っている主張に対して、
+    フィクスチャが検証対象の次元について対称だった。後日「一括生成」を
+    配線し間違えてスロットNに画像0を書いても、そのテストは緑のままだった。
+
+    名前は**素の ASCII 順と casefold 順で並びが変わる**ものを選んである
+    （ASCII: `B_two` `C_three` `a_one` ／ casefold: `a_one` `B_two` `C_three`）。
+    同じ順序規則を ``target.py::_listing`` と ``pipeline.load_target_images``
+    が共有していることが、GUI の番号と CLI の番号が一致する根拠だからである。
     """
     prepared = _prepared(tmp_path, stand_in_projector_config)
     directory = tmp_path / "targets"
     directory.mkdir()
-    for name in ("a.png", "b.png", "c.png"):
-        _write_png(directory / name, _target_image(_TARGET_HEIGHT, _TARGET_WIDTH))
+    # Written in an order that is neither of the two sort orders, so the
+    # listing cannot accidentally agree with creation order either.
+    images = {
+        "B_two.png": _target_image(_TARGET_HEIGHT, _TARGET_WIDTH, variant=1),
+        "a_one.png": _target_image(_TARGET_HEIGHT, _TARGET_WIDTH, variant=0),
+        "C_three.png": _target_image(_TARGET_HEIGHT, _TARGET_WIDTH, variant=2),
+    }
+    for name, image in images.items():
+        _write_png(directory / name, image)
+    pixels = list(images.values())
+    assert not any(
+        np.array_equal(a, b)
+        for i, a in enumerate(pixels)
+        for b in pixels[i + 1 :]
+    ), "two of the three fixture images are identical, so slot N cannot be told from slot M"
 
     loaded = prepared["client"].post(
         "/api/target", json={"path": str(directory), "index": 2}
     )
     assert loaded.status_code == 200, loaded.text
-    assert loaded.json()["meta"]["images"] == ["a.png", "b.png", "c.png"]
+    assert loaded.json()["meta"]["images"] == ["a_one.png", "B_two.png", "C_three.png"]
+    assert sorted(images) != ["a_one.png", "B_two.png", "C_three.png"], (
+        "these names sort the same way with and without casefold, so the "
+        "ordering rule the numbering depends on is not exercised"
+    )
 
     output_dir = tmp_path / "out"
     response = prepared["client"].post(
@@ -974,8 +1277,32 @@ def test_a_directory_target_generates_only_the_selected_image(
         "generate_metadata.json",
     }
     meta = response.json()["meta"]
-    assert [t["name"] for t in meta["targets"]] == ["c.png"]
+    assert [t["name"] for t in meta["targets"]] == ["C_three.png"]
     assert [t["index"] for t in meta["targets"]] == [2]
+    assert meta["target_is_directory"] is True
+    assert Path(meta["target_path"]) == directory
+
+    # (c): the picture in slot 02 is the picture named in slot 02.
+    expected_linear, expected_projector = _reference(
+        prepared, linearizer="none", image=images["C_three.png"]
+    )
+    np.testing.assert_array_equal(
+        _read_png(output_dir / "compensation_linear" / "compensation_image_02.png"),
+        expected_linear,
+    )
+    np.testing.assert_array_equal(
+        _read_png(
+            output_dir / "compensation_projector" / "no_gamma_comp_image_02.png"
+        ),
+        expected_projector,
+    )
+    # And it is not one of the other two, which is what a mis-wired loop would
+    # have written.
+    for other in ("a_one.png", "B_two.png"):
+        other_linear, _ = _reference(prepared, linearizer="none", image=images[other])
+        assert not np.array_equal(expected_linear, other_linear), (
+            f"{other} compensates to the same pixels as C_three.png"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -994,12 +1321,14 @@ def test_existing_entries_does_not_walk_a_whole_directory(tmp_path) -> None:
     for i in range(50):
         (directory / f"f{i:03d}.bin").write_bytes(b"x")
 
-    names = generate_module.existing_entries(directory, limit=5)
-    assert len(names) == 6, "at most limit + 1 entries, so 'and more' is knowable"
+    names = generate_module.existing_entries(directory)
+    assert len(names) == generate_module._ENTRY_LIMIT + 1, (
+        "at most _ENTRY_LIMIT + 1 entries, so 'and more' is knowable"
+    )
     assert generate_module.existing_entries(tmp_path / "absent") == []
 
 
-def test_generate_does_not_import_torch(tmp_path, stand_in_projector_config) -> None:
+def test_generate_does_not_import_torch() -> None:
     """保存経路が torch を引かないこと。
 
     ``pipeline`` は軽い import だが ``prepare_target_image_for_compensation``
@@ -1030,9 +1359,6 @@ def test_the_output_subdirectory_names_are_the_cli_ones() -> None:
     CLI の出力を同じ道具で突き合わせられる。名前を変えるとその比較が
     静かに壊れる（ファイルが無いだけで、誰も落ちない）。
     """
-    source = Path(
-        os.fspath(Path(__file__).resolve().parents[1])
-    ) / "examples" / "python" / "rebuild_compensation_with_map.py"
-    text = source.read_text(encoding="utf-8")
+    text = _CLI_SOURCE.read_text(encoding="utf-8")
     assert f'"{generate_module.LINEAR_SUBDIR}"' in text
     assert f'"{generate_module.PROJECTOR_SUBDIR}"' in text
