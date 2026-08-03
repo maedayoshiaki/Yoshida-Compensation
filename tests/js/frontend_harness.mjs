@@ -3959,9 +3959,20 @@ if (SCENARIO === "generate") {
   // line still reading 未生成, because the `finally`'s
   // `refreshGenerateButton()` restores the stale outcome over 「生成中…」.
   //
-  // Read again after a round trip through a view that cannot generate, because
-  // that is the path that overwrites the line -- a success asserted only
-  // immediately after the press would not see the restore at all.
+  // Read again after a round trip through a view that cannot generate, so the
+  // line is asserted to *survive* the switch as well as to be written.
+  //
+  // An earlier draft of this comment claimed the round trip was what made the
+  // check discriminate -- that an immediate read "would not see the restore at
+  // all". Measured, that is false: `finally { setGenerateBusy(false) }` calls
+  // `refreshGenerateButton()` synchronously, so the restore has already run by
+  // the time `await settled()` returns, and an immediate-only assertion fails
+  // under both mutations too. The round trip adds the survives-a-switch half,
+  // not the discrimination.
+  // 以前のこのコメントは「往復しないと復元が見えない」と書いていたが、実測では
+  // 誤り。`finally` の `refreshGenerateButton()` は同期的に走るので、
+  // `await settled()` が返る時点で復元は済んでおり、即時読みだけでも両方の
+  // 変異で落ちる。往復が足しているのは判別力ではなく「切替を跨いで保たれる」側。
   // 断りの側を直したときに、成功の側は誰も読んでいなかった。成功時の
   // `setGenerateOutcome` を消しても17件すべて緑だった（実測）。生じるのは
   // 直した欠陥のちょうど裏返しで、3つの絶対パスの脇に 未生成 と出る
