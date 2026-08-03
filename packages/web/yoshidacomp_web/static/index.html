@@ -175,6 +175,65 @@
 
       <hr />
 
+      <!-- The only control on this page that writes to the user's disk.
+
+           Placed directly under the server-parameter group, and that is the
+           argument for its position rather than a matter of taste: what it
+           sends *is* that group. `POST /api/generate` takes the ids and the
+           settings the picture above was rendered with, so the group it reads
+           and the button that reads it belong in the same column, in that
+           order. Up in the toolbar, beside 読み込み, it would be a save button
+           whose inputs are three hundred pixels away and a scroll down.
+
+           Nothing here holds a default path. `output_dir` is resolved by the
+           *server*, against its working directory, so a pre-filled relative
+           path would name a place on the machine the server runs on that the
+           person typing has no reason to have looked at -- and the one thing
+           this endpoint must never do is write somewhere the user did not
+           name. (`path-input` in the toolbar is pre-filled and stays that way;
+           reading a matrix is not writing a file. See the note on the two
+           loader boxes above.)
+
+           The 上書き block below is `hidden` until a 409 says the directory is
+           not empty, and that is the whole of the overwrite affordance: there
+           is no checkbox, because a checkbox is set once and then applies to
+           every press afterwards. `generate.py` refuses a non-empty directory
+           and writes *nothing* -- a mistyped path in this repository can name
+           99 GB of captures that cost hardware, a subject and a day to
+           reproduce -- and that refusal only holds if answering it stays an
+           act rather than a setting.
+
+           このページで唯一ディスクへ書くコントロール。サーバ側パラメータ群の
+           直下に置くのは好みではなく、送るものがその群そのものだからである
+           （上の絵が描かれたときのIDと設定を送る）。既定のパスは持たせない。
+           `output_dir` はサーバの作業ディレクトリ基準で解決されるので、
+           既定値を入れると「打っていない場所」を指しうる。上書きの操作は
+           409 が出るまで隠れているボタン1つだけで、チェックボックスにはしない
+           ——チェックボックスは一度入れれば以後すべての押下に効いてしまう。 -->
+      <div class="group">
+        <label class="lbl" for="gen-output-dir">投影画像の生成</label>
+        <input id="gen-output-dir" class="mono loader" type="text" spellcheck="false"
+               placeholder="出力先ディレクトリ（空でなければ確認します）" />
+        <div class="group inline">
+          <button id="btn-generate" class="primary">生成</button>
+          <span id="gen-info" class="muted mono">未生成</span>
+        </div>
+        <!-- The paths the server reports back, absolute. Written by
+             js/main.js::showGeneratedFiles from the response, never from the
+             box above: `write_projection_images` resolves `output_dir` before
+             anything else precisely so that what it names is a place the user
+             can find, and echoing the typed string back would throw that away
+             on every machine where the two differ.
+             サーバが返す絶対パスを出す欄。入力欄の文字列を反響させない。 -->
+        <div id="gen-files" class="gen-files mono"></div>
+        <div id="gen-overwrite" class="gen-overwrite" hidden>
+          <div id="gen-overwrite-detail" class="muted"></div>
+          <button id="btn-generate-overwrite">上書きして生成</button>
+        </div>
+      </div>
+
+      <hr />
+
       <div class="group legend">
         <span class="legend-swatch nan"></span>
         <span class="muted">マスク色 = NaN（有効投影領域の外）</span>

@@ -600,8 +600,30 @@ const VIEWS = [
   {
     key: "compensation", label: "補償画像", kind: "rgb", channels: 3,
     values_are_matrix: false,
+    // Mirrors the shipped `views/compensation.py`'s six parameters, and the
+    // *defaults* are the shipped ones verbatim (`""`, `"none"`, `""`,
+    // `"linear"`, `"srgb"`, `2.2`) rather than convenient ones.
+    //
+    // That matters for one scenario only, and it matters a great deal there.
+    // `generate` asserts the *contents* of the body the 生成 button sends, and
+    // an expected value that coincides with a declared default cannot tell a
+    // body built from the controls from one that hard-coded the default -- the
+    // third of the three shapes of unfailable test this repository keeps
+    // shipping. So the defaults here have to be the real ones, and that
+    // scenario has to move every field off them before it presses the button.
+    //
+    // 出荷側の6つのパラメータを写す。既定値は「都合のよい値」ではなく出荷側
+    // そのもの（`""`/`"none"`/`""`/`"linear"`/`"srgb"`/`2.2`）にする。
+    // `generate` シナリオは送られる body の中身を検証するが、期待値が既定値と
+    // 一致していると「コントロールから組み立てた実装」と「既定値を直書きした
+    // 実装」を区別できない。だから既定値は本物でなければならず、あちらは
+    // 押す前に全項目を既定値から動かす。
     params: [
       { name: "target", label: "ターゲットID", type: "text", default: "", choices: [] },
+      {
+        name: "linearizer", label: "線形化", type: "select",
+        default: "none", choices: ["none", "gamma", "inverse_lut"],
+      },
       // The second runtime id, and the reason it is declared here as well as
       // `target`: the two sidebar loaders write into different boxes through
       // the same `setServerParam` path, and a build that filled one and not the
@@ -613,6 +635,11 @@ const VIEWS = [
         name: "output", label: "出力", type: "select",
         default: "linear", choices: ["linear", "code"],
       },
+      {
+        name: "target_decode", label: "ターゲット復号", type: "select",
+        default: "srgb", choices: ["none", "srgb", "gamma"],
+      },
+      { name: "target_gamma", label: "ターゲットγ", type: "number", default: 2.2 },
     ],
   },
   // Three channels that are three unrelated pictures. This differs from
@@ -919,6 +946,72 @@ const LUTS = {
   "data/curveless.npz": { key: "curveless", rows: LUT_ROWS, curveStatus: 500 },
 };
 
+// ------------------------------------------------------------ generation
+//
+// `POST /api/generate` is the one endpoint in this application that writes to
+// the user's disk, and the only one whose *request body* is the thing under
+// test: the pixels it saves are decided entirely by the ids and the settings
+// the browser puts in it, so a body that does not describe the picture on
+// screen saves a file the user was never shown. Every request is therefore
+// recorded whole (`generatePostLog`) rather than counted, and the checks
+// compare fields, not call counts.
+//
+// The three fixture directories are the three answers the real endpoint gives
+// (see `routers/generate.py` and `generate.py`), because each one drives a
+// different piece of the UI: a directory it can write (200), one that already
+// holds files (409, and *nothing written* -- the frontend has to ask before
+// resending), and one it cannot write at all (400, prose).
+//
+// このアプリで唯一ディスクへ書くエンドポイントであり、唯一「リクエストの本文
+// そのもの」が検証対象であるもの。保存される画素は本文の設定だけで決まるので、
+// 画面と違う本文は「見ていないものが保存される」ことを意味する。よって回数では
+// なく本文を丸ごと記録し、フィールド単位で突き合わせる。3つのディレクトリは
+// 実物が返す3種類の答え（200 / 409 / 400）に対応する。
+const generatePostLog = [];   // every POST /api/generate body, in order
+
+// Holds the response so a second press can happen while the first is in
+// flight. The double-submit guard is unobservable against a fetch that
+// settles immediately -- the button would be disabled and released again
+// before any test could look.
+// 生成中に2回目を押せるよう応答を保留する。即座に解決する fetch では
+// 二重送信のガードは観測できない（押し直す前に解放されてしまう）。
+let holdGenerate = false;
+const heldGenerates = [];
+const releaseGenerates = () => { while (heldGenerates.length) heldGenerates.shift()(); };
+
+// A directory that already holds files. `generate.py` refuses these with 409
+// and writes nothing at all -- not even the directory.
+const GENERATE_NON_EMPTY = new Set(["data/existing"]);
+// A path the OS will not accept. The real endpoint turns the `OSError` into a
+// 400 whose detail names the path.
+const GENERATE_UNWRITABLE = new Set(["Z:/nope"]);
+
+// What the server resolves a relative `output_dir` to.
+//
+// Deliberately not the string that was sent. `write_projection_images` calls
+// `.resolve()` before anything else and every path it reports -- the response,
+// `files`, and the refusal message -- is absolute, precisely so that a refusal
+// names a place the user can find. A frontend that displayed the box's own
+// contents back would look identical against a fixture that echoed the input.
+// 送られた文字列をそのまま返さない。実物は必ず絶対パスへ解決してから答える
+// （断り文が指す場所が利用者に分かるようにするため）。入力を反響するだけの
+// フィクスチャでは「入力欄を出しているだけの実装」と区別が付かない。
+const generateAbsolute = (dir) => `C:/repo/${dir}`;
+// The three files the endpoint reports, in the order it returns them: the
+// linear compensation image, the projector image, and the metadata.
+const generateFiles = (dir) => [
+  `${generateAbsolute(dir)}/compensation_linear/compensation_image_02.png`,
+  `${generateAbsolute(dir)}/compensation_projector/inv_lut_comp_image_02.png`,
+  `${generateAbsolute(dir)}/generate_metadata.json`,
+];
+// Quoted, like the other refusal details here, so a client that rendered the
+// JSON envelope instead of the sentence shows the backslash escape.
+const generate409Detail = (dir) =>
+  `${generateAbsolute(dir)} is not empty (contains "compensation_linear"). `
+  + "Refusing to write into a directory that already holds files.";
+const generate400Detail = (dir) =>
+  `could not write to "${dir}": [WinError 3] the system cannot find the path`;
+
 const targetPostLog = [];   // every POST /api/target body, in order
 const lutPostLog = [];      // every POST /api/lut body, in order
 const lutCurveLog = [];     // every GET /api/lut/{id}/curve url, in order
@@ -1005,6 +1098,38 @@ globalThis.fetch = async (url, options) => {
         id, path: body.path, dtype: "float32",
         shape: [entry.rows.length, LUT_T_GRID.length], meta: LUT_META,
       },
+    }), { headers: { "content-type": "application/json" } });
+  }
+
+  // POST /api/generate, answered the way routers/generate.py does.
+  //
+  // The body is recorded *before* the hold, so a test can see that a request
+  // was issued while it is still in flight -- which is the whole of what the
+  // double-submit check needs to observe.
+  // 保留の前に本文を記録する。「飛んでいる最中に発行済みである」ことが
+  // 二重送信の検査が見たい唯一の状態だからである。
+  if (url === "/api/generate") {
+    const body = JSON.parse(options.body);
+    generatePostLog.push(body);
+    if (holdGenerate) await new Promise((release) => heldGenerates.push(release));
+    const dir = String(body.output_dir ?? "");
+    if (GENERATE_UNWRITABLE.has(dir)) {
+      return new Response(JSON.stringify({ detail: generate400Detail(dir) }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+    // Only an explicit `true` proceeds, exactly as `generate.py` has it: the
+    // 409 is not "try again", it is "nothing has been written and someone has
+    // to say so on purpose".
+    if (GENERATE_NON_EMPTY.has(dir) && body.overwrite !== true) {
+      return new Response(JSON.stringify({ detail: generate409Detail(dir) }), {
+        status: 409, headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({
+      output_dir: generateAbsolute(dir),
+      files: generateFiles(dir),
+      meta: { linearizer: body.linearizer, target_decode: body.target_decode },
     }), { headers: { "content-type": "application/json" } });
   }
 
@@ -1459,6 +1584,15 @@ const applyPending = () => /\bpending\b/.test(el("sp-apply").className);
 
 const statusText = () => el("status").textContent;
 const settled = () => waitFor(() => !el("btn-load").disabled && !/取得中|読み込み中/.test(statusText()));
+
+// An object as a key-sorted JSON string, so two bodies can be compared for
+// equality without depending on the order their fields happen to be written
+// in -- and so that an *extra* field is a difference rather than something a
+// field-by-field comparison would never look at.
+// キー順に正規化したJSON。フィールドの記述順に依存せず比較でき、かつ余計な
+// フィールドが増えたことも差として見える（項目ごとの比較では見落とす）。
+const canonical = (o) =>
+  JSON.stringify(Object.fromEntries(Object.keys(o).sort().map((k) => [k, o[k]])));
 
 // Wait until the named responses have all been *returned* by the fake server,
 // then give the continuations that follow each await a few turns to run. This
@@ -3582,6 +3716,314 @@ if (SCENARIO === "lut") {
   check("loading a LUT does not fetch the view on its own",
     viewRequestCount() === viewFetchesBeforeLoading,
     `view fetches=${viewFetchesBeforeLoading} -> ${viewRequestCount()}`);
+}
+
+if (SCENARIO === "generate") {
+  // The button that writes to disk, and the one property everything here is
+  // about: **what it sends is what is on screen.**
+  //
+  // Every other check in this file is about a picture. This one is about a
+  // file, and that changes what a wrong answer costs. A tile drawn from the
+  // wrong channel is wrong until the next render; a PNG written from a stale
+  // target id, a defaulted linearizer or an unapplied decode mode is wrong on
+  // the user's disk, under a name that says it is the picture they were
+  // looking at, and there is nothing on screen afterwards to say otherwise.
+  //
+  // "Pressing the button issues a fetch" does not test this, and cannot: a
+  // build that sent `linearizer: "none"` and the first image of the directory
+  // would satisfy it exactly as well as a correct one. So the body is compared
+  // field for field, and **every fixture value below is moved off its own
+  // declared default first** -- the target is image 2 of a directory (default
+  // `""`), the linearizer is `inverse_lut` (default `"none"`), the decode mode
+  // is `gamma` (default `"srgb"`) and its exponent 1.7 (default 2.2). An
+  // expected value that coincided with a default would pass against a body
+  // built entirely of hard-coded defaults.
+  //
+  // 画面に出ている設定がそのまま送られること。他のチェックが相手にしている
+  // のは絵だが、ここで間違えると誤りはディスク上のファイルとして残り、しかも
+  // 「見ていた絵」の名前で残る。「押すと fetch が飛ぶ」ではこれは検証できない
+  // ——既定値だけで組んだ本文でも同じように通る。よって本文をフィールド単位で
+  // 突き合わせ、フィクスチャの値は**すべて既定値から動かしてから**押す。
+  check("the page has a generate control (an output directory and a button)",
+    el("gen-output-dir") !== null && el("btn-generate") !== null,
+    `dir=${el("gen-output-dir") !== null} button=${el("btn-generate") !== null}`);
+
+  clickLoad("A");
+  await settled();
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await settled();
+
+  // The two runtime ids, obtained the way a user obtains them: through the
+  // sidebar loaders, from the server. Not typed in -- an id this harness made
+  // up would be indistinguishable from one the frontend made up.
+  // 2つの実行時IDは利用者と同じ手順（読み込み欄経由でサーバから）取る。
+  // ここで直接打ち込むと、フロントが勝手に作ったIDと区別が付かない。
+  el("target-path").value = "data/dir";
+  el("btn-load-target").__fire("click");
+  await waitFor(() => el("sp-target").value === "target_dir_0");
+  // The *third* image, not the first: the id a client that ignored the picker
+  // would send is `target_dir_0`, which is a real id for the wrong image.
+  // 3枚目を選ぶ。選択を無視した実装が送る `target_dir_0` は「別の画像の、
+  // 実在するID」であり、最も気付きにくい誤りである。
+  el("target-images").value = "2";
+  el("target-images").__fire("change");
+  await waitFor(() => el("sp-target").value === "target_dir_2");
+
+  el("lut-path").value = "data/inverse_lut.npz";
+  el("btn-load-lut").__fire("click");
+  await waitFor(() => el("sp-lut").value === "lut_measured");
+
+  stageParam("linearizer", "inverse_lut");
+  stageParam("target_decode", "gamma");
+  stageParam("target_gamma", "1.7");
+  // Staged and applied like the rest, and deliberately *not* expected in the
+  // body: `POST /api/generate` writes both the linear compensation image and
+  // the projector image every time, so which of the two the viewer happens to
+  // be showing does not select anything. A body carrying `output` would be a
+  // field the endpoint does not declare -- which the exact-key comparison
+  // below is what catches.
+  // `output` は適用するが本文には現れない。生成は毎回2枚とも書くので選ぶ
+  // ものが無い。余計なフィールドは下のキー集合の比較が捉える。
+  stageParam("output", "code");
+  applyParams();
+  await settled();
+
+  // --- 1. the body is the settings on screen
+  el("gen-output-dir").value = "data/out_generated";
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === 1);
+  await waitFor(() => el("btn-generate").disabled === false);
+
+  const sent = generatePostLog[0];
+  const expected = {
+    matrix_id: "matrix_A",
+    target_id: "target_dir_2",
+    linearizer: "inverse_lut",
+    lut_id: "lut_measured",
+    target_decode: "gamma",
+    target_gamma: 1.7,
+    output_dir: "data/out_generated",
+    // The endpoint's own default, restated here because it is the field whose
+    // silent flip is unrecoverable: `overwrite: true` on a first press turns
+    // the 409 guard off for a user who never asked for it.
+    // 既定値であっても書く。ここが黙って true になると、409 のガードは
+    // 誰も頼んでいないのに外れる。
+    overwrite: false,
+  };
+  check("the generate call sends the settings on screen, field for field",
+    canonical(sent) === canonical(expected),
+    `sent=${canonical(sent)} expected=${canonical(expected)}`);
+
+  // The paths that come back, which are the server's absolute ones and not the
+  // relative string in the box. Reporting the box back would look right on
+  // every machine where the two happen to agree, and this endpoint's whole
+  // safety argument is that a path it names is a path the user can find.
+  // 返ってきた絶対パスを出すこと（入力欄の文字列ではない）。
+  const shownFiles = el("gen-files").children.map((c) => c.textContent);
+  check("the saved paths shown are the absolute ones the server reported",
+    JSON.stringify(shownFiles) === JSON.stringify(generateFiles("data/out_generated"))
+      && statusText().includes(generateAbsolute("data/out_generated")),
+    `files=${JSON.stringify(shownFiles)} status=${statusText()}`);
+
+  // --- 2. "on screen" means the picture, not the boxes
+  //
+  // A staged-but-unapplied control is ahead of what is displayed: the tiles
+  // still show the previous value and 適用 is ringed to say so. Generating
+  // there would write a file that matches neither -- it would match the boxes,
+  // which is the one thing nobody is looking at. Both directions are checked,
+  // because "always refuse" passes the first half alone.
+  // 未適用のコントロールは表示より先に進んでいる。そこで生成すると、絵とも
+  // 一致せず、誰も見ていない入力欄とだけ一致するファイルが書かれる。
+  // 「常に断る」実装でも前半は通るので両方向を見る。
+  stageParam("target_gamma", "1.3");
+  const postsBeforePending = generatePostLog.length;
+  el("btn-generate").__fire("click");
+  await sleep(60);
+  check("生成 refuses while a staged change has not been applied, and says why",
+    generatePostLog.length === postsBeforePending
+      && /画面に出ている絵/.test(statusText())
+      && el("status").classList.contains("error"),
+    `posts=${postsBeforePending} -> ${generatePostLog.length} status=${statusText()}`);
+
+  applyParams();
+  await settled();
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBeforePending + 1);
+  check("after 適用 the newly displayed value is the one that is sent",
+    generatePostLog[postsBeforePending].target_gamma === 1.3,
+    `target_gamma=${generatePostLog[postsBeforePending].target_gamma}`);
+  await waitFor(() => el("btn-generate").disabled === false);
+
+  // --- 3. one press is one generation
+  //
+  // The call takes seconds on a real matrix (the pipeline runs, two PNGs are
+  // encoded), which is exactly long enough for a second click. Two overlapping
+  // writes into the same directory is not a slow duplicate: the second one
+  // meets the first one's files and comes back 409, so the visible result of
+  // an impatient double-click is a conflict about a directory the user is in
+  // the middle of filling.
+  // 実機では数秒かかり、その間に2度目を押せてしまう。同じディレクトリへの
+  // 二重書き込みは「遅い重複」では済まない——2つ目は1つ目のファイルに衝突して
+  // 409 になり、書いている最中のディレクトリについて衝突を告げられる。
+  holdGenerate = true;
+  const postsBeforeDouble = generatePostLog.length;
+  el("gen-output-dir").value = "data/out_twice";
+  el("gen-output-dir").__fire("input");
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBeforeDouble + 1);
+  const disabledDuring = el("btn-generate").disabled;
+  el("btn-generate").__fire("click");
+  await sleep(60);
+  check("the button is disabled while generating and a second press sends nothing",
+    disabledDuring === true && generatePostLog.length === postsBeforeDouble + 1,
+    `disabled during=${disabledDuring} posts=${postsBeforeDouble} -> `
+      + `${generatePostLog.length}`);
+  releaseGenerates();
+  holdGenerate = false;
+  await waitFor(() => el("btn-generate").disabled === false);
+
+  // --- 4. a 409 is a question, not a retry
+  //
+  // `generate.py` refuses a non-empty directory and writes nothing -- not even
+  // the directory itself -- because a mistyped path in this repository can name
+  // 99 GB of captures that cost hardware, a subject and a day to reproduce. The
+  // guard only works if the answer stays deliberate: a frontend that resent
+  // with `overwrite: true` on its own, or that offered 上書き as the default
+  // action, would turn a refusal that stops every typo into a dialog people
+  // click through.
+  // 409 は「やり直し」ではなく問いである。実物は空でないディレクトリへは
+  // 何も書かない（打ち間違いが撮り直しの効かない実測データを指しうるため）。
+  // 自動で再送する実装や、上書きを既定の動作にする実装は、あらゆる打ち間違いを
+  // 止めるはずのガードを「押して通り過ぎるもの」に変えてしまう。
+  el("gen-output-dir").value = "data/existing";
+  el("gen-output-dir").__fire("input");
+  const postsBefore409 = generatePostLog.length;
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBefore409 + 1);
+  await waitFor(() => el("gen-overwrite").hidden === false);
+  // Long enough for an automatic resend to have landed. Nothing waits on a
+  // second request here on purpose -- the assertion is that there isn't one.
+  // 自動再送があれば届くだけの時間を置く。ここで2件目を待たないのは、
+  // 「2件目が無いこと」が主張だからである。
+  await sleep(80);
+  const first409 = generatePostLog[postsBefore409];
+  // The path list is cleared as part of this, and that is not decoration: it
+  // describes *the last generation*, and this press did not produce one. Left
+  // up, three absolute paths sit on screen at the moment nothing was written
+  // -- and under a 409 they are (part of) what is in the way, so they read as
+  // "here is what was just saved". Measured before this was fixed: the
+  // successful run's three paths stayed on screen under 未生成.
+  // 一覧が「直前の生成」を説明している以上、生成していない押下のあとに残っては
+  // ならない。409 では、残った3つのパスは「邪魔をしている当のもの」であり、
+  // 何も書かれていない瞬間に「いま保存されたもの」と読めてしまう。
+  check("a 409 offers 上書き explicitly and resends nothing until it is confirmed",
+    first409.overwrite === false
+      && generatePostLog.length === postsBefore409 + 1
+      && el("gen-overwrite").hidden === false
+      && el("gen-overwrite-detail").textContent.includes("is not empty")
+      && !/\{"detail"|\\"/.test(el("gen-overwrite-detail").textContent)
+      && el("gen-files").children.length === 0,
+    `overwrite=${first409.overwrite} posts=${postsBefore409} -> `
+      + `${generatePostLog.length} hidden=${el("gen-overwrite").hidden} `
+      + `files listed=${el("gen-files").children.length} `
+      + `detail=${el("gen-overwrite-detail").textContent}`);
+
+  // Confirming resends *the same request*, with one field changed. Compared
+  // against the refused body rather than against the expectation above, so a
+  // build that rebuilt the body from scratch -- and picked up whatever the
+  // boxes hold now rather than what was refused -- is visible.
+  // 確認すると「同じ要求」が1フィールドだけ変えて再送される。上の期待値では
+  // なく断られた本文と突き合わせるので、組み直して現在の入力欄を拾う実装が
+  // 見える。
+  el("btn-generate-overwrite").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBefore409 + 2);
+  const retried = generatePostLog[postsBefore409 + 1];
+  check("confirming 上書き resends the same request with overwrite set",
+    retried.overwrite === true
+      && canonical({ ...retried, overwrite: false }) === canonical(first409),
+    `retried=${canonical(retried)} refused=${canonical(first409)}`);
+  await waitFor(() => el("btn-generate").disabled === false);
+  check("a confirmed overwrite takes the offer back down",
+    el("gen-overwrite").hidden === true, `hidden=${el("gen-overwrite").hidden}`);
+
+  // --- 5. a failure is prose, and the control survives it
+  el("gen-output-dir").value = "Z:/nope";
+  el("gen-output-dir").__fire("input");
+  el("btn-generate").__fire("click");
+  await waitFor(() => /could not write to/.test(statusText()));
+  check("a failed generation is shown as its sentence and leaves the button usable",
+    statusText().includes('could not write to "Z:/nope"')
+      && !/\{"detail"|\\"/.test(statusText())
+      && el("status").classList.contains("error")
+      && el("btn-generate").disabled === false
+      && el("gen-overwrite").hidden === true
+      // Same property as the 409's, on the other branch: the paths from the
+      // overwrite that just succeeded must not survive a press that wrote
+      // nothing. 直前に成功した上書きのパスが、何も書かなかった押下のあとに
+      // 残ってはならない。
+      && el("gen-files").children.length === 0,
+    `status=${statusText()} disabled=${el("btn-generate").disabled} `
+      + `offer hidden=${el("gen-overwrite").hidden} `
+      + `files listed=${el("gen-files").children.length}`);
+
+  // --- 6. a view that does not declare a linearizer does not generate
+  //
+  // The decision this task's brief leaves open, pinned as behaviour. `gamut`
+  // has no 線形化 control and `views/gamut.py` argues at length that it must
+  // not have one -- which pixels are out of gamut is a property of the
+  // *unclipped linear* compensation, decided before any linearization. So
+  // there is no on-screen answer to what a saved projector image should be
+  // linearized with, and the two ways to invent one are both the failure this
+  // whole scenario exists against: carrying `compensation`'s last value would
+  // send a setting that is nowhere on screen, and giving the generate box its
+  // own linearizer would put a second, disagreeing control beside the one the
+  // picture is drawn from. Refusing is the only answer that keeps "what is
+  // saved is what is displayed" true.
+  // 本課題が実装者に委ねた判断を、挙動として固定する。`gamut` に線形化は無く、
+  // `views/gamut.py` は「持たせてはならない」ことを長く論じている（色域外か
+  // どうかはクリップ前の線形値の性質であり、線形化より前に決まる）。よって
+  // 保存する投影画像を何で線形化するかについて、画面上に答えが存在しない。
+  // 作り出す方法は2つともこのシナリオが相手にしている失敗そのものである
+  // （`compensation` の最後の値を持ち回れば画面に無い設定で保存され、生成欄に
+  // 独自の線形化を置けば絵を描いている側と食い違う2つ目のコントロールになる）。
+  // A 409 is left standing first, unanswered, so the offer is genuinely on
+  // screen when the view changes underneath it -- otherwise the assertion
+  // about its button below would be about an element nobody can see.
+  // 先に 409 を出したまま（確認せずに）ビューを切り替える。そうしないと、
+  // 下の確認ボタンについての主張は「誰にも見えない要素」の話になる。
+  el("gen-output-dir").value = "data/existing";
+  el("gen-output-dir").__fire("input");
+  el("btn-generate").__fire("click");
+  await waitFor(() => el("gen-overwrite").hidden === false);
+
+  el("view-select").value = "gamut";
+  el("view-select").__fire("change");
+  await settled();
+  const postsBeforeGamut = generatePostLog.length;
+  const offerSurvived = el("gen-overwrite").hidden === false;
+  const disabledUnderGamut = el("btn-generate").disabled;
+  // The 上書き offer from the 409 above is deliberately still on screen -- its
+  // sentence is the only written record of why that directory was refused --
+  // so its button has to go dead with 生成. A live-looking 上書きして生成 under
+  // a view that cannot generate is a control whose only outcome is the refusal
+  // already printed beside 生成.
+  // 上の 409 の確認は意図して残っている（断られた理由が書かれている唯一の場所
+  // である）ため、そのボタンは 生成 と一緒に無効化されなければならない。
+  const overwriteDisabledUnderGamut = el("btn-generate-overwrite").disabled;
+  el("btn-generate").__fire("click");
+  await sleep(60);
+  check("a view that declares no linearizer cannot generate, and names itself",
+    disabledUnderGamut === true
+      && offerSurvived === true
+      && overwriteDisabledUnderGamut === true
+      && generatePostLog.length === postsBeforeGamut
+      && /linearizer/.test(statusText())
+      && statusText().includes("色域外判定")
+      && el("status").classList.contains("error"),
+    `disabled=${disabledUnderGamut} offer on screen=${offerSurvived} `
+      + `overwrite disabled=${overwriteDisabledUnderGamut} `
+      + `posts=${postsBeforeGamut} -> ${generatePostLog.length} status=${statusText()}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

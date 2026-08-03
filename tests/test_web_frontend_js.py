@@ -274,6 +274,58 @@ def test_the_lut_loader_plots_three_curves_against_the_analytic_gamma() -> None:
     _assert_all_passed(_run_harness(_STATIC_DIR, "lut"))
 
 
+def test_the_generate_button_saves_the_settings_that_are_on_screen() -> None:
+    """The one control that writes to disk must write what is displayed.
+
+    Every other check in this module is about a picture, and a wrong picture is
+    wrong until the next render. This one is about a file: a PNG written from a
+    stale target id, a defaulted linearizer or an unapplied decode mode stays
+    wrong on the user's disk, under a name saying it is what they were looking
+    at, with nothing on screen afterwards to contradict it. Five plans have
+    been spent removing exactly that class of divergence between what is shown
+    and what is reported; this is the first place where the consequence is a
+    file rather than a pixel.
+
+    "Pressing the button issues a fetch" cannot see any of it -- a body of
+    hard-coded defaults satisfies it as well as a correct one -- so the request
+    body is compared field for field, against a fixture in which **every value
+    differs from that parameter's own declared default** (target = image 2 of a
+    directory against ``""``, linearizer = ``inverse_lut`` against ``"none"``,
+    decode = ``gamma`` against ``"srgb"``, exponent 1.7 against 2.2). The key
+    set is compared too, so a field the endpoint does not declare is a
+    difference rather than something nobody looks at.
+
+    Four more properties, each of which a plausible-looking build violates:
+
+    - **"On screen" is the picture, not the boxes.** A staged-but-unapplied
+      control is ahead of what is displayed, so generating there writes a file
+      matching neither the picture nor the previous state -- only the boxes,
+      which is the one thing nobody is reading. Both directions are checked;
+      "always refuse" passes the first half alone.
+    - **One press is one generation.** The call takes seconds on a real matrix,
+      which is long enough for a second click, and two overlapping writes into
+      one directory make the second meet the first one's files and come back
+      409 -- a conflict about a directory the user is in the middle of filling.
+    - **A 409 is a question.** ``generate.py`` writes nothing at all for a
+      non-empty directory because a mistyped path here can name captures that
+      cost hardware and a day to reproduce. A frontend that resent with
+      ``overwrite: true`` on its own, or offered it as the default action,
+      turns a refusal that stops every typo into a dialog people click through.
+      Task 3's review found a partial-write path that left debris and thereby
+      trained the user to reach for the override; the guard only survives if
+      the UI keeps the answer deliberate.
+    - **A view with no linearizer does not generate.** See the harness's own
+      note, and the task report, for why refusing is the only answer that keeps
+      "what is saved is what is displayed" true under ``gamut``.
+
+    唯一ディスクへ書くコントロールが、画面に出ている設定で書くこと。誤りは
+    絵ではなくファイルとして残り、しかも「見ていた絵」の名前で残る。「押すと
+    fetch が飛ぶ」では既定値だけで組んだ本文も通ってしまうので、本文を
+    フィールド単位で、しかも全項目を既定値から動かした状態で突き合わせる。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "generate"))
+
+
 def test_load_button_is_released_after_a_reload_during_a_load() -> None:
     """Touching a server-side control mid-load must not wedge 読み込み.
 
@@ -1720,6 +1772,67 @@ _MUTATIONS = [
         )],
         ("the analytic gamma's exponent is shown, and it is the server's",),
         id="the_gamma_legend_hardcodes_the_usual_exponent",
+    ),
+    # ---- the two guards on the one control that writes to disk
+    #
+    # The double-submit guard, removed from the function and left only on the
+    # button's `disabled` attribute -- which is the build this looks like from
+    # the outside, and the reason the check asserts both halves. `disabled` is
+    # a statement to the user, not a guarantee: an already-dispatched click,
+    # Enter in the path box (which delegates to `.click()`), or anything else
+    # that reaches `runGenerate` does so regardless of it. On the 1080p matrix
+    # the call runs the pipeline and encodes two PNGs, so the window for a
+    # second press is seconds wide, and two overlapping writes into one
+    # directory do not merely duplicate work: the second meets the first one's
+    # files and comes back 409, reporting a conflict about a directory that is
+    # being filled by the request it conflicts with -- and the only in-GUI
+    # answer to a 409 is the override this whole design keeps deliberate.
+    #
+    # ボタンの `disabled` だけを残して関数側のガードを外す（外から見ると同じに
+    # 見える実装であり、チェックが両方を見ている理由でもある）。`disabled` は
+    # 表示であって保証ではなく、既に発行されたクリックも Enter も届く。実機では
+    # 数秒かかるため2度目を押す余地があり、同じディレクトリへの二重書き込みは
+    # 「遅い重複」では済まない——2つ目は1つ目のファイルに衝突して 409 になる。
+    pytest.param(
+        "generate",
+        [("js/main.js", "  if (generatesInFlight > 0) return;\n", "")],
+        ("a second press sends nothing",),
+        id="generate_relies_on_the_disabled_attribute_alone",
+    ),
+    # ...and the body carrying something other than what is on screen.
+    #
+    # The one field is enough to make the point and is deliberately set to a
+    # *real* id for the wrong image -- `target_dir_0` is the first entry of the
+    # same directory, which is what a client that ignored the image picker
+    # would send. The saved PNG is then a complete, correct compensation of an
+    # image the user was not looking at, filed under the index of the one they
+    # were. Nothing on screen changes, no request fails, and the file is wrong
+    # for as long as it exists.
+    #
+    # This is the entry that says the body assertion is worth its length. A
+    # check that only counted requests, or that compared against values which
+    # happened to be the parameters' declared defaults, would pass here --
+    # which is why the `compensation` fixture in the harness carries the
+    # shipped defaults and the scenario moves every field off them first.
+    #
+    # Exactly one check fails, and the one that does not is the interesting
+    # half: `confirming 上書き resends the same request` compares the resent
+    # body against the *refused* one rather than against the expectation, so a
+    # body that is consistently wrong stays consistent. That is intentional --
+    # that check is about the resend being the same request, not about the
+    # request being right, and the two properties fail independently.
+    #
+    # 本文が画面と違うものを運ぶ変異。1フィールドで足り、値は「別の画像の実在
+    # するID」にしてある（同じディレクトリの1枚目＝選択を無視した実装が送る値）。
+    # 保存されるのは「見ていない画像の、完全に正しい補償画像」であり、見ていた
+    # 画像の番号で綴じられる。画面は何も変わらず、要求も失敗しない。落ちるのは
+    # 1件で、上書き再送の検査が落ちないことには意味がある——あちらは「断られた
+    # 本文と同じものを送り直したか」を見ており、本文が正しいかは見ていない。
+    pytest.param(
+        "generate",
+        [("js/main.js", "    target_id: params.target,", '    target_id: "target_dir_0",')],
+        ("the generate call sends the settings on screen",),
+        id="the_generate_body_carries_a_fixed_target_id",
     ),
 ]
 

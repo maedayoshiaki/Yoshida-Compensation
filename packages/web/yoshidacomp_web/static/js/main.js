@@ -31,7 +31,7 @@
 
 import {
   loadMatrix, listViews, fetchView, probeMatrix,
-  loadTarget, loadLut, fetchLutCurve,
+  loadTarget, loadLut, fetchLutCurve, generateProjectionImages,
 } from "./api.js";
 import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
 import { LAYOUT_PLANAR, requireSupportedKind, traitsFor } from "./contract.js";
@@ -150,6 +150,44 @@ const state = {
   // あり、食い違うとクラス番号の読み取り欄が係数タイルの上に出る）。ホバーは
   // レンダの合間に起きるので `state.spec` からは導けない。
   traits: null,
+  // The view, and the server-side parameters, `state.payload` was rendered
+  // from. Set beside it, for the third time in this object and for the third
+  // version of the same reason -- see `shownMatrixId` and `traits`.
+  //
+  // These two exist for 生成, which is the first control on this page whose
+  // output is a file rather than a picture, and therefore the first one for
+  // which "which settings does it use?" has a wrong answer that survives being
+  // looked at. There are three candidates and only one of them is right:
+  //
+  //   `serverParams()`   what the boxes hold *now*. Ahead of the screen the
+  //                      moment anything is staged and not yet applied.
+  //   `state.sentParams` what the newest request carried. Describes a request
+  //                      that may have been refused (a 400 from a view leaves
+  //                      the previous picture up), or one still in flight.
+  //   these              what produced the pixels currently on screen.
+  //
+  // Only the third can be saved to disk without the file and the picture
+  // coming apart, and the difference between it and the second is not
+  // hypothetical here: `compensation` refuses a target id that is not loaded,
+  // so "the fetch failed and the old picture is still up" is a state a user
+  // reaches by making an ordinary typo.
+  //
+  // `shownSpec` is the spec object itself, not its key: `state.spec` changes
+  // when the selector changes, which is before the new view's transfer has
+  // landed, so identity is what tells "the picture is from this view" from
+  // "this view is being fetched".
+  //
+  // 画面に出ている画素が、どのビューの・どのサーバ側パラメータで描かれたか。
+  // `shownMatrixId` や `traits` と同じ理由で、ペイロードと同時に確定する。
+  // 生成はこのページで初めて「絵ではなくファイル」を出すので、「どの設定を
+  // 使うか」の誤答が見ても分からない形で残る。候補は3つあり、正しいのは
+  // 「今画面に出ている画素を作った設定」だけである（入力欄の現在値は未適用の
+  // 分だけ先へ行っており、最後に送った値は拒否された要求のものかもしれない
+  // ——`compensation` は未読み込みのターゲットIDを断るので、打ち間違い1つで
+  // 到達する状態である）。`shownSpec` はキーではなくオブジェクトそのもの
+  // （セレクタは転送の前に切り替わるため、同一性でしか区別できない）。
+  shownSpec: null,
+  shownParams: null,
   ranges: null,     // [{ vmin, vmax }] per *tile* (per channel except for rgb)
   layout: DEFAULT_LAYOUT,
   pinned: null,     // { col, row } while the readout is frozen
@@ -1328,6 +1366,331 @@ function wireLoaders() {
   window.addEventListener("resize", () => { redrawLutCurve(); });
 }
 
+// ------------------------------------------------- generating the images
+//
+// The 生成 button, and the one rule the rest of this section exists to keep:
+// **what is written to disk is what is on screen.**
+//
+// Every other control on this page produces a picture, and a picture that is
+// wrong is wrong until the next render. This one produces a file. A PNG
+// written from a stale target id, a defaulted linearizer or a decode mode the
+// user staged and never applied stays on the disk, under a name saying it is
+// the image they were looking at, and nothing afterwards contradicts it. That
+// is the class of divergence between the displayed and the reported that this
+// branch has spent five plans removing; here it is the first time the
+// consequence outlives the session.
+//
+// So the request is built from `state.shownParams` -- the parameters the
+// pixels currently on screen were rendered with -- and from nothing else. The
+// two rejected candidates and why are written out on that field.
+//
+// **Which settings under `gamut`.** That view declares no `linearizer`, and
+// `views/gamut.py` argues at length that it must not: whether a pixel is out
+// of gamut is a property of the *unclipped linear* compensation, decided
+// before any linearization happens, so a linearizer control beside that
+// picture would suggest that changing the LUT changes which pixels are out of
+// gamut, which is false. There is therefore no on-screen answer to what a
+// saved projector image should be linearized with, and both ways of inventing
+// one reintroduce exactly the failure above:
+//
+//   - carrying `compensation`'s last-used value would send a setting that is
+//     nowhere on screen, chosen in a view the user may have left ten minutes
+//     ago;
+//   - giving the generate group its own linearizer would put a second control
+//     beside the one the picture is drawn from, free to disagree with it --
+//     and under `compensation` the two would be visibly different answers to
+//     one question.
+//
+// So generating is refused for a view that does not declare what the save
+// needs, the button says so before it is pressed, and the refusal names the
+// view. Switching to 補償画像 puts the choice back on screen, where saving it
+// is the same act as looking at it. The parameters the view *does* declare are
+// used as declared; the ones it does not are omitted, so the server fills them
+// from `views/target_view.py::TARGET_DEFAULTS` -- the same dict the view's own
+// declaration reads, which is why an omitted field and the view's default are
+// the same value by construction rather than by agreement.
+//
+// 画面に出ているものが、そのまま保存されること。他のコントロールが出すのは
+// 絵であり、誤りは次の描画までしか残らない。これが出すのはファイルで、誤った
+// まま「見ていた絵」の名前でディスクに残る。よって要求は
+// `state.shownParams`（今画面に出ている画素を描いたときの設定）だけから作る。
+// `gamut` に線形化が無い件については上記のとおりで、`compensation` の最後の
+// 値を持ち回るのも、生成欄に独自の選択を持つのも、どちらも「画面と違う設定で
+// 保存する」ことになる。宣言していないビューでは断り、ボタンは押す前にその旨
+// を示し、断り文はビューを名指しする。
+
+// The parameters `POST /api/generate` cannot be issued without, in the
+// spelling `serverParams()` uses. `linearizer` is required by
+// `models.py::GenerateRequest` for the reason stated there -- an omitted one
+// accepted as `"none"` means a save pressed meaning "gamma" silently writes an
+// unlinearized PNG -- and `target` because there is nothing to compensate
+// without it.
+// 生成に不可欠なパラメータ。`linearizer` を省略可能にすると、ガンマのつもりで
+// 押した保存が黙って線形化なしの PNG を書く（`models.py` の記述と同じ理由）。
+const GENERATE_REQUIRES = ["target", "linearizer"];
+
+// How many generations are running. Counted rather than a boolean for the
+// reason `setLoadBusy` is: two buttons drive it (生成 and 上書きして生成).
+let generatesInFlight = 0;
+
+// The directory a 409 was reported for, exactly as it was typed at the time.
+//
+// The confirmation is bound to a directory, not merely armed: the sentence the
+// user is agreeing to names a specific place, and an offer that outlived an
+// edit of the box would carry that agreement over to a directory nobody was
+// told anything about. Cleared on every edit as well, so the offer does not
+// sit there looking answerable for a path it was not about.
+// 409 が出た時点の出力先。確認は「武装状態」ではなくディレクトリに結び付ける
+// ——利用者が同意した文は特定の場所を名指ししており、入力欄を書き換えたあとも
+// 残る確認は、その同意を何も説明していない別の場所へ持ち越す。
+let overwriteOfferedFor = null;
+
+function hideOverwriteOffer() {
+  overwriteOfferedFor = null;
+  $("gen-overwrite").hidden = true;
+  $("gen-overwrite-detail").textContent = "";
+}
+
+// Why the picture on screen cannot be saved, or null if it can.
+//
+// Asked of `state.shown*` rather than of `state.spec`, for the same reason
+// everything else in this section is: the question is about the picture, and
+// during a view switch `state.spec` already names a view whose transfer has
+// not landed.
+// 画面の絵を保存できない理由（保存できるなら null）。問うているのは絵の性質
+// なので `state.spec` ではなく `state.shown*` に訊く。
+function generateUnavailableReason() {
+  if (!state.shownMatrixId || !state.shownSpec) {
+    return "まだ何も表示されていません。行列を読み込んでから生成してください。";
+  }
+  const params = state.shownParams || {};
+  const missing = GENERATE_REQUIRES.filter((name) => !(name in params));
+  if (missing.length) {
+    const label = state.shownSpec.label || state.shownSpec.key;
+    return (
+      `ビュー "${label}" は ${missing.join(", ")} を宣言していないため、` +
+      "この画面からは生成できません（宣言されていない設定で保存すると、" +
+      "画面に出ていないもので線形化した画像がディスクに残ります）。" +
+      `${missing.join(", ")} を持つビューに切り替えてから生成してください。`
+    );
+  }
+  return null;
+}
+
+// The button's own state: unavailable-for-this-view, or busy.
+//
+// Only the durable half is reflected here. "The staged parameters have not
+// been applied" and "the output box is empty" are refusals with a sentence
+// when the button is pressed, not a disabled button -- the first is already
+// shown by 適用's ring, and disabling for the second would leave no way to be
+// told what is missing. What this disables is the condition that cannot be
+// fixed without changing what is on screen, which is the one worth saying
+// before the press rather than after it.
+// ボタンが持続的に不可能な状態（このビューでは生成できない／生成中）だけを
+// 反映する。未適用や出力先未入力は押したときに文で断る（前者は 適用 の縁が
+// 既に示しており、後者を無効化すると「何が足りないか」を告げる手段が消える）。
+function refreshGenerateButton() {
+  const reason = generateUnavailableReason();
+  const busy = generatesInFlight > 0;
+  const disabled = busy || reason !== null;
+  $("btn-generate").disabled = disabled;
+  // The same condition, and it has to be: the offer outlives a view switch on
+  // purpose (its sentence is the only place the 409's reason is written down,
+  // and the directory it names has not changed), but under a view that cannot
+  // generate, 上書きして生成 would be a live-looking button whose only outcome
+  // is the refusal the line beside 生成 is already showing. `runGenerate`
+  // refuses it either way; this is so it does not look answerable.
+  // 同じ条件にする。確認はビュー切替を越えて残る（409 の理由が書かれている
+  // 唯一の場所であり、名指ししているディレクトリも変わっていない）が、生成
+  // できないビューでは「押せそうに見えて断られるだけ」のボタンになる。
+  $("btn-generate-overwrite").disabled = disabled;
+  if (busy) return;
+  // Short, because this sits in a 250px column beside the button; the sentence
+  // itself is the status line's, on the press.
+  // 短く書く（250pxの段でボタンの隣に並ぶ）。文そのものは押したときに出す。
+  if (reason) $("gen-info").textContent = "このビューでは生成できません";
+}
+
+function setGenerateBusy(busy) {
+  generatesInFlight += busy ? 1 : -1;
+  refreshGenerateButton();
+}
+
+// The request body: one place, so there is one answer to "what does 生成 send".
+//
+// Everything comes from `state.shownParams`, the parameters that produced the
+// picture. Nothing is read from the DOM here except the output directory,
+// which is not a property of the picture and has no other source.
+// 送る本文を組み立てる唯一の場所。出力先を除き、すべて「画面に出ている絵を
+// 描いた設定」から取る（出力先だけは絵の性質ではないので入力欄から読む）。
+function generateBody(overwrite) {
+  const params = state.shownParams || {};
+  const body = {
+    matrix_id: state.shownMatrixId,
+    target_id: params.target,
+    linearizer: params.linearizer,
+    output_dir: $("gen-output-dir").value.trim(),
+    // Never defaulted to true, and never remembered between presses. See the
+    // note above `overwriteOfferedFor` and `generate.py`'s own preamble.
+    overwrite: !!overwrite,
+  };
+  // The three a view may or may not declare. Omitted rather than defaulted
+  // when it does not: the server fills an absent one from
+  // `views/target_view.py::TARGET_DEFAULTS`, which is the dict the view's own
+  // declaration reads, so an omitted field and the view's default are the same
+  // value by construction. A default written here would be the second copy
+  // that dict exists to prevent.
+  // 宣言されていないものは既定値を書かずに省く。サーバは同じ辞書から埋めるので
+  // 「省略」と「そのビューの既定値」は構造的に一致する。ここに既定値を書けば、
+  // その辞書が防いでいる2つ目の写しになる。
+  if ("lut" in params) body.lut_id = params.lut;
+  if ("target_decode" in params) body.target_decode = params.target_decode;
+  // A number, not the box's string: `target_gamma` is a float in
+  // `models.py::GenerateRequest`, and a text control's value is a string even
+  // when its `type` is `number`.
+  if ("target_gamma" in params) body.target_gamma = Number(params.target_gamma);
+  return body;
+}
+
+// The paths the *server* reported, one per line. Never the box's contents:
+// `write_projection_images` resolves `output_dir` before anything else so that
+// what it names is a place the user can go and look at, and echoing the typed
+// string back would throw that away on every machine where the two differ.
+// サーバが返した絶対パスを出す（入力欄の文字列ではない）。
+function showGeneratedFiles(files) {
+  const host = $("gen-files");
+  host.textContent = "";
+  for (const file of files || []) {
+    const row = document.createElement("div");
+    row.textContent = file;
+    host.appendChild(row);
+  }
+}
+
+async function runGenerate(overwrite) {
+  // The double-submit guard, and it is here rather than only on the button's
+  // `disabled` attribute because `disabled` is a statement to the user, not a
+  // guarantee: a click that was already dispatched, an Enter key, a driver, or
+  // anything that calls this function reaches it regardless. The call takes
+  // seconds on a real matrix (the pipeline runs and two PNGs are encoded),
+  // which is long enough for a second press, and two overlapping writes into
+  // one directory make the second meet the first one's files and come back
+  // 409 -- a conflict reported about a directory that is being filled by the
+  // very request it conflicts with.
+  // 二重送信のガード。`disabled` は利用者への表示であって保証ではない
+  // （既に発行されたクリック、Enter、自動操作はいずれもここへ届く）。実機では
+  // 数秒かかるので2度目を押せてしまい、同じディレクトリへの二重書き込みでは
+  // 2つ目が1つ目のファイルに衝突して 409 になる。
+  if (generatesInFlight > 0) return;
+
+  const unavailable = generateUnavailableReason();
+  if (unavailable) { status(unavailable, true); return; }
+
+  // The screen and the controls have to be the same thing before either can be
+  // saved. If they are not, the file would match the boxes -- which is the one
+  // state nobody is looking at -- and neither the picture above them nor what
+  // the user last saw rendered.
+  // 画面とコントロールが一致していなければ保存できない。一致していない状態で
+  // 書くと、ファイルは「誰も見ていない入力欄」とだけ一致する。
+  if (state.spec !== state.shownSpec
+    || JSON.stringify(serverParams()) !== JSON.stringify(state.shownParams)) {
+    status(
+      "画面に出ている絵は、いまのパラメータで描かれたものではありません。" +
+      "適用 を押して画面を更新してから 生成 してください。",
+      true,
+    );
+    return;
+  }
+
+  const body = generateBody(overwrite);
+  if (!body.output_dir) {
+    status("出力先ディレクトリを入力してください", true); return;
+  }
+
+  setGenerateBusy(true);
+  try {
+    $("gen-info").textContent = "生成中…";
+    status(`投影画像を生成中: ${body.output_dir}`);
+    const result = await generateProjectionImages(body);
+    hideOverwriteOffer();
+    showGeneratedFiles(result.files);
+    $("gen-info").textContent = `${(result.files || []).length} 件を保存`;
+    status(`生成しました: ${result.output_dir}`);
+  } catch (e) {
+    // The path list describes *the last generation*, and this press did not
+    // produce one. Leaving it up puts three paths on screen under a line that
+    // says nothing was generated -- and in the 409 case those same paths are
+    // (part of) what is in the way, so they read as "here is what was just
+    // written" at the exact moment nothing was. Cleared before anything else,
+    // so no failure branch can forget to.
+    // 一覧が説明しているのは「直前の生成」であり、この押下は生成していない。
+    // 残すと「未生成」の下に3つのパスが並ぶ。409 では、そのパスこそが邪魔を
+    // している当のものなので、何も書かれていない瞬間に「いま書いたもの」と
+    // 読めてしまう。分岐より前に消す。
+    showGeneratedFiles([]);
+    $("gen-info").textContent = e && e.status === 409 ? "既存のため中止" : "生成に失敗";
+    // 409 is the directory saying it already holds files, with nothing
+    // written. It is the one failure here that is a question rather than an
+    // error, so it gets the offer rather than only the sentence -- and the
+    // offer is a button that has to be pressed, never a retry issued from
+    // here. `overwrite` is already true only if that button is what called
+    // this, and the server does not answer 409 in that case; the guard is for
+    // a server that someday does, so that a confirmation cannot re-offer
+    // itself in a loop.
+    // 409 は「既に何か入っている。まだ何も書いていない」という問いである。
+    // ここから再送はせず、押されるべきボタンを出す。
+    if (e && e.status === 409 && !overwrite) {
+      offerOverwrite(body.output_dir, errorText(e));
+      return;
+    }
+    hideOverwriteOffer();
+    throw e;
+  } finally {
+    setGenerateBusy(false);
+  }
+}
+
+function offerOverwrite(outputDir, message) {
+  overwriteOfferedFor = outputDir;
+  $("gen-overwrite-detail").textContent = message;
+  $("gen-overwrite").hidden = false;
+  status(message, true);
+}
+
+function wireGenerate() {
+  $("btn-generate").addEventListener("click", () => {
+    runGenerate(false).catch((e) => status(errorText(e), true));
+  });
+  $("gen-output-dir").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("btn-generate").click();
+  });
+  // Editing the box retires the offer: the sentence it carries names the old
+  // directory. Both events, because a value can change without a `change`
+  // (typing) and without an `input` (a paste through the context menu still
+  // fires `input`, but a programmatic set fires neither -- and the check that
+  // it is still the same directory below is what covers that case).
+  // 入力欄を触ると確認は失効する（確認文が名指ししているのは古い出力先である）。
+  $("gen-output-dir").addEventListener("input", () => { hideOverwriteOffer(); });
+  $("gen-output-dir").addEventListener("change", () => { hideOverwriteOffer(); });
+
+  $("btn-generate-overwrite").addEventListener("click", () => {
+    // The confirmation applies to the directory it was offered for, and to no
+    // other. Without this a value set without firing an event -- and every
+    // programmatic set is one -- would let an agreement about directory A
+    // overwrite directory B.
+    // 確認が効くのは、それが提示されたディレクトリに対してだけである。
+    if (overwriteOfferedFor === null
+      || overwriteOfferedFor !== $("gen-output-dir").value.trim()) {
+      hideOverwriteOffer();
+      status(
+        "出力先が変わりました。もう一度 生成 を押して確認してください。", true,
+      );
+      return;
+    }
+    runGenerate(true).catch((e) => status(errorText(e), true));
+  });
+}
+
 // ------------------------------------------------------------- rendering
 
 function applyDisplay() {
@@ -1557,6 +1920,18 @@ async function reload(req = beginRequest()) {
   // asks this id, so it can never describe a matrix other than the one drawn.
   // 画素と、その出所の行列IDを同時に確定する。読み取り欄はこのIDに問い合わせる。
   state.shownMatrixId = matrixId;
+  // ...and the view and the parameters that produced them, for 生成. `params`
+  // is the object this request was issued with, captured above -- not
+  // `serverParams()` read again, which would be whatever the boxes hold by the
+  // time the transfer landed. See `state.shownParams`.
+  // 生成のために、この画素を作ったビューとパラメータも同時に確定する。
+  // `params` は発行時に控えたもので、ここで `serverParams()` を読み直しては
+  // ならない（転送中に入力欄が変わっていればそちらを拾ってしまう）。
+  state.shownSpec = state.spec;
+  state.shownParams = params;
+  // 生成 answers for the picture, so its availability changes with the picture.
+  // 生成 は画面の絵について答えるので、可否も絵と同時に変わる。
+  refreshGenerateButton();
   // The heading over #view-values, set with the payload it describes.
   //
   // Two panels of numbers now sit side by side and only one of them is the
@@ -1881,6 +2256,11 @@ async function main() {
 
   wireDisplayControls();
   wireLoaders();
+  wireGenerate();
+  // Before the first render, so the button starts in the state the page is
+  // actually in ("nothing is displayed") rather than looking pressable.
+  // 初回描画の前に呼ぶ（何も表示されていない状態を最初から示す）。
+  refreshGenerateButton();
   try {
     const specs = await listViews();
     if (!specs.length) { status("ビューが登録されていません", true); return; }

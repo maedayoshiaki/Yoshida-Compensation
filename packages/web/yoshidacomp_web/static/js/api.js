@@ -126,6 +126,43 @@ export async function fetchLutCurve(lutId) {
   return jsonOrThrow(await fetch(`/api/lut/${encodeURIComponent(lutId)}/curve`));
 }
 
+// POST the ids and the settings; the server writes the CLI's images to disk.
+//
+// The only call in this file with an effect outside the browser, and the only
+// one whose *request body* decides what the user ends up with: the pixels
+// saved are a function of the three ids, the linearizer and the decode mode
+// carried here, so a body that does not describe the picture on screen writes
+// a file the user was never shown. What goes into it is decided in one place
+// (`generateBody` in main.js) for that reason.
+//
+// **The status is attached to the error, unlike everywhere else in this file.**
+// A 409 from `routers/generate.py` is not a failure in the sense the other
+// endpoints' refusals are -- it means the directory already holds files and
+// *nothing has been written*, and the only thing that can resolve it is a
+// person saying so. The caller has to be able to tell that case from a 400 or
+// a 500 without reading the sentence back out of the message, which would be
+// matching prose the server is free to rewrite.
+//
+// 送った設定でサーバがCLIと同じ画像をディスクへ書く。ブラウザの外に効果を
+// 持つ唯一の呼び出しであり、保存される画素は本文の内容だけで決まる。
+// ステータスを例外に付けるのはここだけである: 409 は「まだ何も書いていない。
+// 上書きするかどうかは人間が決めよ」という問いであり、400 や 500 と区別できな
+// ければならない。文面から読み取るのは、サーバが自由に書き換えてよい散文を
+// 突き合わせることになる。
+export async function generateProjectionImages(body) {
+  const res = await fetch("/api/generate", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const error = new Error(await errorMessage(res));
+    error.status = res.status;
+    throw error;
+  }
+  return res.json();
+}
+
 // The view registry drives the GUI: every registered view and its parameters.
 export async function listViews() {
   return (await jsonOrThrow(await fetch("/api/views"))).views;

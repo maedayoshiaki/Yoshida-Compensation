@@ -195,6 +195,51 @@ canvas.lut-curve {
   font-size: 10.5px; line-height: 1.35; overflow-wrap: anywhere;
 }
 
+/* The generated files' paths. Absolute server-side paths on Windows are long
+   and have no spaces to break at, so they wrap inside the word rather than
+   widening the 250px column or being clipped to the first directory -- a path
+   the user cannot read all of is a path they cannot go and look at, which is
+   the only reason this line exists.
+   生成されたファイルの絶対パス。Windowsの絶対パスは長く、折り返せる空白が
+   無いので語中で折り返す。最後まで読めないパスは「見に行けないパス」であり、
+   この行の存在理由そのものが失われる。 */
+.gen-files {
+  font-size: 10px; line-height: 1.45; color: var(--muted);
+  overflow-wrap: anywhere; margin-top: 4px;
+}
+.gen-files > div { margin-bottom: 2px; }
+
+/* The 上書き offer, shown only after a 409. Framed in the error colour and
+   given its own box because it is a question, not a status line: the answer
+   writes over files that are already on disk, and this endpoint's whole safety
+   argument is that answering it stays deliberate.
+   409 のあとにだけ出す上書きの確認。ステータス行ではなく問いなので、
+   エラー色の枠で独立した箱にする。 */
+.gen-overwrite {
+  margin-top: 6px; padding: 7px 8px; border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--error) 45%, var(--border));
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+}
+.gen-overwrite[hidden] { display: none; }
+.gen-overwrite > div {
+  font-size: 10.5px; line-height: 1.45; margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+/* Not `.primary`. The blue button on this page means "the ordinary next
+   action" (読み込み, 適用, 生成), and the ordinary next action here is to
+   choose another directory -- which is the box above, not this. A destructive
+   confirmation that looks like the default action is how a guard becomes a
+   step people click through.
+   `.primary` にしない。このページの青は「普通の次の一手」であり、ここでの
+   普通の次の一手は別のディレクトリを選ぶこと（＝上の入力欄）である。
+   破壊的な確認を既定の見た目にすると、ガードは「通り過ぎる段」になる。 */
+.gen-overwrite > button { border-color: var(--error); color: var(--error); }
+.gen-overwrite > button:hover { border-color: var(--error); filter: brightness(1.1); }
+#gen-info {
+  min-width: 0; flex: 1 1 auto; text-align: right;
+  font-size: 10.5px; line-height: 1.35; overflow-wrap: anywhere;
+}
+
 .legend { display: flex; align-items: center; gap: 7px; font-size: 11px; }
 .legend-swatch { width: 34px; height: 12px; border-radius: 3px; border: 1px solid var(--border); flex-shrink: 0; }
 .legend-swatch.nan { background: var(--nan); }
