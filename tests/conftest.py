@@ -136,13 +136,26 @@ def stand_in_projector_config(tmp_path):
         active_y: int = 0,
         active_width: int = 0,
         active_height: int = 0,
+        gamma: float | None = None,
     ) -> Path:
         """Write and activate a minimal ``[projector]`` config; return its path.
 
         Non-positive ``active_width``/``active_height`` keep the full frame,
         matching ``resolve_active_region``'s own default.
+
+        *gamma* is omitted from the file unless given, so callers that do not
+        care keep ``ProjectorConfig``'s compiled-in 2.2. A caller that asserts
+        on a recorded gamma must pass one: 2.2 is also ``--target-gamma``'s
+        default and ``decode_target``'s, so an expected value of 2.2 cannot
+        tell a gamma read from the projector config from one read out of the
+        wrong place -- the third of this plan's recurring shapes ("an expected
+        value that coincides with a real default").
+        *gamma* は省略時にはファイルに書かない（既定の 2.2 のまま）。記録された
+        gamma を assert する側は必ず明示すること。2.2 は他の既定値とも一致する
+        ため、期待値が 2.2 だと判別力が無い。
         """
         path = tmp_path / "stand_in_projector_config.toml"
+        gamma_line = "" if gamma is None else f"gamma = {gamma}\n"
         path.write_text(
             f"""
 [projector]
@@ -152,7 +165,7 @@ active_x = {active_x}
 active_y = {active_y}
 active_width = {active_width}
 active_height = {active_height}
-""",
+{gamma_line}""",
             encoding="utf-8",
         )
         reload_config(path)

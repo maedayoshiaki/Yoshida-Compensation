@@ -153,6 +153,50 @@ def test_an_rgb_view_draws_one_colour_tile_and_keeps_a_three_channel_readout() -
     _assert_all_passed(_run_harness(_STATIC_DIR, "rgb"))
 
 
+def test_a_categorical_view_draws_a_discrete_palette_with_a_legend() -> None:
+    """A ``categorical`` view must be class indices, not small numbers.
+
+    Nothing about the wrong reading fails loudly, which is the whole reason
+    this scenario exists. A class index is a perfectly ordinary float: the
+    scalar path uploads it as R32F, the diverging colormap gives it a colour,
+    exposure and gamma move that colour, and the tile comes out as four flat
+    regions in four shades of one ramp under a ``±`` range. It renders, and it
+    renders something that looks like a working view of a classification.
+
+    Four properties are pinned and each fails on its own:
+
+    - **One tile, headed as one.** ``gamut``'s labels are class names with no
+      ``"->"`` in them, so ``axesFromLabels`` returns null and the fallback
+      heads the tile ``labels[0]`` -- the name of class 0, over a picture
+      containing all four.
+    - **R32F/RED.** RGB32F uploads the same twenty numbers, so a contents
+      check cannot see it; the index lands in the red component with two
+      undefined components beside it.
+    - **The legend's labels come from ``payload.labels``.** The palette is
+      JavaScript and the class names are the server's, and writing the names
+      into ``index.html`` makes those two sources of truth for one mapping.
+      ``views/gamut.py`` says in as many words that the *order* of its
+      ``LABELS`` is the class index and part of the wire contract, so a
+      relabelling there would leave the page explaining the previous meaning
+      of the same four colours.
+    - **Exposure, γ and the colormap do not apply to a name.** The shader's
+      categorical branch reads none of the tone uniforms and the controls are
+      disabled; either half alone is insufficient (a uniform can still be
+      pushed from code; a live slider that moves nothing is the same lie the
+      colormap dropdown on an rgb view was).
+
+    What this scenario cannot see is what the pixels look like -- the stub has
+    no GPU. That is measured separately, by compiling and drawing on
+    ANGLE/D3D11 and reading the framebuffer back; see the task report.
+
+    ``categorical`` はクラス番号の絵であり、小さな数値の絵ではない。誤った
+    読み方でも描画は成功する（1本のランプ上の4段階として「それらしく」出る）
+    ため、静かに壊れる4つの性質を個別に固定する。画素そのものはスタブでは
+    見えないので、実GPUでの読み戻しは別に行う。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "gamut"))
+
+
 def test_the_hover_readout_reads_the_matrix_through_the_point_query() -> None:
     """The readout must show the matrix on every view, one pixel at a time.
 
@@ -230,6 +274,76 @@ def test_the_lut_loader_plots_three_curves_against_the_analytic_gamma() -> None:
     _assert_all_passed(_run_harness(_STATIC_DIR, "lut"))
 
 
+def test_the_generate_button_saves_the_settings_that_are_on_screen() -> None:
+    """The one control that writes to disk must write what is displayed.
+
+    Every other check in this module is about a picture, and a wrong picture is
+    wrong until the next render. This one is about a file: a PNG written from a
+    stale target id, a defaulted linearizer or an unapplied decode mode stays
+    wrong on the user's disk, under a name saying it is what they were looking
+    at, with nothing on screen afterwards to contradict it. Five plans have
+    been spent removing exactly that class of divergence between what is shown
+    and what is reported; this is the first place where the consequence is a
+    file rather than a pixel.
+
+    "Pressing the button issues a fetch" cannot see any of it -- a body of
+    hard-coded defaults satisfies it as well as a correct one -- so the request
+    body is compared field for field, against a fixture in which **every value
+    differs from that parameter's own declared default** (target = image 2 of a
+    directory against ``""``, linearizer = ``inverse_lut`` against ``"none"``,
+    decode = ``gamma`` against ``"srgb"``, exponent 1.7 against 2.2). The key
+    set is compared too, so a field the endpoint does not declare is a
+    difference rather than something nobody looks at.
+
+    Four more properties, each of which a plausible-looking build violates:
+
+    - **"On screen" is the picture, not the boxes.** A staged-but-unapplied
+      control is ahead of what is displayed, so generating there writes a file
+      matching neither the picture nor the previous state -- only the boxes,
+      which is the one thing nobody is reading. Both directions are checked;
+      "always refuse" passes the first half alone.
+    - **One press is one generation.** The call takes seconds on a real matrix,
+      which is long enough for a second click, and two overlapping writes into
+      one directory make the second meet the first one's files and come back
+      409 -- a conflict about a directory the user is in the middle of filling.
+    - **A 409 is a question.** ``generate.py`` writes nothing at all for a
+      non-empty directory because a mistyped path here can name captures that
+      cost hardware and a day to reproduce. A frontend that resent with
+      ``overwrite: true`` on its own, or offered it as the default action,
+      turns a refusal that stops every typo into a dialog people click through.
+      Task 3's review found a partial-write path that left debris and thereby
+      trained the user to reach for the override; the guard only survives if
+      the UI keeps the answer deliberate.
+    - **A view with no linearizer does not generate.** See the harness's own
+      note, and the task report, for why refusing is the only answer that keeps
+      "what is saved is what is displayed" true under ``gamut``. The fixture
+      declares the same three parameters ``views/gamut.py`` does and omits only
+      ``linearizer``, so a refusal keyed on how many parameters a view declares
+      -- or on "any view that is not ``compensation``" -- fails here rather than
+      passing against a shape nobody ships.
+    - **The screen includes the matrix.** ``state.matrixId`` moves seconds
+      before the transfer that draws it, and no control changes in between, so
+      the staged-vs-applied guard passes and a press goes through. The body has
+      to carry the matrix on screen, which is the one field of it whose source
+      cannot be seen once a load has settled.
+    - **The refusal is discoverable before the press.** A disabled button
+      dispatches no click, so what a person meets under ``gamut`` is the
+      button's appearance and the line beside it -- both asserted, after both
+      shipped broken: the button was pixel-identical to a live one (no
+      ``button:disabled`` rule existed) and the line said "this view cannot
+      generate" on every view, from the first paint onward.
+    - **The 上書き confirmation is about one directory.** Bound to the path the
+      409 named, retired when the box is edited, and re-checked at press time so
+      that a value set without an event cannot spend an agreement about A on B.
+
+    唯一ディスクへ書くコントロールが、画面に出ている設定で書くこと。誤りは
+    絵ではなくファイルとして残り、しかも「見ていた絵」の名前で残る。「押すと
+    fetch が飛ぶ」では既定値だけで組んだ本文も通ってしまうので、本文を
+    フィールド単位で、しかも全項目を既定値から動かした状態で突き合わせる。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "generate"))
+
+
 def test_load_button_is_released_after_a_reload_during_a_load() -> None:
     """Touching a server-side control mid-load must not wedge 読み込み.
 
@@ -287,11 +401,66 @@ _MUTATIONS = [
         ("released after a reload", "released after a view switch"),
         id="button_borrows_the_request_counter",
     ),
+    # The refusal itself, removed: the viewer no longer says which kind it
+    # cannot draw.
+    #
+    # Only one check fails, and the one that does not is worth reading. The
+    # payload's identity survives this mutation because the *table* still
+    # refuses: `traitsFor` finds no row for "flow", returns `undefined`, and
+    # the first read of it throws before `state.payload = payload` runs. That
+    # is the trait table doing its job with the guard gone -- which is why the
+    # entry below, which makes the lookup answer `scalar` instead of nothing,
+    # is a separate mutation rather than a variant of this one. Narrowing the
+    # expectation here rather than making that read defensive: a `traits &&`
+    # would turn "there is no row for this kind" back into a silent default.
+    # 拒否の文言だけを外す。ペイロードが差し替わらないのは、ガードが無くても
+    # 表が拒んでいるためである（行が無く `undefined` を読んだ時点で例外になり、
+    # `state.payload` の代入まで到達しない）。既定行へ落とす変異は下に別項目
+    # として置く。ここで `traits &&` のように守ると、それこそ静かな既定値に戻る。
     pytest.param(
         "views",
         [("js/contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {")],
-        ("unsupported kind is refused", "leaves state.payload identity unchanged"),
+        ("unsupported kind is refused",),
         id="unsupported_kind_renders_as_scalar",
+    ),
+    # ...and the failure the table was built to make impossible: an unlisted
+    # kind reaching a default row.
+    #
+    # This is the pre-table behaviour exactly, restated in one line. Five sites
+    # used to answer "scalar" for anything they did not recognise, and this
+    # mutation reinstates all five at once from a single place: `vector_field`
+    # (kind "flow") is then drawn as two greyscale coefficient tiles through
+    # the diverging colormap, with per-channel ranges and a live colormap
+    # dropdown. Nothing throws, nothing is logged, and the viewer paints
+    # plausible pixels for a view it does not understand -- including
+    # overwriting the payload that was on screen, which is why both checks fail
+    # here while only one does above.
+    # 表が防いでいる当の失敗（未登録の kind が既定行へ落ちる）。以前は5か所が
+    # 独立に「知らなければ scalar」と答えていたが、それを1行で再現する。例外も
+    # ログも出ず、理解していないビューがそれらしく描かれ、画面に出ていた
+    # ペイロードも差し替わる。
+    #
+    # Two edits, one guard. The rule -- "unknown has exactly one meaning,
+    # refused" -- is enforced at the check *and* at the only way to read the
+    # table, and reinstating the fall-through means undoing both: with the
+    # lookup alone defaulted, `reload()`'s own pre-flight `requireSupportedKind`
+    # still refuses and the mutation changes nothing (measured -- the views
+    # scenario stayed at 29/29). That the rule needs two lines to remove is a
+    # property of the design and not of this entry.
+    # 2つの編集で1つのガード。既定行へ落とす変更だけでは `reload()` 側の
+    # 事前検査が依然として断り、何も変わらない（実測 29/29 のまま）。
+    pytest.param(
+        "views",
+        [
+            ("js/contract.js", "  if (!SUPPORTED_KINDS.includes(kind)) {", "  if (false) {"),
+            (
+                "js/contract.js",
+                "  requireSupportedKind(kind, where);\n  return KIND_TRAITS[kind];",
+                "  return KIND_TRAITS[kind] ?? KIND_TRAITS.scalar;",
+            ),
+        ],
+        ("unsupported kind is refused", "leaves state.payload identity unchanged"),
+        id="an_unlisted_kind_falls_through_to_the_scalar_row",
     ),
     pytest.param(
         "views",
@@ -330,7 +499,11 @@ _MUTATIONS = [
     # rgbビューの2つの要素を1つずつ外す。どちらも描画自体は成功してしまう。
     pytest.param(
         "rgb",
-        [("js/main.js", "  if (traits.singleTile && payload.channels === 3) {", "  if (false) {")],
+        [(
+            "js/main.js",
+            "  if (traits.singleTile && payload.channels === traits.tileChannels) {",
+            "  if (false) {",
+        )],
         (
             "draws one tile",
             # The three tiles share one range object, so applyDisplay reads
@@ -404,7 +577,7 @@ _MUTATIONS = [
         "rgb",
         [(
             "js/main.js",
-            "  if (traits.singleTile && payload.channels === 3) {",
+            "  if (traits.singleTile && payload.channels === traits.tileChannels) {",
             "  if (payload.channels === 3) {",
         )],
         ("kind is scalar still draws one tile per channel",),
@@ -1119,6 +1292,292 @@ _MUTATIONS = [
         ),
         id="readout_never_says_a_pixel_is_outside_the_active_region",
     ),
+    # ---- the categorical row of KIND_TRAITS, one cell at a time
+    #
+    # The table exists so that adding a kind means writing down what it does at
+    # every decision, and these three are the cells whose wrong value still
+    # draws. Each is a one-token edit to ``contract.js`` or to the legend, and
+    # each changes exactly one thing on screen -- which is why each is expected
+    # to fail exactly one check. A cell whose wrong value broke five checks
+    # would not need a mutation entry; it would announce itself.
+    #
+    # 表の意味は「kind を足すとは全ての判断を書き下すこと」であり、この3つは
+    # 「誤った値でも描けてしまう」セルである。いずれも1トークンの変更で、
+    # 画面上の変化もちょうど1つずつになる。
+    #
+    # RGB32F on a one-channel plane uploads the identical twenty floats, so
+    # every contents assertion passes: the class index goes into the red
+    # component and green and blue are whatever the driver leaves there. The
+    # tile still draws. Only the recorded internal format tells them apart,
+    # which is why the harness stopped answering ``1`` for every GL constant.
+    # 1チャンネルの平面を RGB32F で載せても数値は同一なので中身の検査は全て
+    # 通り、番号が赤成分に入るだけである。区別できるのは形式の記録だけ。
+    pytest.param(
+        "gamut",
+        [(
+            "js/contract.js",
+            'texture: Object.freeze({ internal: "R32F", format: "RED" }),\n'
+            "    // shaders.js: 2 selects the discrete-palette branch.",
+            'texture: Object.freeze({ internal: "RGB32F", format: "RGB" }),\n'
+            "    // shaders.js: 2 selects the discrete-palette branch.",
+        )],
+        ("class indices are uploaded as R32F/RED",),
+        id="categorical_uploads_class_indices_as_a_colour",
+    ),
+    # The legend written from a hard-coded list instead of from the payload.
+    #
+    # The obvious build, and the one that is right on the machine it was
+    # written on: these *are* ``views/gamut.py``'s LABELS, so against the real
+    # server the legend would be correct and would stay correct until somebody
+    # renamed a class or reordered the list -- at which point the page keeps
+    # explaining the previous meaning of the same four colours, with nothing
+    # failing. The row count is untouched (four hard-coded names, four
+    # classes), so exactly one check sees it, and that is the point of having
+    # the count and the contents as separate checks.
+    # 実装側の LABELS をそのまま書いたもの。実サーバに対しては正しく、名前や
+    # 順序を変えた瞬間だけ嘘になる（そして何も失敗しない）。行数は変わらない
+    # ので、落ちるのは内容のチェック1つだけである。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "    text.textContent = payload.labels[i];",
+            '    text.textContent = ["範囲内", "負クリップ", "1超クリップ", "両方"][i];',
+        )],
+        (
+            "the legend's labels are the payload's",
+            # The hard-coded list has four entries, so on the three-class view
+            # it is a row count error as well as a wrong label.
+            # 直書きの一覧は4つなので、3クラスのビューでは行数の誤りにもなる。
+            "the legend's row count is the payload's class count",
+        ),
+        id="the_class_legend_hardcodes_the_shipped_labels",
+    ),
+    # The colormap control left live over a discrete palette.
+    #
+    # Same shape as ``colormap_stays_enabled_for_an_rgb_view`` and kept as its
+    # own entry for the same reason the two ``percentileAbsPerChannel`` walks
+    # are: one kind passing is not the other kind passing. The dropdown does
+    # nothing here -- the shader's categorical branch never reaches a colormap
+    # -- and offering it says the four colours are a false-colour render of a
+    # quantity, which is exactly the reading this view exists to prevent.
+    # rgb 版と同じ形だが別項目にする（一方が通ることは他方が通ることではない）。
+    # ここでドロップダウンは何もせず、しかも「4色は量の疑似カラーである」と
+    # 主張してしまう。
+    pytest.param(
+        "gamut",
+        [(
+            "js/contract.js",
+            "    colormap: false,\n"
+            "    // One plane, uploaded as one float channel",
+            "    colormap: true,\n"
+            "    // One plane, uploaded as one float channel",
+        )],
+        ("the colormap control is disabled for a categorical view",),
+        id="colormap_stays_enabled_for_a_categorical_view",
+    ),
+    # The legend put back down with the two standing legends at the foot of the
+    # sidebar, which is where it was first written.
+    #
+    # It renders there. Every other check in the scenario passes: the rows are
+    # built, the labels are the payload's, the colours are distinct. The
+    # sidebar is ``overflow-y: auto``, though, and measured in the browser at
+    # 1600x1000 with a target loaded, its foot is below the fold -- so the only
+    # statement of what the four colours mean is off screen beside the picture
+    # they explain. Same failure as ``the_range_and_timings_go_back_into_the_
+    # sidebar`` above, and worse: those two restated numbers that were on
+    # screen elsewhere, and this restates nothing.
+    # 凡例を下端の凡例2つのところへ戻す。描画も中身も正しく、他のチェックは
+    # 全て通る。ただしサイドバーは縦に溢れるので、実測（1600x1000・ターゲット
+    # 読み込み済み）ではそこは画面外であり、4色の意味を述べる唯一の場所が
+    # 絵の隣から消える。
+    pytest.param(
+        "gamut",
+        [
+            ("index.html", '      <div id="class-legend" class="group class-legend" hidden></div>\n', ""),
+            (
+                "index.html",
+                '      <div class="group legend">\n'
+                '        <span class="legend-swatch nan"></span>',
+                '      <div id="class-legend" class="group class-legend" hidden></div>\n\n'
+                '      <div class="group legend">\n'
+                '        <span class="legend-swatch nan"></span>',
+            ),
+        ],
+        ("the class legend sits above the sidebar's first divider",),
+        id="the_class_legend_goes_back_below_the_fold",
+    ),
+    # The display range recomputed from the pixels instead of read off the wire.
+    #
+    # ``views/gamut.py`` takes its range from ``LABELS`` rather than from the
+    # frame, and says why: on a frame that is entirely in gamut a data-derived
+    # range gives ``vmin == vmax == 0``, every class collapses onto one colour,
+    # and the view breaks exactly when the answer is "everything is
+    # representable". This is that decision undone from the client side, and it
+    # is the obvious thing to write if ``sharedRange`` is ever generalised.
+    #
+    # It could not be seen until the fixture stopped holding all four classes:
+    # with classes 0-3 present the data-derived range is ``{0, 3}``, the same
+    # numbers the header sends, and this mutation left the scenario 24/24 green
+    # (measured). The fill is ``(row * 2 + col) % 3`` against four labels for
+    # that reason -- see the note in the fake server.
+    #
+    # Only ``state.ranges`` moves; ``#range-info`` is written from
+    # ``payload.vmin``/``vmax`` a line later, so exactly one check sees this.
+    # レンジを画素から再計算する変異。`views/gamut.py` が LABELS から取っている
+    # 判断をクライアント側で打ち消すもので、全画素が範囲内のフレームでは
+    # `vmin == vmax == 0` になり全クラスが1色に潰れる。フィクスチャが4クラス
+    # 揃っていた間は再計算しても同じ {0, 3} になり、24/24 のまま通っていた。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "    state.ranges = [{ vmin: p.vmin, vmax: p.vmax }];",
+            "    state.ranges = [(() => { let lo = Infinity, hi = -Infinity;\n"
+            "      for (const value of p.data) {\n"
+            "        if (!Number.isFinite(value)) continue;\n"
+            "        if (value < lo) lo = value;\n"
+            "        if (value > hi) hi = value;\n"
+            "      }\n"
+            "      return { vmin: lo, vmax: hi };\n"
+            "    })()];",
+        )],
+        ("the categorical range is the class index range from the payload",),
+        id="categorical_range_recomputed_from_the_pixels",
+    ),
+    # The two strings that say the values are names rather than quantities.
+    #
+    # ``const classes = traits.labelsAreClasses`` looks like a special case with
+    # one caller, which is what makes it a candidate for a ``computeRanges``
+    # cleanup. Forced false, the sidebar reads 表示レンジ ``[0.0000, 3.0000]`` --
+    # the "1.5 is a value this view can hold" reading the comment on that
+    # ternary exists to prevent -- and the tile is captioned
+    # ``色域外 1超クリップ 両方 範囲内, 補正可  [0.0000, 3.0000]``, which is the
+    # legend restated in the one place with no room for it. Both are correct for
+    # ``rgb``, whose labels are R/G/B and whose values are a measurement.
+    #
+    # Measured before the two checks existed: this left the scenario 24/24.
+    # 値が量ではなく名前であることを述べている2つの文字列。`classes` の三項は
+    # 呼び出し1箇所の特別扱いに見えるため整理の対象になりやすい。false に倒すと
+    # レンジは `[0.0000, 3.0000]`、見出しは4つのクラス名の羅列になる（どちらも
+    # rgb では正しい）。この2件の検査が無い間は 24/24 で通っていた。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "    const classes = traits.labelsAreClasses;",
+            "    const classes = false;",
+        )],
+        (
+            "the display range is worded as a class count, not as an interval",
+            "the tile caption does not restate the legend under the tile",
+            # The same two strings, read again on the three-class view: both
+            # are built from the class count, so both are wrong there too.
+            # 同じ2つの文字列を3クラスのビューでも読んでいる。
+            "the caption and range of a three-class view count three classes",
+        ),
+        id="the_categorical_range_and_caption_lose_their_class_wording",
+    ),
+    # ``sharedRange`` flipped for ``categorical`` -- an *old* column whose answer
+    # for the new kind was unpinned.
+    #
+    # Invisible in ``state.ranges``: with one channel both branches of
+    # ``computeRanges`` build the same single-entry array, so the display range
+    # the tiles are drawn against does not change at all. What changes is the
+    # same two strings above, through the other branch: the caption becomes
+    # ``色域外  ±3.0000`` (``labels[0]`` again -- the per-channel axis) and
+    # ``#range-info`` becomes ``±3.0000``. Before the two checks existed,
+    # flipping this column failed **nothing** (measured), which is the report's
+    # §9.1 question answered from the other side.
+    # 古い列 `sharedRange` の categorical における答えを固定する。1チャンネルでは
+    # どちらの分岐でも `state.ranges` は同じになるため、レンジ自体は変わらない。
+    # 変わるのは上と同じ2つの文字列で、見出しは `labels[0]` を使った
+    # `色域外  ±3.0000` になる。検査が無い間は、この列を反転しても何も落ちなかった。
+    pytest.param(
+        "gamut",
+        [(
+            "js/contract.js",
+            "    sharedRange: true,\n"
+            "    // **`labels[c]` is class c's name, not channel c's.**",
+            "    sharedRange: false,\n"
+            "    // **`labels[c]` is class c's name, not channel c's.**",
+        )],
+        (
+            "the display range is worded as a class count, not as an interval",
+            "the tile caption does not restate the legend under the tile",
+            # The same two strings, read again on the three-class view: both
+            # are built from the class count, so both are wrong there too.
+            # 同じ2つの文字列を3クラスのビューでも読んでいる。
+            "the caption and range of a three-class view count three classes",
+        ),
+        id="categorical_takes_a_per_channel_range_instead_of_a_shared_one",
+    ),
+    # The GLSL palette typed out beside CLASS_COLORS instead of generated from
+    # it, with two classes given the same colour.
+    #
+    # The drift this catches is silent in every other check and in the browser:
+    # the legend still lists four rows in four distinct colours (it reads
+    # ``CLASS_COLORS``), the picture still shows flat regions, and the only
+    # symptom is that two of the four classes are now one region on screen while
+    # the legend insists they are two. That is the exact failure the view exists
+    # to avoid, arrived at through the palette rather than through the data.
+    # Nothing textual can see it -- ``test_web_golden.py`` reads ``shaders.js``
+    # as text and sees ``${CLASS_PALETTE_GLSL}``, not what it expands to -- so
+    # the check that catches it evaluates the module under node.
+    # GLSL のパレットを生成ではなく手書きに戻し、2クラスを同じ色にする変異。
+    # 凡例は `CLASS_COLORS` を読むので4色のまま、絵も平坦な領域のままで、
+    # 「凡例は4クラスと言うが画面には3領域しかない」という状態だけが残る。
+    # テキストとして読むゴールデンテストからは見えない（展開前の
+    # `${CLASS_PALETTE_GLSL}` しか見えない）ため、node 側で評価して突き合わせる。
+    pytest.param(
+        "gamut",
+        [(
+            "js/shaders.js",
+            "vec3 classColor(int i) {\n${CLASS_PALETTE_GLSL}\n    return u_nanColor;\n}",
+            "vec3 classColor(int i) {\n"
+            "    if (i == 0) return vec3(0.0000, 0.6196, 0.4510);\n"
+            "    if (i == 1) return vec3(0.0000, 0.4471, 0.6980);\n"
+            "    if (i == 2) return vec3(0.9020, 0.6235, 0.0000);\n"
+            "    if (i == 3) return vec3(0.9020, 0.6235, 0.0000);\n"
+            "    return u_nanColor;\n}",
+        )],
+        ("the legend's colours are the palette the shader compiles",),
+        id="the_glsl_palette_is_typed_out_beside_the_array_it_should_come_from",
+    ),
+    # The class readout's own index arithmetic, transposed.
+    #
+    # The failure this repository has now shipped twice, in the one place this
+    # task added a new one. It is here as much to keep the *fixture* honest as
+    # the code. Measured, three runs of this same mutation against three
+    # fixtures:
+    #
+    #   ``(row * 3 + col) % 4``, NaN at (2,1)   2 checks fail
+    #   ``(row + col) % 4``,     NaN at (2,1)   2 checks fail
+    #   ``(row + col) % 4``,     NaN at (2,2)   0 checks fail -- 24/24 green
+    #
+    # ``(row + col) % 4`` is symmetric under transposition, so it catches this
+    # only because the swapped index lands on the masked pixel; move the mask
+    # onto the diagonal, where it is its own transpose, and the bug becomes
+    # invisible to the whole scenario. The shipped fill is
+    # ``(row * 3 + col) % 4``, and this entry is what stops it quietly going
+    # back to something symmetric.
+    # 行と列の取り違え。このリポジトリが繰り返してきた失敗を、本タスクが増やした
+    # 唯一の添字計算に対して固定する。同じ変異を3つのフィクスチャで実測した
+    # 結果が上表で、対称な埋め方かつマスクを対角へ置くと24件すべて通る。
+    # この項目は埋め方が黙って対称なものへ戻らないようにするためでもある。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "    const v = p.data[hit.row * p.width + hit.col];",
+            "    const v = p.data[hit.col * p.width + hit.row];",
+        )],
+        (
+            "the readout names the class the pixel is",
+            "a pixel with no class reads as NaN rather than as class 0",
+        ),
+        id="the_class_readout_transposes_row_and_col",
+    ),
     # ---- the LUT plot's vertical axis, pinned back to 1.0
     #
     # The state a plot arrives in if nobody thinks about it, and the one the
@@ -1345,6 +1804,261 @@ _MUTATIONS = [
         )],
         ("the analytic gamma's exponent is shown, and it is the server's",),
         id="the_gamma_legend_hardcodes_the_usual_exponent",
+    ),
+    # ---- the two guards on the one control that writes to disk
+    #
+    # The double-submit guard, removed from the function and left only on the
+    # button's `disabled` attribute -- which is the build this looks like from
+    # the outside, and the reason the check asserts both halves. `disabled` is
+    # a statement to the user, not a guarantee: an already-dispatched click,
+    # Enter in the path box (which delegates to `.click()`), or anything else
+    # that reaches `runGenerate` does so regardless of it. On the 1080p matrix
+    # the call runs the pipeline and encodes two PNGs, so the window for a
+    # second press is seconds wide, and two overlapping writes into one
+    # directory do not merely duplicate work: the second meets the first one's
+    # files and comes back 409, reporting a conflict about a directory that is
+    # being filled by the request it conflicts with -- and the only in-GUI
+    # answer to a 409 is the override this whole design keeps deliberate.
+    #
+    # ボタンの `disabled` だけを残して関数側のガードを外す（外から見ると同じに
+    # 見える実装であり、チェックが両方を見ている理由でもある）。`disabled` は
+    # 表示であって保証ではなく、既に発行されたクリックも Enter も届く。実機では
+    # 数秒かかるため2度目を押す余地があり、同じディレクトリへの二重書き込みは
+    # 「遅い重複」では済まない——2つ目は1つ目のファイルに衝突して 409 になる。
+    pytest.param(
+        "generate",
+        [("js/main.js", "  if (generatesInFlight > 0) return;\n", "")],
+        ("a second press sends nothing",),
+        id="generate_relies_on_the_disabled_attribute_alone",
+    ),
+    # ...and the body carrying something other than what is on screen.
+    #
+    # The one field is enough to make the point and is deliberately set to a
+    # *real* id for the wrong image -- `target_dir_0` is the first entry of the
+    # same directory, which is what a client that ignored the image picker
+    # would send. The saved PNG is then a complete, correct compensation of an
+    # image the user was not looking at, filed under the index of the one they
+    # were. Nothing on screen changes, no request fails, and the file is wrong
+    # for as long as it exists.
+    #
+    # This is the entry that says the body assertion is worth its length. A
+    # check that only counted requests, or that compared against values which
+    # happened to be the parameters' declared defaults, would pass here --
+    # which is why the `compensation` fixture in the harness carries the
+    # shipped defaults and the scenario moves every field off them first.
+    #
+    # Exactly one check fails, and the one that does not is the interesting
+    # half: `confirming 上書き resends the same request` compares the resent
+    # body against the *refused* one rather than against the expectation, so a
+    # body that is consistently wrong stays consistent. That is intentional --
+    # that check is about the resend being the same request, not about the
+    # request being right, and the two properties fail independently.
+    #
+    # 本文が画面と違うものを運ぶ変異。1フィールドで足り、値は「別の画像の実在
+    # するID」にしてある（同じディレクトリの1枚目＝選択を無視した実装が送る値）。
+    # 保存されるのは「見ていない画像の、完全に正しい補償画像」であり、見ていた
+    # 画像の番号で綴じられる。画面は何も変わらず、要求も失敗しない。落ちるのは
+    # 1件で、上書き再送の検査が落ちないことには意味がある——あちらは「断られた
+    # 本文と同じものを送り直したか」を見ており、本文が正しいかは見ていない。
+    pytest.param(
+        "generate",
+        [("js/main.js", "    target_id: params.target,", '    target_id: "target_dir_0",')],
+        ("the generate call sends the settings on screen",),
+        id="the_generate_body_carries_a_fixed_target_id",
+    ),
+    # ...and the matrix, which the stale-screen guard does not cover.
+    #
+    # ``state.matrixId`` moves when ``POST /session/matrix`` returns; the
+    # transfer that draws it takes seconds on a 1.56 GB matrix. In that window
+    # every control still says what it said, so the guard passes and a press
+    # goes through -- and a body built from ``state.matrixId`` compensates the
+    # picture on screen with a matrix that has never been drawn. This is the one
+    # field of the body whose source cannot be checked at rest: with the load
+    # settled the two ids are equal and the mutation is invisible.
+    # 行列のIDにも同じ性質がある。`POST /session/matrix` はすぐ返るが描画までは
+    # 数秒あり、その間コントロールは変わらないのでガードは通す。
+    pytest.param(
+        "generate",
+        [("js/main.js", "    matrix_id: state.shownMatrixId,", "    matrix_id: state.matrixId,")],
+        ("a press while a matrix is still loading",),
+        id="the_generate_body_carries_the_newest_matrix_not_the_shown_one",
+    ),
+    # ---- the three guards on the destructive confirmation
+    #
+    # The line beside 生成, left unwritten when the refusal stops applying.
+    #
+    # This is the shape the defect shipped in: an ``if (reason)`` with no
+    # ``else``. It runs once before the first render -- when the reason is
+    # "nothing is loaded", not "this view" -- and then never clears, so
+    # ``compensation`` carried 「このビューでは生成できません」 beside an
+    # *enabled* 生成 button, in every state including the screenshot captioned
+    # as the settings about to be sent. The sentence is the only textual signal
+    # that ``gamut`` genuinely cannot generate; one that appears everywhere
+    # signals nothing anywhere, and a permanently false statement stands next to
+    # the one control on this page that writes to the user's disk.
+    # `else` の無い `if (reason)`。初回描画では理由が「未読み込み」なのにビューの
+    # 文が出て、以後消えない——生成できるビューでも、有効なボタンの脇に出続ける。
+    pytest.param(
+        "generate",
+        [(
+            "js/main.js",
+            '  $("gen-info").textContent = reason ? reason.short : generateOutcome;',
+            '  if (reason) $("gen-info").textContent = reason.short;',
+        )],
+        (
+            "the line beside 生成 names the obstacle",
+            # The success check makes the same round trip through `gamut`, so
+            # the missing `else` strands the refusal there too. Two checks watch
+            # this one branch from its two sides, which is the point of both.
+            # 成功側のチェックも `gamut` を往復するので、同じ `else` の欠落で
+            # 落ちる。1つの枝を両側から見ている。
+            "a successful save is what the line beside 生成 says",
+        ),
+        id="the_reason_line_beside_generate_is_never_cleared",
+    ),
+    # The disabled button, left looking exactly like a live one.
+    #
+    # ``button`` sets a background, ``cursor: pointer`` and a hover brightening,
+    # and none of them stop applying when it is disabled. A disabled button also
+    # dispatches no click, so the view-naming refusal ``runGenerate`` prints is
+    # unreachable from the page: pressing 生成 under ``gamut`` produced full
+    # accent blue, a pointer cursor, a hover highlight -- and silence. The
+    # button's appearance is the whole pre-press answer to "why can I not save
+    # this view", which is the half of the ``gamut`` decision that has to be
+    # visible rather than merely true of the DOM.
+    # 無効なボタンが生きているボタンと同じ見た目になる変異。クリックは配送
+    # されないので、押した人には何の答えも返らない。
+    pytest.param(
+        "generate",
+        [(
+            "style.css",
+            "input:disabled, select:disabled, button:disabled { opacity: 0.45; cursor: not-allowed; }",
+            "input:disabled, select:disabled { opacity: 0.45; cursor: not-allowed; }",
+        )],
+        ("a disabled button looks disabled",),
+        id="a_disabled_button_is_styled_like_a_live_one",
+    ),
+    # The confirmation, unbound from the directory it was given for.
+    #
+    # 上書きして生成 is the only control here that destroys data, and what makes
+    # it safe is that the sentence being agreed to names a place. Without the
+    # comparison at press time, a value set **without an event** -- autofill, an
+    # extension, a driver, a refactor that drops a listener -- spends an
+    # agreement about ``data/out_A`` on whatever the box says when the button is
+    # finally pressed, and in this repository that can be
+    # ``data/full_recalibration_20260730_iso400``: a real 99 GB tree that cost
+    # hardware, a subject and a day and cannot be regenerated.
+    # 確認を安全にしているのは「同意する文が場所を名指ししていること」である。
+    # イベントを伴わない設定（自動入力・拡張機能・自動操作）でも、Aについての
+    # 同意がBに使われてはならない。
+    pytest.param(
+        "generate",
+        [(
+            "js/main.js",
+            '    if (overwriteOfferedFor === null\n'
+            '      || overwriteOfferedFor !== $("gen-output-dir").value.trim()) {',
+            "    if (false) {",
+        )],
+        ("上書き agreed for one directory cannot be spent on another",),
+        id="the_overwrite_confirmation_is_not_bound_to_a_directory",
+    ),
+    # ...and the same guard's other half: the offer left standing over an edit.
+    #
+    # Either listener alone covers the other in this scenario, so the entry
+    # removes both -- but each was measured on its own as well and each fails
+    # this same check, which is the reason both are wired rather than whichever
+    # one the stub happens to fire.
+    # 片方だけでもこのシナリオは覆えるので両方外す（個別にも測っており、
+    # どちらを外してもこのチェックが落ちる）。
+    pytest.param(
+        "generate",
+        [(
+            "js/main.js",
+            '  $("gen-output-dir").addEventListener("input", () => { hideOverwriteOffer(); });\n'
+            '  $("gen-output-dir").addEventListener("change", () => { hideOverwriteOffer(); });\n',
+            "",
+        )],
+        ("editing the output directory retires the 上書き offer",),
+        id="editing_the_output_directory_leaves_the_offer_standing",
+    ),
+    # The confirmation turned into a setting.
+    #
+    # A remembered ``overwrite`` is the difference between answering a question
+    # and turning something on: every later press writes over whatever the box
+    # names, with no 409 and nothing to answer. Three checks fail and the order
+    # is the point -- the first names the constraint, and the other two are the
+    # 409 path disappearing from the rest of the scenario, which is exactly what
+    # made this regression previously surface under the name of the ``gamut``
+    # refusal and nowhere else.
+    # 上書きを記憶する実装は「問いに答えること」を「設定を入れること」に変える。
+    # 落ちる3件のうち先頭が制約を名指しし、残り2件は 409 の経路が以降のシナリオ
+    # から消えたことの現れである。
+    pytest.param(
+        "generate",
+        [
+            (
+                "js/main.js",
+                "let overwriteOfferedFor = null;",
+                "let overwriteOfferedFor = null;\nlet stickyOverwrite = false;",
+            ),
+            (
+                "js/main.js",
+                "    overwrite: !!overwrite,",
+                "    overwrite: (stickyOverwrite = stickyOverwrite || !!overwrite),",
+            ),
+        ],
+        (
+            "the press after a confirmed 上書き starts from overwrite: false",
+            "a view that declares no linearizer cannot generate",
+            "the line beside 生成 names the obstacle",
+        ),
+        id="a_confirmed_overwrite_is_remembered_for_every_later_press",
+    ),
+    # The other half of the line beside 生成: what it says after a save.
+    #
+    # The refusal half was fixed by making `refreshGenerateButton` write on both
+    # branches; what `generateOutcome` *holds* after a success went unasserted in
+    # the same edit, which is where the second instance of a two-branch defect
+    # hides -- the fix reads as coverage. Removing the recording produces the
+    # exact inverse of the defect it was written for: three absolute paths
+    # appear under a line still reading 未生成, because the `finally`'s
+    # `refreshGenerateButton()` restores the stale outcome over 「生成中…」.
+    # 断りの側を直した編集で、成功の側は誰も読んでいなかった。記録を外すと、
+    # 3つの絶対パスの脇に 未生成 と出る（直した欠陥のちょうど裏返し）。
+    pytest.param(
+        "generate",
+        [(
+            "js/main.js",
+            "    setGenerateOutcome(`${(result.files || []).length} 件を保存`);\n",
+            "",
+        )],
+        ("a successful save is what the line beside 生成 says",),
+        id="a_successful_save_is_not_recorded_as_the_outcome",
+    ),
+    # ---- the class legend, driven off the palette instead of the payload
+    #
+    # `renderClassLegend` loops `payload.labels.length`; the swatches come from
+    # `CLASS_COLORS`. Looping the palette instead is invisible on `gamut`, which
+    # has four classes against a four-entry palette -- the fixture was symmetric
+    # in exactly this dimension until `gamut_lite` (three classes) was added.
+    #
+    # `routers/view.py` admits any categorical view at `len(labels) >= 2` and
+    # names the consumer that will break the four-class assumption: "the second
+    # categorical view". Against a three-class view this build draws a fourth
+    # row whose label is the string `undefined`, beside a colour no pixel in the
+    # picture carries -- in the one place the class-to-colour mapping is stated
+    # in words.
+    # 凡例をパレット側から作る変異。`gamut`（4クラス）だけでは4===4で見えない。
+    # 3クラスのビューでは「undefined」という行が、絵に無い色の隣に並ぶ。
+    pytest.param(
+        "gamut",
+        [(
+            "js/main.js",
+            "  for (let i = 0; i < payload.labels.length; i++) {",
+            "  for (let i = 0; i < CLASS_COLORS.length; i++) {",
+        )],
+        ("the legend's row count is the payload's class count",),
+        id="the_class_legend_is_drawn_from_the_palette_not_the_payload",
     ),
 ]
 

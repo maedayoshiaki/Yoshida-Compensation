@@ -80,6 +80,7 @@ from yoshidacomp.compensation.projection_region import (
 # 削除した。必要な場合は yoshidacomp.compensation.pipeline から直接
 # import すること。
 from yoshidacomp.compensation.pipeline import (
+    LINEARIZER_FILENAME_PREFIXES,
     SUPPORTED_TARGET_IMAGE_SUFFIXES,
     TargetImageSpace,
     capture_to_srgb_uint8,
@@ -729,7 +730,15 @@ def main(argv: list[str] | None = None):
     compensation_output_dir = Path(paths.compensation_image_dir)
     inv_gamma_output_dir = Path(paths.inv_gamma_comp_dir)
     _clear_generated_pngs(compensation_output_dir, "compensation_image_*.png")
-    _clear_generated_pngs(inv_gamma_output_dir, "inv_gamma_comp_image_*.png")
+    # Both the glob and the write below name the file through the core's
+    # map: a literal here would be a third spelling of a name two other
+    # writers already agree on, and the clear/write pair could drift apart
+    # from each other as well.
+    # 消す側と書く側の両方を辞書経由にする（literal は3つ目の綴りになる）。
+    _inv_gamma_prefix = LINEARIZER_FILENAME_PREFIXES["gamma"]
+    _clear_generated_pngs(
+        inv_gamma_output_dir, f"{_inv_gamma_prefix}_comp_image_*.png"
+    )
     _reset_debug_output_dir(WARP_DEBUG_DIR)
     _write_warp_debug_readme(WARP_DEBUG_DIR)
     _write_warp_debug_session(
@@ -930,7 +939,10 @@ def main(argv: list[str] | None = None):
             bgr_comp,
         )
         cv2.imwrite(
-            str(inv_gamma_output_dir / f"inv_gamma_comp_image_{idx:02d}.png"),
+            str(
+                inv_gamma_output_dir
+                / f"{LINEARIZER_FILENAME_PREFIXES['gamma']}_comp_image_{idx:02d}.png"
+            ),
             bgr_inv_gamma_comp,
         )
 

@@ -190,15 +190,120 @@ canvas.lut-curve {
    読み込みボタンの隣に出す「読み込んだもの」の行。250pxの段では、これが
    長くなるとボタンのほうが2行に折れていた。譲るのは行のほうにする。 */
 .group.inline > button { flex: none; white-space: nowrap; }
-#target-info, #lut-info {
+/* The line beside each of the three sidebar buttons that report what they did
+   (読み込んだターゲット / 読み込んだLUT / 生成の結果). One rule rather than
+   three copies of the same four declarations: they are the same element in
+   three places, and the copies drifted the moment one was written out again.
+   ボタンの脇に出す「何をしたか」の行。同じ4宣言を写すのではなく1つの規則に
+   まとめる。 */
+#target-info, #lut-info, #gen-info {
   min-width: 0; flex: 1 1 auto; text-align: right;
   font-size: 10.5px; line-height: 1.35; overflow-wrap: anywhere;
 }
+
+/* The generated files' paths. Absolute server-side paths on Windows are long
+   and have no spaces to break at, so they wrap inside the word rather than
+   widening the 250px column or being clipped to the first directory -- a path
+   the user cannot read all of is a path they cannot go and look at, which is
+   the only reason this line exists.
+   生成されたファイルの絶対パス。Windowsの絶対パスは長く、折り返せる空白が
+   無いので語中で折り返す。最後まで読めないパスは「見に行けないパス」であり、
+   この行の存在理由そのものが失われる。 */
+.gen-files {
+  font-size: 10px; line-height: 1.45; color: var(--muted);
+  overflow-wrap: anywhere; margin-top: 4px;
+}
+.gen-files > div { margin-bottom: 2px; }
+
+/* The 上書き offer, shown only after a 409. Framed in the error colour and
+   given its own box because it is a question, not a status line: the answer
+   writes over files that are already on disk, and this endpoint's whole safety
+   argument is that answering it stays deliberate.
+   409 のあとにだけ出す上書きの確認。ステータス行ではなく問いなので、
+   エラー色の枠で独立した箱にする。 */
+.gen-overwrite {
+  margin-top: 6px; padding: 7px 8px; border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--error) 45%, var(--border));
+  background: color-mix(in srgb, var(--error) 8%, transparent);
+}
+.gen-overwrite > div {
+  font-size: 10.5px; line-height: 1.45; margin-bottom: 6px;
+  overflow-wrap: anywhere;
+}
+/* Not `.primary`. The blue button on this page means "the ordinary next
+   action" (読み込み, 適用, 生成), and the ordinary next action here is to
+   choose another directory -- which is the box above, not this. A destructive
+   confirmation that looks like the default action is how a guard becomes a
+   step people click through.
+   `.primary` にしない。このページの青は「普通の次の一手」であり、ここでの
+   普通の次の一手は別のディレクトリを選ぶこと（＝上の入力欄）である。
+   破壊的な確認を既定の見た目にすると、ガードは「通り過ぎる段」になる。 */
+.gen-overwrite > button { border-color: var(--error); color: var(--error); }
+.gen-overwrite > button:hover { border-color: var(--error); filter: brightness(1.1); }
 
 .legend { display: flex; align-items: center; gap: 7px; font-size: 11px; }
 .legend-swatch { width: 34px; height: 12px; border-radius: 3px; border: 1px solid var(--border); flex-shrink: 0; }
 .legend-swatch.nan { background: var(--nan); }
 .legend-swatch.grad { background: linear-gradient(to right, #3b4cbf, #fff, #b5051f); }
+
+/* A disabled control has to look disabled.
+
+   `disabled` alone removes the accent colour from a range thumb and a
+   checkbox, which is a change of a few pixels; the γ number box is visually
+   identical to its live state, and the labels 露出 / γ / カラーマップ stay at
+   full brightness above controls that no longer do anything. On a
+   `categorical` view all four are off at once (see setToneControlsEnabled in
+   js/main.js), so this is not an edge case -- it is what the whole view looks
+   like.
+
+   The label is dimmed with the control rather than separately: `:has()` on the
+   group means the two cannot disagree about whether the control is live, which
+   a hand-toggled class would eventually do. The ディザ checkbox is inside its
+   own label, hence the third selector.
+
+   **Buttons included, and that is not decoration.** `button` above sets its own
+   background, `cursor: pointer` and a hover, and none of them stop applying
+   when the button is disabled: 生成 under `gamut` was full accent blue, showed
+   a pointer cursor and *brightened under the cursor* while dispatching nothing
+   at all. A disabled button dispatches no click, so the sentence `runGenerate`
+   prints when it is called anyway is unreachable from the page -- pressing it
+   is silence. That makes the button's own appearance the entire pre-press
+   answer to "why can I not save this view", which is the half of the `gamut`
+   decision that has to be visible rather than merely true of the DOM. The
+   hover is neutralised explicitly (later in the sheet, same specificity as
+   `button.primary:hover`, so it wins) because "it lights up under the cursor"
+   is the strongest signal a control has that it is live.
+
+   無効なコントロールは無効に見えること。`disabled` だけではγの数値入力は
+   見た目が変わらず、見出しも明るいままになる。categorical では4つとも同時に
+   無効になるので、これは例外的な状態ではなくこのビューの見た目そのものである。
+   見出しは `:has()` でコントロールに追従させる（別途クラスを付ける方式だと
+   いずれ食い違う）。ボタンも同じ扱いにする——無効なボタンはクリックを配送
+   しないため「押しても何も起きない」だけになり、押す前の見た目が唯一の答えに
+   なる。ホバーの明滅は「生きている」ことの最も強い合図なので明示的に消す。 */
+input:disabled, select:disabled, button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled:hover { border-color: var(--border); filter: none; }
+.group:has(> input:disabled) > .lbl,
+.group:has(> select:disabled) > .lbl,
+label:has(> input:disabled) { opacity: 0.45; }
+
+/* The class legend for a `categorical` view.
+
+   Note what is *not* here: any colour. Each row's swatch gets its background
+   inline from js/main.js, out of the same CLASS_COLORS array the fragment
+   shader's palette is generated from -- the same rule as --nan above, and for
+   the same reason. A palette in this file would look live and be a copy.
+
+   The rows are their own block rather than four `.group.legend` siblings so
+   they sit together with a tighter rhythm than the two standing legends
+   beneath them, which are unrelated statements rather than one list.
+
+   クラス凡例。色はここに書かない（--nan と同じ規則で、js/main.js が
+   CLASS_COLORS から実行時に入れる）。行同士は1つの一覧なので、下の独立した
+   凡例2つより詰めて並べる。 */
+.class-legend { display: flex; flex-direction: column; gap: 4px; }
+.class-legend .class-row { gap: 7px; }
+.class-legend .legend-swatch { width: 18px; height: 12px; }
 
 /* Hover readout: one row of panels along the bottom.
    下部の読み取り欄。板を横に並べる。 */

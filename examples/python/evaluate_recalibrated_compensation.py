@@ -17,6 +17,9 @@ if str(_REPO_ROOT) not in sys.path:
 
 from examples.python import evaluate_compensation_conditions as evaluation
 from examples.python import sample
+# The writers' own map -- see the note in
+# ``evaluate_compensation_conditions.py`` for why it is read, not restated.
+from yoshidacomp.compensation.pipeline import LINEARIZER_FILENAME_PREFIXES
 from yoshidacomp.config import reload_config
 
 
@@ -68,7 +71,8 @@ def main() -> None:
                 target, (proj.width, proj.height), active_region
             ),
             "comp_gamma": evaluation._load_rgb(
-                args.gamma_comp_dir / f"inv_gamma_comp_image_{index:02d}.png"
+                args.gamma_comp_dir
+                / f"{LINEARIZER_FILENAME_PREFIXES['gamma']}_comp_image_{index:02d}.png"
             ),
         }
         for condition in _CONDITIONS:

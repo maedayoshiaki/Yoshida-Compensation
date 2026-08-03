@@ -202,6 +202,14 @@ export class GLView {
   // u_mode, which is another entry in the same row so the two cannot disagree.
   // RGB32F is texture-only in WebGL2 (not colour-renderable), which is all this
   // needs -- and it is never filtered, see the NEAREST note below.
+  // "categorical" takes the same path as a one-channel scalar view -- R32F,
+  // no pack, no copy -- and differs only in the u_mode it carries, because
+  // what is in the texture is a class index rather than a measurement. That
+  // this file needs no branch for it is the trait table working: the upload is
+  // the same upload, and everything that is not is stated in the same row.
+  // "categorical" は1チャンネルの scalar と同じ経路（R32F・詰め替えなし・
+  // 複製なし）を通り、違うのは u_mode だけである。ここに分岐が要らないのは
+  // 表が効いている証拠であり、違う部分はすべて同じ行に書いてある。
   //
   // An unknown `kind` throws here rather than being normalised to scalar. The
   // old `img.mode === "rgb" ? "rgb" : "scalar"` was one of the five places that

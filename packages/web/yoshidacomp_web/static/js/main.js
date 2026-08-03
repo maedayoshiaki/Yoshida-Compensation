@@ -31,10 +31,16 @@
 
 import {
   loadMatrix, listViews, fetchView, probeMatrix,
-  loadTarget, loadLut, fetchLutCurve,
+  loadTarget, loadLut, fetchLutCurve, generateProjectionImages,
 } from "./api.js";
 import { GLView, NAN_COLOR, nanColorCss } from "./glview.js";
 import { LAYOUT_PLANAR, requireSupportedKind, traitsFor } from "./contract.js";
+// The class palette is imported from the shader module, not restated here.
+// The legend's swatches are `classColorCss(i)` of the same array the fragment
+// shader's classColor() is generated from, so a palette edit moves both or
+// neither -- see the note on CLASS_COLORS in shaders.js.
+// パレットはシェーダのモジュールから読む（ここに書き写さない）。
+import { CLASS_COLORS, classColorCss } from "./shaders.js";
 import { drawLutCurve } from "./plot.js";
 
 const $ = (id) => document.getElementById(id);
@@ -130,6 +136,58 @@ const state = {
   specs: [],        // every ViewSpec from /api/views
   spec: null,       // the active one
   payload: null,    // { data, width, height, channels, layout, vmin, vmax, labels }
+  // The KIND_TRAITS row `state.payload` was rendered through.
+  //
+  // Set beside the payload, because the two are the same fact: the traits are
+  // read off the payload's own `kind`, and a copy that could describe a
+  // different kind from the pixels on screen would put the class-index readout
+  // over a coefficient tile. Kept rather than re-derived at each reader for
+  // the same reason `shownMatrixId` is kept -- one place decides, everyone
+  // else asks. The hover readout is the reader that needs it: it fires between
+  // renders, when `state.spec` may already name a view whose transfer has not
+  // landed.
+  // 描かれているペイロードの特性行。ペイロードと同時に確定する（同じ事実で
+  // あり、食い違うとクラス番号の読み取り欄が係数タイルの上に出る）。ホバーは
+  // レンダの合間に起きるので `state.spec` からは導けない。
+  traits: null,
+  // The view, and the server-side parameters, `state.payload` was rendered
+  // from. Set beside it, for the third time in this object and for the third
+  // version of the same reason -- see `shownMatrixId` and `traits`.
+  //
+  // These two exist for 生成, which is the first control on this page whose
+  // output is a file rather than a picture, and therefore the first one for
+  // which "which settings does it use?" has a wrong answer that survives being
+  // looked at. There are three candidates and only one of them is right:
+  //
+  //   `serverParams()`   what the boxes hold *now*. Ahead of the screen the
+  //                      moment anything is staged and not yet applied.
+  //   `state.sentParams` what the newest request carried. Describes a request
+  //                      that may have been refused (a 400 from a view leaves
+  //                      the previous picture up), or one still in flight.
+  //   these              what produced the pixels currently on screen.
+  //
+  // Only the third can be saved to disk without the file and the picture
+  // coming apart, and the difference between it and the second is not
+  // hypothetical here: `compensation` refuses a target id that is not loaded,
+  // so "the fetch failed and the old picture is still up" is a state a user
+  // reaches by making an ordinary typo.
+  //
+  // `shownSpec` is the spec object itself, not its key: `state.spec` changes
+  // when the selector changes, which is before the new view's transfer has
+  // landed, so identity is what tells "the picture is from this view" from
+  // "this view is being fetched".
+  //
+  // 画面に出ている画素が、どのビューの・どのサーバ側パラメータで描かれたか。
+  // `shownMatrixId` や `traits` と同じ理由で、ペイロードと同時に確定する。
+  // 生成はこのページで初めて「絵ではなくファイル」を出すので、「どの設定を
+  // 使うか」の誤答が見ても分からない形で残る。候補は3つあり、正しいのは
+  // 「今画面に出ている画素を作った設定」だけである（入力欄の現在値は未適用の
+  // 分だけ先へ行っており、最後に送った値は拒否された要求のものかもしれない
+  // ——`compensation` は未読み込みのターゲットIDを断るので、打ち間違い1つで
+  // 到達する状態である）。`shownSpec` はキーではなくオブジェクトそのもの
+  // （セレクタは転送の前に切り替わるため、同一性でしか区別できない）。
+  shownSpec: null,
+  shownParams: null,
   ranges: null,     // [{ vmin, vmax }] per *tile* (per channel except for rgb)
   layout: DEFAULT_LAYOUT,
   pinned: null,     // { col, row } while the readout is frozen
@@ -379,17 +437,28 @@ function fallbackAxes(labels, channels) {
 // まさにその1行3列になってしまう（しかも黙って描けてしまう）。ペイロードに
 // 絵が何枚あるかを知っているのは kind だけなので、それで決める。
 function layoutFor(payload, current, traits) {
-  // `channels === 3` as well as the trait: an rgb view is one colour per pixel,
-  // so three channels is what "rgb" means here. requireRgbHasThreeChannels has
-  // already refused anything else by the time this runs -- this condition is
-  // defence in depth, not the active guard -- but a single-tile layout is only
-  // correct for a payload the rgb upload path can actually pack, and the two
-  // must not be able to disagree.
-  // 特性だけでなく channels も見る。rgb は1画素1色＝3チャンネルのこと。
-  // 実際に弾いているのは requireRgbHasThreeChannels 側で、ここは多重防御だが、
-  // 1枚タイルが正しいのは rgb 経路が詰められるペイロードに限られる。
-  if (traits.singleTile && payload.channels === 3) {
-    return { rows: [""], cols: ["RGB"], corner: "" };
+  // The channel count as well as the trait: a single-tile kind is defined by
+  // how many channels that one tile consumes -- three for `rgb` (one colour
+  // per pixel), one for `categorical` (one class index per pixel) -- and a
+  // single-tile layout is only correct for a payload the matching upload path
+  // can actually consume. Both numbers come from the same trait row as
+  // `packed` and `texture`, so "one tile", "how it is packed" and "how it is
+  // uploaded" cannot come apart. The active guards are elsewhere
+  // (requireRgbHasThreeChannels here, routers/view.py's categorical clause on
+  // the server); this is defence in depth.
+  //
+  // The caption is a trait too, and that is the interesting half. `labels` is
+  // ["R","G","B"] for `surface` and the four *class* names for `gamut`, so the
+  // label-derived fallback would head an rgb tile "R" and a categorical one
+  // "範囲内" -- the name of class 0, written across a picture of all four
+  // classes. It renders; it is simply a lie in 3-point type.
+  //
+  // 特性だけでなくチャンネル数も見る。1枚タイルの kind は「その1枚が何
+  // チャンネルを食うか」で定義される（rgb は3、categorical は1）。見出しも
+  // 特性から取る: ラベル由来にすると rgb は "R"、categorical はクラス0の名前
+  // が4クラスの絵の上に載る（描けてしまうが嘘である）。
+  if (traits.singleTile && payload.channels === traits.tileChannels) {
+    return { rows: [""], cols: [traits.tileCaption], corner: "" };
   }
   // Keeping the current axes is only sound when they *are* axes -- that is,
   // when the layout on screen came from a matrix-shaped set of labels. The
@@ -655,11 +724,69 @@ function showProbe(hit) {
   requestMatrixProbe(hit);
 }
 
+// One row: a caption and a number, in the classes the stylesheet colours.
+// Shared by both readings below so "what a masked value looks like here" is
+// decided once.
+// 1行ぶんの生成。マスクされた値の見た目を決める場所を1つにするため共有する。
+function appendViewValue(host, label, text, masked) {
+  const item = document.createElement("div");
+  item.className = "view-value";
+  const labelEl = document.createElement("span");
+  labelEl.className = "vv-label";
+  labelEl.textContent = label;
+  const value = document.createElement("span");
+  value.className = masked ? "vv-num nan" : "vv-num";
+  value.textContent = text;
+  item.appendChild(labelEl);
+  item.appendChild(value);
+  host.appendChild(item);
+}
+
 function showViewValues(hit) {
   const host = $("view-values");
   host.textContent = "";
   const p = state.payload;
   if (!p) return;
+  const traits = state.traits;
+
+  // A categorical payload is read down a different axis, and this is the site
+  // the brief for this task warns about by name.
+  //
+  // Every other kind has one label per channel, so the loop below prints
+  // `labels[c]` beside channel c's value. Here there is one channel and four
+  // labels, and they name the *classes*: `labels[0]` is the name of class 0,
+  // so the per-channel reading captions every pixel in the frame "範囲内"
+  // regardless of which class it actually is -- and it does so beside the
+  // correct number, in the correct type, under the correct heading. The class
+  // name is `labels[value]`, which is the only reading that changes as the
+  // pointer moves.
+  //
+  // The index is rounded rather than truncated, matching the shader's
+  // `int(floor(v + 0.5))`: the readout and the picture must agree about which
+  // class a pixel is, and two different roundings is a way for them not to.
+  //
+  // 他の kind はチャンネル1つにラベル1つなので `labels[c]` を出すが、
+  // categorical はチャンネル1・ラベル4で、しかもラベルはクラスの名前である。
+  // チャンネルで引くと全画素がクラス0の名前を名乗る（数値も見出しも正しい
+  // まま、名前だけが常に同じになる）。引くべきは `labels[値]` である。
+  // 丸め方はシェーダと揃える（読み取りと絵が別のクラスを指さないため）。
+  if (traits && traits.labelsAreClasses) {
+    // No layout branch: `tileChannels` is 1, and a one-channel body is the
+    // same run of pixels under both layouts (C=1 makes the planar stride and
+    // the interleaved stride the same walk). Writing one anyway would be a
+    // branch neither side of which could ever differ from the other.
+    // 1チャンネルなので planar とインタリーブで並びは同一であり、分岐しない。
+    const v = p.data[hit.row * p.width + hit.col];
+    if (!Number.isFinite(v)) {
+      appendViewValue(host, "クラス", "NaN", true);
+      return;
+    }
+    const index = Math.round(v);
+    const name = p.labels[index];
+    appendViewValue(host, "クラス", `${index} ${name ?? "（未定義のクラス）"}`, !name);
+    return;
+  }
+
   // Planar (C, H, W) puts the channel index outermost; interleaved (H, W, C)
   // puts it innermost. Getting this backwards misreports every hovered value
   // while the tiles themselves still look right -- nothing would flag it.
@@ -672,17 +799,95 @@ function showViewValues(hit) {
     const v = planar
       ? p.data[c * stride + offset]
       : p.data[offset * p.channels + c];
-    const item = document.createElement("div");
-    item.className = "view-value";
-    const label = document.createElement("span");
-    label.className = "vv-label";
-    label.textContent = String(p.labels[c] ?? c);
-    const value = document.createElement("span");
-    value.className = Number.isFinite(v) ? "vv-num" : "vv-num nan";
-    value.textContent = fmt(v);
-    item.appendChild(label);
-    item.appendChild(value);
-    host.appendChild(item);
+    appendViewValue(host, String(p.labels[c] ?? c), fmt(v), !Number.isFinite(v));
+  }
+}
+
+// The class legend: one row per class, in class order, from `payload.labels`.
+//
+// **The labels come from the payload and the colours from CLASS_COLORS**, and
+// neither is written down twice. The obvious build -- swatches in JavaScript,
+// Japanese class names in index.html -- is two sources of truth for one
+// mapping, and they drift in silence: views/gamut.py's LABELS are the wire
+// contract (their *order* is the class index, per that file), so a server-side
+// relabelling or a reordering leaves an HTML legend confidently explaining the
+// previous meaning of the same four colours. Nothing fails, nothing looks
+// wrong, and the picture now means something else.
+//
+// Hidden entirely for a kind whose labels are channels: `surface`'s three
+// labels are not classes and a legend of them would be three colour swatches
+// for a picture that has no classes in it.
+//
+// 凡例はラベルを `payload.labels` から、色を CLASS_COLORS から取る。どちらも
+// 二重に書かない。色をJSに・和文ラベルをHTMLに書くと真実源が2つになり、
+// サーバ側でラベルを変えたり並べ替えたりしても画面は前の意味を説明し続ける
+// （何も失敗せず、絵の意味だけが変わる）。ラベルがチャンネル名である kind
+// では丸ごと隠す。
+function renderClassLegend(payload, traits) {
+  const host = $("class-legend");
+  host.textContent = "";
+  host.hidden = !traits.labelsAreClasses;
+  if (!traits.labelsAreClasses) return;
+  for (let i = 0; i < payload.labels.length; i++) {
+    const row = document.createElement("div");
+    row.className = "legend class-row";
+    const swatch = document.createElement("span");
+    swatch.className = "legend-swatch";
+    // Derived from the shader's own palette, quantised the way the framebuffer
+    // quantises it -- see classColorCss in shaders.js. Set inline rather than
+    // in style.css for the same reason `--nan` is injected at runtime: a
+    // colour in the sheet would look live and be a copy.
+    // シェーダのパレットから導出してインラインで置く（シートに書くと写しになる）。
+    swatch.style.background = classColorCss(i);
+    const text = document.createElement("span");
+    text.className = "muted";
+    text.textContent = payload.labels[i];
+    row.appendChild(swatch);
+    row.appendChild(text);
+    host.appendChild(row);
+  }
+}
+
+// More classes than the palette has colours has to be refused, not wrapped.
+//
+// Reached only if a view is registered with more labels than CLASS_COLORS has
+// entries. Two classes sharing a colour is the failure this whole view exists
+// to avoid -- the picture still looks like a working classification, and two
+// of its regions have silently become one. The shader would paint the extra
+// indices in the mask colour, which is at least not a class, but the legend
+// would still list them with `classColorCss` returning null; say so instead.
+// パレットの色数を超えるクラス数は、回り込ませず断る。2つのクラスが同じ色に
+// なると、絵は正しく見えたまま2つの領域が1つに融ける。
+//
+// No fixture exercises this: no registered view declares more than four
+// classes, and inventing one to exercise a guard is a fixture that exists for
+// the test rather than for the viewer. Verified by hand instead -- with the
+// palette shrunk to three colours it throws this message, leaves the previous
+// view on screen and does not wedge the page.
+//
+// Its *call site* has a second effect worth knowing, because it is not local:
+// `traits.labelsAreClasses` there is the first read of `traits` in `reload()`,
+// so it is what turns an unknown kind into a throw before `state.payload` is
+// republished. `unsupported_kind_renders_as_scalar` in
+// tests/test_web_frontend_js.py expects exactly one failing check *because of
+// that ordering*; remove this call and that entry starts failing two and trips
+// the "broke checks nobody expected" assertion, pointing at an unrelated line.
+// Detected either way -- just misdirected.
+//
+// この関数専用のフィクスチャは無い（4クラスを超えるビューは登録されておらず、
+// ガードのためだけのビューを作るのは本末転倒）。手で確認済み: パレットを3色に
+// 縮めると上記の文言で失敗し、直前のビューが画面に残り、操作不能にはならない。
+// 呼び出し側には局所的でない副作用がある——ここが `reload()` における `traits`
+// の最初の読み出しなので、未知の kind が `state.payload` の更新前に例外になる
+// 理由でもある。この呼び出しを消すと、無関係な変異項目の落ちるチェック数が
+// 変わる（検出はされるが指し示す先がずれる）。
+function requireClassesFitThePalette(labels, where) {
+  if (labels.length > CLASS_COLORS.length) {
+    throw new Error(
+      `${where} は ${labels.length} クラスありますが、離散パレットの色は ` +
+      `${CLASS_COLORS.length} 色しかありません` +
+      "（色が足りないまま描くと、別のクラスが同じ色になります）。"
+    );
   }
 }
 
@@ -1161,12 +1366,466 @@ function wireLoaders() {
   window.addEventListener("resize", () => { redrawLutCurve(); });
 }
 
+// ------------------------------------------------- generating the images
+//
+// The 生成 button, and the one rule the rest of this section exists to keep:
+// **what is written to disk is what is on screen.**
+//
+// Every other control on this page produces a picture, and a picture that is
+// wrong is wrong until the next render. This one produces a file. A PNG
+// written from a stale target id, a defaulted linearizer or a decode mode the
+// user staged and never applied stays on the disk, under a name saying it is
+// the image they were looking at, and nothing afterwards contradicts it. That
+// is the class of divergence between the displayed and the reported that this
+// branch has spent five plans removing; here it is the first time the
+// consequence outlives the session.
+//
+// So the request is built from `state.shownParams` -- the parameters the
+// pixels currently on screen were rendered with -- and from nothing else. The
+// two rejected candidates and why are written out on that field.
+//
+// **Which settings under `gamut`.** That view declares no `linearizer`, and
+// `views/gamut.py` argues at length that it must not: whether a pixel is out
+// of gamut is a property of the *unclipped linear* compensation, decided
+// before any linearization happens, so a linearizer control beside that
+// picture would suggest that changing the LUT changes which pixels are out of
+// gamut, which is false. There is therefore no on-screen answer to what a
+// saved projector image should be linearized with, and both ways of inventing
+// one reintroduce exactly the failure above:
+//
+//   - carrying `compensation`'s last-used value would send a setting that is
+//     nowhere on screen, chosen in a view the user may have left ten minutes
+//     ago;
+//   - giving the generate group its own linearizer would put a second control
+//     beside the one the picture is drawn from, free to disagree with it --
+//     and under `compensation` the two would be visibly different answers to
+//     one question.
+//
+// So generating is refused for a view that does not declare what the save
+// needs, the button says so before it is pressed, and the refusal names the
+// view. Switching to 補償画像 puts the choice back on screen, where saving it
+// is the same act as looking at it. The parameters the view *does* declare are
+// used as declared; the ones it does not are omitted, so the server fills them
+// from `views/target_view.py::TARGET_DEFAULTS` -- the same dict the view's own
+// declaration reads, which is why an omitted field and the view's default are
+// the same value by construction rather than by agreement.
+//
+// 画面に出ているものが、そのまま保存されること。他のコントロールが出すのは
+// 絵であり、誤りは次の描画までしか残らない。これが出すのはファイルで、誤った
+// まま「見ていた絵」の名前でディスクに残る。よって要求は
+// `state.shownParams`（今画面に出ている画素を描いたときの設定）だけから作る。
+// `gamut` に線形化が無い件については上記のとおりで、`compensation` の最後の
+// 値を持ち回るのも、生成欄に独自の選択を持つのも、どちらも「画面と違う設定で
+// 保存する」ことになる。宣言していないビューでは断り、ボタンは押す前にその旨
+// を示し、断り文はビューを名指しする。
+
+// The parameters `POST /api/generate` cannot be issued without, in the
+// spelling `serverParams()` uses. `linearizer` is required by
+// `models.py::GenerateRequest` for the reason stated there -- an omitted one
+// accepted as `"none"` means a save pressed meaning "gamma" silently writes an
+// unlinearized PNG -- and `target` because there is nothing to compensate
+// without it.
+// 生成に不可欠なパラメータ。`linearizer` を省略可能にすると、ガンマのつもりで
+// 押した保存が黙って線形化なしの PNG を書く（`models.py` の記述と同じ理由）。
+const GENERATE_REQUIRES = ["target", "linearizer"];
+
+// How many generations are running. Counted rather than a boolean for the
+// reason `setLoadBusy` is: two buttons drive it (生成 and 上書きして生成).
+let generatesInFlight = 0;
+
+// The directory a 409 was reported for, exactly as it was typed at the time.
+//
+// The confirmation is bound to a directory, not merely armed: the sentence the
+// user is agreeing to names a specific place, and an offer that outlived an
+// edit of the box would carry that agreement over to a directory nobody was
+// told anything about. Cleared on every edit as well, so the offer does not
+// sit there looking answerable for a path it was not about.
+// 409 が出た時点の出力先。確認は「武装状態」ではなくディレクトリに結び付ける
+// ——利用者が同意した文は特定の場所を名指ししており、入力欄を書き換えたあとも
+// 残る確認は、その同意を何も説明していない別の場所へ持ち越す。
+let overwriteOfferedFor = null;
+
+// What the generate control last *did*, so the line beside it can be put back
+// when a refusal stops applying. The initial value is the one in index.html,
+// because the line is on screen before any of this runs and the two would
+// otherwise disagree for one paint.
+// 生成が最後に何をしたか。断り文が消えたときに戻す先であり、初期値は
+// index.html が書いているものと同じにする（起動直後の1描画ぶん食い違うため）。
+let generateOutcome = "未生成";
+
+function setGenerateOutcome(text) {
+  generateOutcome = text;
+  $("gen-info").textContent = text;
+}
+
+function hideOverwriteOffer() {
+  overwriteOfferedFor = null;
+  $("gen-overwrite").hidden = true;
+  $("gen-overwrite-detail").textContent = "";
+}
+
+// Why the picture on screen cannot be saved, or null if it can.
+//
+// Asked of `state.shown*` rather than of `state.spec`, for the same reason
+// everything else in this section is: the question is about the picture, and
+// during a view switch `state.spec` already names a view whose transfer has
+// not landed.
+//
+// Returned in two forms, because the answer is read in two places and one
+// string cannot serve both: `sentence` is what the status line prints when the
+// button is pressed anyway, and `short` is the line that sits beside the button
+// in a 250px column *before* it is pressed. Both are per-reason. "Nothing is
+// loaded yet" and "this view cannot" are different situations with different
+// remedies -- the path box at the top of the sidebar, and the view selector --
+// so one sentence covering both would be an instruction to do the wrong thing
+// in whichever of the two it was not written for.
+//
+// 画面の絵を保存できない理由（保存できるなら null）。問うているのは絵の性質
+// なので `state.spec` ではなく `state.shown*` に訊く。答えは2つの形で返す:
+// `sentence` は押されたときにステータス行へ出す文、`short` は押される前に
+// ボタンの脇（250pxの段）に出す行である。理由ごとに書き分ける——「まだ読み
+// 込んでいない」と「このビューでは無理」は遷移先が違うので、片方の文を
+// もう片方に流用すれば、そちらでは「間違った操作の指示」になる。
+function generateUnavailableReason() {
+  if (!state.shownMatrixId || !state.shownSpec) {
+    return {
+      short: "行列が未読み込み",
+      sentence: "まだ何も表示されていません。行列を読み込んでから生成してください。",
+    };
+  }
+  const params = state.shownParams || {};
+  const missing = GENERATE_REQUIRES.filter((name) => !(name in params));
+  if (missing.length) {
+    const label = state.shownSpec.label || state.shownSpec.key;
+    return {
+      short: "このビューでは生成できません",
+      sentence:
+        `ビュー "${label}" は ${missing.join(", ")} を宣言していないため、` +
+        "この画面からは生成できません（宣言されていない設定で保存すると、" +
+        "画面に出ていないもので線形化した画像がディスクに残ります）。" +
+        `${missing.join(", ")} を持つビューに切り替えてから生成してください。`,
+    };
+  }
+  return null;
+}
+
+// The button's own state: unavailable-for-this-view, or busy.
+//
+// Only the durable half is reflected here. "The staged parameters have not
+// been applied" and "the output box is empty" are refusals with a sentence
+// when the button is pressed, not a disabled button -- the first is already
+// shown by 適用's ring, and disabling for the second would leave no way to be
+// told what is missing. What this disables is the condition that cannot be
+// fixed without changing what is on screen, which is the one worth saying
+// before the press rather than after it.
+// ボタンが持続的に不可能な状態（このビューでは生成できない／生成中）だけを
+// 反映する。未適用や出力先未入力は押したときに文で断る（前者は 適用 の縁が
+// 既に示しており、後者を無効化すると「何が足りないか」を告げる手段が消える）。
+function refreshGenerateButton() {
+  const reason = generateUnavailableReason();
+  const busy = generatesInFlight > 0;
+  const disabled = busy || reason !== null;
+  $("btn-generate").disabled = disabled;
+  // The same condition, and it has to be: the offer outlives a view switch on
+  // purpose (its sentence is the only place the 409's reason is written down,
+  // and the directory it names has not changed), but under a view that cannot
+  // generate, 上書きして生成 would be a live-looking button whose only outcome
+  // is the refusal the line beside 生成 is already showing. `runGenerate`
+  // refuses it either way; this is so it does not look answerable.
+  // 同じ条件にする。確認はビュー切替を越えて残る（409 の理由が書かれている
+  // 唯一の場所であり、名指ししているディレクトリも変わっていない）が、生成
+  // できないビューでは「押せそうに見えて断られるだけ」のボタンになる。
+  $("btn-generate-overwrite").disabled = disabled;
+  if (busy) return;
+  // Short, because this sits in a 250px column beside the button; the sentence
+  // itself is the status line's, on the press.
+  //
+  // **Written on both branches.** Without the `else` the refusal was stamped
+  // over 未生成 at the first paint -- when the reason is "nothing is loaded",
+  // not "this view" -- and then stayed on every view that *can* generate,
+  // beside an enabled button. A permanently displayed sentence saying the
+  // opposite of what the button does is worse than no sentence at all: it is
+  // the one textual signal that `gamut` genuinely cannot generate, and a line
+  // that says the same thing everywhere says nothing anywhere.
+  // 両方の枝で書く。`else` が無いと、初回描画で（理由は「未読み込み」なのに）
+  // ビューの文が 未生成 の上に書かれ、以後そのまま——生成できるビューでも、
+  // 有効なボタンの脇に「このビューでは生成できません」と出続ける。どこでも
+  // 同じことを言う行は、どこでも何も言っていない。
+  $("gen-info").textContent = reason ? reason.short : generateOutcome;
+}
+
+function setGenerateBusy(busy) {
+  generatesInFlight += busy ? 1 : -1;
+  refreshGenerateButton();
+}
+
+// The request body: one place, so there is one answer to "what does 生成 send".
+//
+// Everything comes from `state.shownParams`, the parameters that produced the
+// picture. Nothing is read from the DOM here except the output directory,
+// which is not a property of the picture and has no other source.
+// 送る本文を組み立てる唯一の場所。出力先を除き、すべて「画面に出ている絵を
+// 描いた設定」から取る（出力先だけは絵の性質ではないので入力欄から読む）。
+function generateBody(overwrite) {
+  const params = state.shownParams || {};
+  const body = {
+    // The matrix the tiles are drawn from, never `state.matrixId`. The two
+    // differ for the whole of a load -- `POST /session/matrix` returns an id in
+    // milliseconds and the transfer that draws it takes seconds on a 1.56 GB
+    // matrix -- and nothing else on the page changes in that window, so the
+    // stale-screen guard below lets a press through. A body carrying
+    // `state.matrixId` there compensates the picture the user was looking at
+    // with a matrix they have never seen.
+    // 描かれている行列を使う（`state.matrixId` ではない）。読み込み中は2つが
+    // 食い違い、その間コントロールは何も変わらないので下のガードは通す。
+    matrix_id: state.shownMatrixId,
+    target_id: params.target,
+    linearizer: params.linearizer,
+    output_dir: $("gen-output-dir").value.trim(),
+    // Never defaulted to true, and never remembered between presses. See the
+    // note above `overwriteOfferedFor` and `generate.py`'s own preamble.
+    overwrite: !!overwrite,
+  };
+  // The three a view may or may not declare. Omitted rather than defaulted
+  // when it does not: the server fills an absent one from
+  // `views/target_view.py::TARGET_DEFAULTS`, which is the dict the view's own
+  // declaration reads, so an omitted field and the view's default are the same
+  // value by construction. A default written here would be the second copy
+  // that dict exists to prevent.
+  // 宣言されていないものは既定値を書かずに省く。サーバは同じ辞書から埋めるので
+  // 「省略」と「そのビューの既定値」は構造的に一致する。ここに既定値を書けば、
+  // その辞書が防いでいる2つ目の写しになる。
+  if ("lut" in params) body.lut_id = params.lut;
+  if ("target_decode" in params) body.target_decode = params.target_decode;
+  // A number, not the box's string: `target_gamma` is a float in
+  // `models.py::GenerateRequest`, and a text control's value is a string even
+  // when its `type` is `number`.
+  if ("target_gamma" in params) body.target_gamma = Number(params.target_gamma);
+  return body;
+}
+
+// The paths the *server* reported, one per line. Never the box's contents:
+// `write_projection_images` resolves `output_dir` before anything else so that
+// what it names is a place the user can go and look at, and echoing the typed
+// string back would throw that away on every machine where the two differ.
+// サーバが返した絶対パスを出す（入力欄の文字列ではない）。
+function showGeneratedFiles(files) {
+  const host = $("gen-files");
+  host.textContent = "";
+  for (const file of files || []) {
+    const row = document.createElement("div");
+    row.textContent = file;
+    host.appendChild(row);
+  }
+}
+
+async function runGenerate(overwrite) {
+  // The double-submit guard, and it is here rather than only on the button's
+  // `disabled` attribute because `disabled` is a statement to the user, not a
+  // guarantee: a click that was already dispatched, a driver, or anything else
+  // that calls this function reaches it regardless. (Enter in the output box is
+  // *not* an example -- it delegates to `.click()`, which a disabled button
+  // swallows.) The call takes seconds on a real matrix (the pipeline runs and
+  // two PNGs are encoded), which is long enough for a second press, and two
+  // overlapping writes into one directory make the second meet the first one's
+  // files and come back 409 -- a conflict reported about a directory that is
+  // being filled by the very request it conflicts with.
+  // 二重送信のガード。`disabled` は利用者への表示であって保証ではない
+  // （既に発行されたクリックも自動操作もここへ届く。ただし出力先欄の Enter は
+  // `.click()` 経由なので無効なボタンでは届かない）。実機では
+  // 数秒かかるので2度目を押せてしまい、同じディレクトリへの二重書き込みでは
+  // 2つ目が1つ目のファイルに衝突して 409 になる。
+  if (generatesInFlight > 0) return;
+
+  const unavailable = generateUnavailableReason();
+  if (unavailable) { status(unavailable.sentence, true); return; }
+
+  // The screen and the controls have to be the same thing before either can be
+  // saved. If they are not, the file would match the boxes -- which is the one
+  // state nobody is looking at -- and neither the picture above them nor what
+  // the user last saw rendered.
+  // 画面とコントロールが一致していなければ保存できない。一致していない状態で
+  // 書くと、ファイルは「誰も見ていない入力欄」とだけ一致する。
+  //
+  // **This guard is what makes `generateBody`'s choice of source safe, and it
+  // covers the parameters only.** While it stands, `serverParams()`,
+  // `state.sentParams` and `state.shownParams` are all equal at the moment of
+  // the call, so building the body from any of the three would produce the
+  // same bytes and no test can tell them apart -- the reason the report's
+  // three-candidate argument is about a hazard this guard removes rather than
+  // about a difference the suite can see. Relaxing it (a plausible request:
+  // "let me generate without pressing 適用 first") makes that choice
+  // load-bearing with nothing asserting it, so anyone relaxing it has to pin
+  // the source first. `matrix_id` is the field the guard does *not* cover:
+  // `state.matrixId` moves when `POST /session/matrix` returns, seconds before
+  // the transfer that draws it, and the controls do not change -- so that one
+  // is pinned on its own, by the check named for a load in flight.
+  // このガードが `generateBody` の出所の選択を安全にしている（ただし対象は
+  // パラメータだけである）。ガードがある限り3つの候補は押下時点で等しく、
+  // どれで組んでも同じ本文になるためテストでは区別できない。緩めた瞬間に
+  // 選択が効いてくるので、緩めるなら先に出所を固定すること。`matrix_id` は
+  // このガードの対象外（読み込み中は `state.matrixId` だけが先に進み、
+  // コントロールは動かない）なので、専用のチェックで固定してある。
+  if (state.spec !== state.shownSpec
+    || JSON.stringify(serverParams()) !== JSON.stringify(state.shownParams)) {
+    status(
+      "画面に出ている絵は、いまのパラメータで描かれたものではありません。" +
+      "適用 を押して画面を更新してから 生成 してください。",
+      true,
+    );
+    return;
+  }
+
+  const body = generateBody(overwrite);
+  if (!body.output_dir) {
+    status("出力先ディレクトリを入力してください", true); return;
+  }
+
+  setGenerateBusy(true);
+  try {
+    // Not an outcome: nothing has been produced yet, and this line is replaced
+    // by `refreshGenerateButton` the moment the call settles either way. It is
+    // written straight to the element for that reason -- recording it would
+    // make "生成中…" the line a later view switch restored.
+    // これは結果ではないので `generateOutcome` には残さない（残すと、後の
+    // ビュー切替で「生成中…」が復元されてしまう）。
+    $("gen-info").textContent = "生成中…";
+    status(`投影画像を生成中: ${body.output_dir}`);
+    const result = await generateProjectionImages(body);
+    hideOverwriteOffer();
+    showGeneratedFiles(result.files);
+    setGenerateOutcome(`${(result.files || []).length} 件を保存`);
+    status(`生成しました: ${result.output_dir}`);
+  } catch (e) {
+    // The path list describes *the last generation*, and this press did not
+    // produce one. Leaving it up puts three paths on screen under a line that
+    // says nothing was generated -- and in the 409 case those same paths are
+    // (part of) what is in the way, so they read as "here is what was just
+    // written" at the exact moment nothing was. Cleared before anything else,
+    // so no failure branch can forget to.
+    // 一覧が説明しているのは「直前の生成」であり、この押下は生成していない。
+    // 残すと「未生成」の下に3つのパスが並ぶ。409 では、そのパスこそが邪魔を
+    // している当のものなので、何も書かれていない瞬間に「いま書いたもの」と
+    // 読めてしまう。分岐より前に消す。
+    showGeneratedFiles([]);
+    setGenerateOutcome(e && e.status === 409 ? "既存のため中止" : "生成に失敗");
+    // 409 is the directory saying it already holds files, with nothing
+    // written. It is the one failure here that is a question rather than an
+    // error, so it gets the offer rather than only the sentence -- and the
+    // offer is a button that has to be pressed, never a retry issued from
+    // here. `overwrite` is already true only if that button is what called
+    // this, and the server does not answer 409 in that case; the guard is for
+    // a server that someday does, so that a confirmation cannot re-offer
+    // itself in a loop.
+    // 409 は「既に何か入っている。まだ何も書いていない」という問いである。
+    // ここから再送はせず、押されるべきボタンを出す。
+    if (e && e.status === 409 && !overwrite) {
+      offerOverwrite(body.output_dir, errorText(e));
+      return;
+    }
+    hideOverwriteOffer();
+    throw e;
+  } finally {
+    setGenerateBusy(false);
+  }
+}
+
+function offerOverwrite(outputDir, message) {
+  overwriteOfferedFor = outputDir;
+  $("gen-overwrite-detail").textContent = message;
+  $("gen-overwrite").hidden = false;
+  status(message, true);
+}
+
+function wireGenerate() {
+  $("btn-generate").addEventListener("click", () => {
+    runGenerate(false).catch((e) => status(errorText(e), true));
+  });
+  $("gen-output-dir").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("btn-generate").click();
+  });
+  // Editing the box retires the offer: the sentence it carries names the old
+  // directory. Both events, because a value can change without a `change`
+  // (typing) and without an `input` (a paste through the context menu still
+  // fires `input`, but a programmatic set fires neither -- and the check that
+  // it is still the same directory below is what covers that case).
+  // 入力欄を触ると確認は失効する（確認文が名指ししているのは古い出力先である）。
+  $("gen-output-dir").addEventListener("input", () => { hideOverwriteOffer(); });
+  $("gen-output-dir").addEventListener("change", () => { hideOverwriteOffer(); });
+
+  $("btn-generate-overwrite").addEventListener("click", () => {
+    // The confirmation applies to the directory it was offered for, and to no
+    // other. Without this a value set without firing an event -- and every
+    // programmatic set is one -- would let an agreement about directory A
+    // overwrite directory B.
+    // 確認が効くのは、それが提示されたディレクトリに対してだけである。
+    if (overwriteOfferedFor === null
+      || overwriteOfferedFor !== $("gen-output-dir").value.trim()) {
+      hideOverwriteOffer();
+      status(
+        "出力先が変わりました。もう一度 生成 を押して確認してください。", true,
+      );
+      return;
+    }
+    runGenerate(true).catch((e) => status(errorText(e), true));
+  });
+}
+
 // ------------------------------------------------------------- rendering
 
 function applyDisplay() {
   for (let c = 0; c < views.length; c++) {
     const r = state.ranges ? state.ranges[c] : { vmin: -1, vmax: 1 };
     views[c].setParams({ ...display, vmin: r.vmin, vmax: r.vmax });
+  }
+}
+
+// The controls that make up the tone chain: exposure, γ (both its input and
+// its slider) and dither. Enabled exactly when the shader branch that is going
+// to draw actually applies one -- `KIND_TRAITS[kind].toneChain`.
+//
+// The colormap dropdown is *not* in this list even though it is disabled for
+// the same two kinds. It answers a different question -- "does this kind turn
+// a number into a colour" -- and rgb answers no to that while answering yes to
+// the tone chain. One list for both would be a coincidence of today's three
+// kinds, not a rule, and the first kind that broke it would break it silently.
+//
+// Values are left alone, not reset. A user who set -1 EV on the coefficient
+// tiles, looked at the gamut view and came back has not asked for 0 EV; the
+// slider is dead while the categorical picture is up and alive again with the
+// same value afterwards.
+//
+// トーンチェーンを構成するコントロール（露出・γ・ディザ）。描画する
+// シェーダ経路が実際にトーンチェーンを掛けるときだけ有効にする。
+// カラーマップはこの一覧に入れない——同じ2つの kind で無効になるが問いが
+// 違い（rgb はトーンチェーンを掛けるがカラーマップは通さない）、まとめると
+// 今日の3つの kind でたまたま一致しているだけの規則になる。値は消さない。
+// Mirrored by TONE_IDS in tests/js/frontend_harness.mjs, which is how the
+// disabled state is read back. A control added here and not there is enabled
+// or disabled with nothing watching -- the mirror is not derivable from this
+// list, because the harness has to name the ids it reads.
+// tests/js/frontend_harness.mjs の TONE_IDS が写し。片方だけ足すと、その
+// コントロールの状態は誰も見ていないことになる。
+const TONE_CONTROL_IDS = ["ev-slider", "gamma-input", "gamma-slider", "dither-check"];
+
+function setToneControlsEnabled(enabled) {
+  for (const id of TONE_CONTROL_IDS) {
+    const el = $(id);
+    // Not `if (el)`. A missing id means this list and index.html have come
+    // apart, and skipping it silently leaves a live slider over a categorical
+    // picture with nothing to say why -- the same fail-open this file argues
+    // against everywhere else. The harness's own reader requires the element
+    // to exist, so a rename is caught today; this is what catches it in the
+    // browser, where there is no harness.
+    // 黙って飛ばさない。id が無いのはこの一覧と index.html が食い違ったという
+    // ことであり、飛ばせば categorical の絵の上に生きたスライダが残る。
+    if (!el) {
+      throw new Error(
+        `表示コントロール "${id}" がページに見つかりません` +
+        "（main.js の TONE_CONTROL_IDS と index.html が食い違っています）。"
+      );
+    }
+    el.disabled = !enabled;
   }
 }
 
@@ -1197,8 +1856,22 @@ function computeRanges(traits) {
   // [vmin, vmax] で出す。
   if (traits.sharedRange) {
     state.ranges = [{ vmin: p.vmin, vmax: p.vmax }];
-    const text = `[${fmt(p.vmin)}, ${fmt(p.vmax)}]`;
-    if (captions.length) captions[0].textContent = `${p.labels.join(" ")}  ${text}`;
+    // A categorical range is a count, not a measurement, and it is written as
+    // one. `[0.0000, 3.0000]` invites the reading that 1.5 is a value this
+    // view can hold; and the caption cannot be `labels.join(" ")` either,
+    // because for this kind that is the four class names crammed under the
+    // tile, restating the legend in the one place with no room for it.
+    // クラスの範囲は測定値ではなく個数なので、そのように書く。ラベルを
+    // 並べる書き方も使えない（凡例を最も狭い場所で繰り返すことになる）。
+    const classes = traits.labelsAreClasses;
+    const text = classes
+      ? `クラス ${p.vmin}–${p.vmax}`
+      : `[${fmt(p.vmin)}, ${fmt(p.vmax)}]`;
+    if (captions.length) {
+      captions[0].textContent = classes
+        ? `${p.labels.length} クラス（凡例参照）`
+        : `${p.labels.join(" ")}  ${text}`;
+    }
     $("range-info").textContent = text;
     return;
   }
@@ -1312,11 +1985,33 @@ async function reload(req = beginRequest()) {
   // カラーマップ・テクスチャ）はすべてこの1つのオブジェクトを読む。
   const traits = traitsFor(payload.kind, "サーバの応答");
   requireRgbHasThreeChannels(payload.kind, payload.channels, "サーバの応答");
+  // Refused before anything is published, like the rgb channel count above: a
+  // legend with two identically-coloured rows is not something to draw and
+  // then explain.
+  // 上のチャンネル数と同じく、公開前に断る。
+  if (traits.labelsAreClasses) {
+    requireClassesFitThePalette(payload.labels, "サーバの応答");
+  }
   state.payload = payload;
+  // The traits the pixels were rendered through, published with them. See
+  // `state.traits`.
+  state.traits = traits;
   // The pixels and the matrix they came from, published together. The readout
   // asks this id, so it can never describe a matrix other than the one drawn.
   // 画素と、その出所の行列IDを同時に確定する。読み取り欄はこのIDに問い合わせる。
   state.shownMatrixId = matrixId;
+  // ...and the view and the parameters that produced them, for 生成. `params`
+  // is the object this request was issued with, captured above -- not
+  // `serverParams()` read again, which would be whatever the boxes hold by the
+  // time the transfer landed. See `state.shownParams`.
+  // 生成のために、この画素を作ったビューとパラメータも同時に確定する。
+  // `params` は発行時に控えたもので、ここで `serverParams()` を読み直しては
+  // ならない（転送中に入力欄が変わっていればそちらを拾ってしまう）。
+  state.shownSpec = state.spec;
+  state.shownParams = params;
+  // 生成 answers for the picture, so its availability changes with the picture.
+  // 生成 は画面の絵について答えるので、可否も絵と同時に変わる。
+  refreshGenerateButton();
   // The heading over #view-values, set with the payload it describes.
   //
   // Two panels of numbers now sit side by side and only one of them is the
@@ -1388,6 +2083,18 @@ async function reload(req = beginRequest()) {
   // カラーマップは数値に色を与える仕組みで、rgb経路はそもそも通さない。
   // 何も起きないドロップダウンを残さず無効化する。
   $("cmap-select").disabled = !traits.colormap;
+
+  // Exposure, γ and dither, for the kind that is now on screen. See
+  // setToneControlsEnabled -- and note that the shader ignoring them is the
+  // half that actually holds; this is the half the user can see.
+  // 露出・γ・ディザ。実効的な保証はシェーダ側が無視することにあり、こちらは
+  // 「効かないコントロールを見せない」ためのもの。
+  setToneControlsEnabled(traits.toneChain);
+
+  // The class legend, from this payload's own labels. Cleared and hidden for
+  // every other kind, so a legend cannot outlive the view that explained it.
+  // クラス凡例。他の kind では消して隠す（説明していたビューより長生きさせない）。
+  renderClassLegend(payload, traits);
 
   // Decide before the upload, while the old image is still around: a reframe
   // is warranted only when there is no view worth keeping -- a rebuilt grid, a
@@ -1629,6 +2336,11 @@ async function main() {
 
   wireDisplayControls();
   wireLoaders();
+  wireGenerate();
+  // Before the first render, so the button starts in the state the page is
+  // actually in ("nothing is displayed") rather than looking pressable.
+  // 初回描画の前に呼ぶ（何も表示されていない状態を最初から示す）。
+  refreshGenerateButton();
   try {
     const specs = await listViews();
     if (!specs.length) { status("ビューが登録されていません", true); return; }

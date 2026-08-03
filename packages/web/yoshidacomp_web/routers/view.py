@@ -150,12 +150,95 @@ def render_view(matrix_id: str, key: str, request: Request) -> Response:
     # from the array. A view that declares 99 and renders 3 used to get a
     # 200 OK and a silently wrong grid; fail here instead.
     # 宣言値と実配列が食い違うと200のまま表示だけが壊れるので明示的に失敗させる。
-    if channels != spec.channels or len(result.labels) != channels:
+    if channels != spec.channels:
+        # Only the channel counts, now that the label rule below is a separate
+        # check with its own message: reporting a label count here named a
+        # quantity that had nothing to do with the rule that fired.
         raise HTTPException(
             status_code=500,
             detail=(
                 f"view {key!r} declares channels={spec.channels} but rendered "
-                f"{channels} with {len(result.labels)} label(s)"
+                f"{channels}"
+            ),
+        )
+
+    # What ``labels`` counts is decided by ``kind``, and exactly one kind
+    # differs.
+    #
+    # For ``scalar`` and ``rgb`` a label names a channel -- they are the tile
+    # captions and the readout's column headings -- so there must be one per
+    # channel. For ``categorical`` the single channel carries a class *index*
+    # and the labels name the classes, so there are as many labels as classes
+    # and ``len(labels) == channels`` would reject every such view on sight
+    # (``views/gamut.py``: one channel, four class names). The class names have
+    # nowhere else to travel: ``X-Labels-B64`` is the only string-carrying
+    # header in this contract.
+    #
+    # Three clauses replace the one that is dropped, because dropping
+    # ``len(labels) == channels`` for this kind gave up two guarantees, not
+    # one, and only the first was intended.
+    #
+    # ``channels == 1``: "the labels name the classes" only means anything when
+    # there is a single plane of class indices to name them for. Without this
+    # clause a categorical view rendering 3 channels with 4 class labels used
+    # to be a 500 and would become a 200 -- and the frontend, which treats
+    # categorical as one tile, would index ``labels[c]`` along the channel axis
+    # and caption three planes with three of the four class names. That is the
+    # old rule's guarantee, restored in the only form that still fits.
+    #
+    # ``len(labels) >= 2``: a classification with one class is not one, and an
+    # empty ``labels`` paired with ``vmax = -1`` satisfies the range clause
+    # below vacuously. This is the floor that keeps the range clause from being
+    # self-satisfying.
+    #
+    # The range clause is the one that reaches into the picture: a categorical
+    # view's values are indices into ``labels``, so its display range is not a
+    # choice either -- it is ``[0, len(labels) - 1]`` by definition, and the
+    # frontend maps exactly that range onto its colours. A range narrower than
+    # the classes draws several classes in one colour. Note this is defence in
+    # depth rather than a live guard for ``gamut``, which derives its ``vmax``
+    # from ``LABELS`` and so cannot violate it; the view that will violate it
+    # is the second categorical view, written by someone reading ``gamut`` and
+    # writing ``vmax=3.0`` by hand.
+    #
+    # All three are O(1) and none touches the pixels.
+    #
+    # ``labels`` が何を数えているかは ``kind`` が決める。``scalar``/``rgb`` は
+    # チャンネル名なのでチャンネル数と一致しなければならないが、
+    # ``categorical`` の1チャンネルはクラス番号であり、ラベルはクラス名なので
+    # 数はクラス数になる（``gamut`` は1チャンネル・4クラス）。クラス名を運べる
+    # ヘッダは他に無い。ただし旧規則を落とすと「ラベル数＝チャンネル数」だけで
+    # なく「categorical は1チャンネル」も一緒に失われるため、``channels == 1``
+    # で明示的に戻す（3チャンネル×4クラス名が 200 になると、フロントは
+    # ``labels[c]`` をチャンネル軸に当てて4つのクラス名のうち3つをチャンネル名
+    # として描く）。``len(labels) >= 2`` はレンジ条件が空ラベル＋``vmax=-1`` で
+    # 自明に成立するのを防ぐ床である。レンジ条件自体は ``gamut`` に対しては
+    # 発火しえない（``vmax`` を ``LABELS`` から導出しているため）多層防御で、
+    # 効くのは ``vmax=3.0`` と直書きされる2つ目の categorical ビューに対してである。
+    if spec.kind == "categorical":
+        labels_ok = (
+            channels == 1
+            and len(result.labels) >= 2
+            and (result.vmin, result.vmax) == (0.0, float(len(result.labels) - 1))
+        )
+        expected = (
+            "a categorical view's labels name its classes, so it must render "
+            "exactly 1 channel of class indices with >= 2 labels and "
+            f"vmin/vmax == (0.0, {float(len(result.labels) - 1)}), got "
+            f"{channels} channel(s)"
+        )
+    else:
+        labels_ok = len(result.labels) == channels
+        expected = (
+            f"a {spec.kind!r} view's labels name its channels, so it must "
+            "render one label per channel"
+        )
+    if not labels_ok:
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                f"view {key!r} rendered {len(result.labels)} label(s) with "
+                f"vmin={result.vmin!r} vmax={result.vmax!r}: {expected}"
             ),
         )
 

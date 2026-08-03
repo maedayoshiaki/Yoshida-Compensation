@@ -51,6 +51,9 @@ import numpy as np
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 from yoshidacomp.compensation import inverse_lut as ilut
+# The writers' own map -- see the note in
+# ``evaluate_compensation_conditions.py`` for why it is read, not restated.
+from yoshidacomp.compensation.pipeline import LINEARIZER_FILENAME_PREFIXES
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
 # Output directories for the LUT-linearized artifacts. Kept separate from
@@ -279,7 +282,12 @@ def main(argv: list[str] | None = None) -> None:
     compensation_output_dir = Path(paths.compensation_image_dir)
     lut_comp_output_dir = lut_comp_dir
     sample._clear_generated_pngs(compensation_output_dir, "compensation_image_*.png")
-    sample._clear_generated_pngs(lut_comp_output_dir, "inv_lut_comp_image_*.png")
+    # Same map as the write below, so the clear and the write cannot name
+    # different files.
+    sample._clear_generated_pngs(
+        lut_comp_output_dir,
+        f"{LINEARIZER_FILENAME_PREFIXES['inverse_lut']}_comp_image_*.png",
+    )
 
     cam_width = captured_images[0].shape[1]
     cam_height = captured_images[0].shape[0]
@@ -371,7 +379,10 @@ def main(argv: list[str] | None = None) -> None:
             cv2.cvtColor(compensation_image, cv2.COLOR_RGB2BGR),
         )
         cv2.imwrite(
-            str(lut_comp_output_dir / f"inv_lut_comp_image_{idx:02d}.png"),
+            str(
+                lut_comp_output_dir
+                / f"{LINEARIZER_FILENAME_PREFIXES['inverse_lut']}_comp_image_{idx:02d}.png"
+            ),
             cv2.cvtColor(lut_comp_image, cv2.COLOR_RGB2BGR),
         )
 

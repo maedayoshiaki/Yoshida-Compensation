@@ -2,7 +2,7 @@
 //
 // Usage: node frontend_harness.mjs <static-dir> <scenario>
 //   <static-dir>  directory holding index.html and js/{main,glview,api,plot}.js
-//   <scenario>    "ordering" | "views" | "button" | "rgb" | "probe"
+//   <scenario>    "ordering" | "views" | "button" | "rgb" | "gamut" | "probe"
 //                 | "target" | "lut"
 // Prints one JSON object to stdout: { scenario, checks: [{name, ok, detail}] }.
 //
@@ -84,6 +84,34 @@ function emit() {
 // undefined のまま——記録ではなく例外になる状態だった。現時点の glview.js に
 // そうした呼び出しは無いが、将来の呼び出しが検証できない理由がスタブ側に
 // あってはならない。
+//
+// The GL *constants* are the third thing not swallowed, and they had to stop
+// being swallowed for the texture format to be checkable at all. Every
+// SCREAMING_CASE property used to answer the same `1`, so `gl.R32F` and
+// `gl.RGB32F` were the same value and `texImage2D` could not tell which had
+// been asked for: a categorical view uploading its class indices as RGB32F --
+// which puts the index in the red component alone and leaves green and blue
+// undefined -- was indistinguishable from the R32F upload it needs. Each name
+// now gets its own id, and the id maps back to the name so a check can say
+// "RGB32F" rather than "4098".
+// GL定数も飲み込まない。以前はどの定数も同じ `1` だったため `gl.R32F` と
+// `gl.RGB32F` が区別できず、クラス番号を RGB32F で載せる実装（赤成分だけに
+// 番号が入り、緑と青は未定義）が正しい R32F の転送と同じに見えていた。
+const GL_CONSTANT_IDS = new Map();    // name -> id
+const GL_CONSTANT_NAMES = new Map();  // id -> name
+let nextGlConstant = 0x4000;
+
+function glConstant(name) {
+  if (!GL_CONSTANT_IDS.has(name)) {
+    const id = nextGlConstant++;
+    GL_CONSTANT_IDS.set(name, id);
+    GL_CONSTANT_NAMES.set(id, name);
+  }
+  return GL_CONSTANT_IDS.get(name);
+}
+
+const glConstantName = (id) => GL_CONSTANT_NAMES.get(id) ?? id;
+
 function glStub(uploads, uniforms) {
   const fn = function () { return glStub(uploads, uniforms); };
   return new Proxy(fn, {
@@ -94,6 +122,7 @@ function glStub(uploads, uniforms) {
       if (prop === "getUniformLocation") return (_prog, name) => name;
       if (prop === "uniform1i") return (name, value) => { uniforms[name] = value; };
       if (prop === "texImage2D") {
+        // (target, level, internalformat, w, h, border, format, type, pixels)
         return (...args) => {
           const px = args[args.length - 1];
           uploads.push({
@@ -101,10 +130,12 @@ function glStub(uploads, uniforms) {
             first: px[0],
             last: px[px.length - 1],
             head: Array.from(px.slice(0, 6)),
+            internal: glConstantName(args[2]),
+            format: glConstantName(args[6]),
           });
         };
       }
-      if (typeof prop === "string" && /^[A-Z0-9_]+$/.test(prop)) return 1;
+      if (typeof prop === "string" && /^[A-Z0-9_]+$/.test(prop)) return glConstant(prop);
       return glStub(uploads, uniforms);
     },
     apply() { return glStub(uploads, uniforms); },
@@ -258,11 +289,24 @@ function unregister(el) {
 // two contains them. Rather than weaken that check to "the ids still exist"
 // (which is the shape of a check that cannot fail), the stub grew a parser.
 //
-// Deliberately minimal: it records the tag, the `class` and the `id`, and the
-// nesting. Not `value`, not boolean attributes -- every one of those would
-// change what the *existing* scenarios see at startup, and a stub that starts
-// simulating a browser more broadly than the checks need is a new source of
-// false answers rather than a better fixture.
+// Deliberately minimal: it records the tag, the `class`, the `id`, `hidden`,
+// and the nesting. Not `value`, and no other boolean attribute -- every one of
+// those would change what the *existing* scenarios see at startup, and a stub
+// that starts simulating a browser more broadly than the checks need is a new
+// source of false answers rather than a better fixture.
+//
+// `hidden` is the exception, and it was added because leaving it out made a
+// check unable to fail. Every element starts `hidden: false` in makeEl, so
+// `class-legend is on screen for a categorical view` passed against a page
+// whose legend does not exist and against one that declares `hidden` -- the
+// only way it could fail was for code to actively set it true. Three elements
+// in index.html carry the attribute (`#space-note`, `#target-images`,
+// `#class-legend`) and all three are hidden-until-something-happens, which is
+// a real initial state and not a detail of presentation.
+// `hidden` だけは例外として記録する。これが無いと全要素が `hidden: false` で
+// 始まるため、「凡例が出ている」の検査はコードが明示的に true を書いたときに
+// しか落ちなかった。index.html で `hidden` を持つ3要素はいずれも「何かが
+// 起きるまで隠れている」状態であり、体裁ではなく初期状態である。
 //
 // index.html が宣言している要素の木を組む。id の登録だけでは「その要素が
 // 在るか」しか答えられず、「どこに在るか」——表示レンジと計測が、縦に溢れる
@@ -320,6 +364,17 @@ function parseHtml(source) {
     for (const a of rawAttrs.matchAll(ATTR_RE)) attrs[a[1].toLowerCase()] = a[2];
     if (attrs.class) node.className = attrs.class;
     if (attrs.id) node.id = attrs.id;          // the setter is what registers it
+    // Presence is the value, as in HTML: bare `hidden` and `hidden=""` both
+    // mean hidden. Quoted runs are removed before looking for the bare token,
+    // so a *value* containing the word (`placeholder="a hidden thing"`) is not
+    // read as the attribute. See the note above for why this one alone is
+    // modelled.
+    // 属性値を先に取り除いてから裸のトークンを探す（値の中の "hidden" を属性と
+    // 読まないため）。
+    if ("hidden" in attrs
+      || /(?:^|\s)hidden(?=[\s/=>]|$)/.test(rawAttrs.replace(/"[^"]*"|'[^']*'/g, ""))) {
+      node.hidden = true;
+    }
     // An inline `style` is recorded because an inline declaration is the one
     // thing that beats the stylesheet: `<section class="readout"
     // style="display:block">` restores the stacked layout this task replaced
@@ -481,8 +536,83 @@ const VIEWS = [
       default: "shared", choices: ["shared", "per_tile"],
     }],
   },
-  // Declared in the Python ViewKind but unimplemented in the frontend (F4).
-  { key: "gamut", label: "色域外判定", kind: "categorical", channels: 4, params: [] },
+  // One channel of class indices, four class labels: the `categorical`
+  // contract routers/view.py pins (channels == 1, len(labels) >= 2,
+  // vmax == len(labels) - 1). It is registered with its real shape rather
+  // than a convenient one because every categorical check here reads
+  // `state.payload.labels`, and a fixture whose label count matched its
+  // channel count would let the two axes be confused with no visible effect.
+  // クラス番号1チャンネルとクラス名4つ。ラベル数とチャンネル数が一致する
+  // フィクスチャにすると、2つの軸を取り違えても見た目に差が出なくなる。
+  //
+  // Its parameters mirror the shipped `views/gamut.py`: `target`,
+  // `target_decode` and `target_gamma`, and **`linearizer` omitted** -- which
+  // is the only difference between it and `compensation` that matters to the
+  // 生成 decision. With `params: []` the fixture was symmetric in the dimension
+  // under test: a refusal keyed on how many parameters a view declares, or one
+  // that special-cased "any view that is not `compensation`", would pass here
+  // and diverge against the real registry, where `gamut` declares three of the
+  // four fields the request body needs. The refusal check reads the sentence,
+  // which names the missing parameters, so it now has to name `linearizer`
+  // alone -- against `params: []` it said `target, linearizer`.
+  //
+  // パラメータは出荷側の `views/gamut.py` を写す（`linearizer` だけが無い）。
+  // `params: []` では「宣言数で断る実装」や「compensation 以外は断る実装」と
+  // 区別が付かず、検証したい次元についてフィクスチャが対称になっていた。
+  {
+    key: "gamut", label: "色域外判定", kind: "categorical", channels: 1,
+    params: [
+      { name: "target", label: "ターゲットID", type: "text", default: "", choices: [] },
+      {
+        name: "target_decode", label: "ターゲット復号", type: "select",
+        default: "srgb", choices: ["none", "srgb", "gamma"],
+      },
+      { name: "target_gamma", label: "ターゲットγ", type: "number", default: 2.2 },
+    ],
+  },
+  // A second `categorical` view, and its only job is to have a class count that
+  // is **not** the palette's length.
+  //
+  // `gamut` declares four classes and `CLASS_COLORS` has four entries, so on
+  // that fixture alone `legendRows().length === payload.labels.length` is
+  // `4 === 4` whichever array `renderClassLegend` loops over. Driving the legend
+  // off `CLASS_COLORS.length` -- the palette instead of the server's answer --
+  // left the whole `gamut` scenario green (measured). That is the same symmetry
+  // the `gamut` fixture's own note warns about one axis over (labels vs
+  // channels), and this closes the other axis.
+  //
+  // Three classes, not four, and not two: `routers/view.py` admits any
+  // categorical view at `len(labels) >= 2` and says in its own comment that the
+  // consumer which will violate the four-class assumption is "the second
+  // categorical view". This is that view, and it is the first time the client
+  // side of that clause is exercised at all. A legend built from the palette
+  // draws a fourth row here whose label is the string `undefined` beside a
+  // colour no pixel carries.
+  //
+  // 2つ目の `categorical` ビュー。役目は「クラス数がパレットの長さと違うこと」
+  // だけである。`gamut` は4クラスで `CLASS_COLORS` も4要素なので、凡例の行数を
+  // どちらから取っても `4 === 4` になり、パレット側から作る実装でも通ってしまう
+  // （実測で確認）。`routers/view.py` は `len(labels) >= 2` を認めており、その
+  // コメント自身が「破るのは2つ目の categorical ビューだ」と書いている。
+  {
+    key: "gamut_lite", label: "3クラスの色域外", kind: "categorical", channels: 1,
+    values_are_matrix: false, params: [],
+  },
+  // A kind no frontend implements, and the only reason it exists.
+  //
+  // `gamut` used to be this fixture -- `categorical` was the unimplemented
+  // kind -- and the check that the viewer refuses what it does not understand
+  // rode on it. Implementing `categorical` would have taken that check with
+  // it: the scenario would have gone on asserting a refusal that no longer
+  // happens, or (worse) been quietly repointed at a kind the viewer now draws
+  // and stopped asserting anything. The property is about *unknown* kinds and
+  // it outlives any particular one, so it gets a fixture that will never be
+  // implemented rather than borrowing whichever kind is next in line.
+  //
+  // 未対応 kind のフィクスチャ。以前はこれが `gamut`（= `categorical`）で
+  // あり、実装した時点でこの検査は行き場を失う。「未知の kind を断る」性質は
+  // 特定の kind より長生きするので、実装される予定の無いものを充てる。
+  { key: "vector_field", label: "未対応kindのビュー", kind: "flow", channels: 2, params: [] },
   // Three channels that are one colour, not three pictures -- the rgb scenario.
   {
     key: "surface", label: "投影面の色", kind: "rgb", channels: 3,
@@ -523,8 +653,30 @@ const VIEWS = [
   {
     key: "compensation", label: "補償画像", kind: "rgb", channels: 3,
     values_are_matrix: false,
+    // Mirrors the shipped `views/compensation.py`'s six parameters, and the
+    // *defaults* are the shipped ones verbatim (`""`, `"none"`, `""`,
+    // `"linear"`, `"srgb"`, `2.2`) rather than convenient ones.
+    //
+    // That matters for one scenario only, and it matters a great deal there.
+    // `generate` asserts the *contents* of the body the 生成 button sends, and
+    // an expected value that coincides with a declared default cannot tell a
+    // body built from the controls from one that hard-coded the default -- the
+    // third of the three shapes of unfailable test this repository keeps
+    // shipping. So the defaults here have to be the real ones, and that
+    // scenario has to move every field off them before it presses the button.
+    //
+    // 出荷側の6つのパラメータを写す。既定値は「都合のよい値」ではなく出荷側
+    // そのもの（`""`/`"none"`/`""`/`"linear"`/`"srgb"`/`2.2`）にする。
+    // `generate` シナリオは送られる body の中身を検証するが、期待値が既定値と
+    // 一致していると「コントロールから組み立てた実装」と「既定値を直書きした
+    // 実装」を区別できない。だから既定値は本物でなければならず、あちらは
+    // 押す前に全項目を既定値から動かす。
     params: [
       { name: "target", label: "ターゲットID", type: "text", default: "", choices: [] },
+      {
+        name: "linearizer", label: "線形化", type: "select",
+        default: "none", choices: ["none", "gamma", "inverse_lut"],
+      },
       // The second runtime id, and the reason it is declared here as well as
       // `target`: the two sidebar loaders write into different boxes through
       // the same `setServerParam` path, and a build that filled one and not the
@@ -536,6 +688,11 @@ const VIEWS = [
         name: "output", label: "出力", type: "select",
         default: "linear", choices: ["linear", "code"],
       },
+      {
+        name: "target_decode", label: "ターゲット復号", type: "select",
+        default: "srgb", choices: ["none", "srgb", "gamma"],
+      },
+      { name: "target_gamma", label: "ターゲットγ", type: "number", default: 2.2 },
     ],
   },
   // Three channels that are three unrelated pictures. This differs from
@@ -621,7 +778,22 @@ const LABELS_BY_KEY = {
   coef_tiles: TILE_LABELS,
   plain_tiles: TILE_LABELS,
   legacy_tiles: TILE_LABELS,
+  // Deliberately *not* views/gamut.py's own LABELS
+  // (["範囲内", "負クリップ", "1超クリップ", "両方"]), and deliberately not in
+  // its order. A frontend that hard-coded the shipped class names -- the
+  // obvious way to build a legend, and the one the brief for this task names
+  // as a mistake -- would produce a legend indistinguishable from a correct
+  // one against a fixture that echoed them. The comma inside the last entry is
+  // there so a legend that joined the labels into one string, or split them on
+  // one, is visibly wrong rather than coincidentally right.
+  // 実装が本物のラベルを埋め込んでも気付けるよう、意図的に別の語・別の順に
+  // する。最後の要素にカンマを入れてあるのは、連結や分割で作った凡例が偶然
+  // 正しく見えないようにするためである。
   gamut: ["色域外", "1超クリップ", "両方", "範囲内, 補正可"],
+  // Three, against a four-entry palette. See the registration for why the count
+  // itself is the fixture.
+  gamut_lite: ["範囲内", "クリップ", "答えなし"],
+  vector_field: ["u", "v"],
   surface: ["R", "G", "B"],
   compensation: ["R", "G", "B"],
   // Deliberately *not* ["R","G","B"]: `tri_scalar` must reach its 1x3 grid
@@ -830,6 +1002,72 @@ const LUTS = {
   "data/curveless.npz": { key: "curveless", rows: LUT_ROWS, curveStatus: 500 },
 };
 
+// ------------------------------------------------------------ generation
+//
+// `POST /api/generate` is the one endpoint in this application that writes to
+// the user's disk, and the only one whose *request body* is the thing under
+// test: the pixels it saves are decided entirely by the ids and the settings
+// the browser puts in it, so a body that does not describe the picture on
+// screen saves a file the user was never shown. Every request is therefore
+// recorded whole (`generatePostLog`) rather than counted, and the checks
+// compare fields, not call counts.
+//
+// The three fixture directories are the three answers the real endpoint gives
+// (see `routers/generate.py` and `generate.py`), because each one drives a
+// different piece of the UI: a directory it can write (200), one that already
+// holds files (409, and *nothing written* -- the frontend has to ask before
+// resending), and one it cannot write at all (400, prose).
+//
+// このアプリで唯一ディスクへ書くエンドポイントであり、唯一「リクエストの本文
+// そのもの」が検証対象であるもの。保存される画素は本文の設定だけで決まるので、
+// 画面と違う本文は「見ていないものが保存される」ことを意味する。よって回数では
+// なく本文を丸ごと記録し、フィールド単位で突き合わせる。3つのディレクトリは
+// 実物が返す3種類の答え（200 / 409 / 400）に対応する。
+const generatePostLog = [];   // every POST /api/generate body, in order
+
+// Holds the response so a second press can happen while the first is in
+// flight. The double-submit guard is unobservable against a fetch that
+// settles immediately -- the button would be disabled and released again
+// before any test could look.
+// 生成中に2回目を押せるよう応答を保留する。即座に解決する fetch では
+// 二重送信のガードは観測できない（押し直す前に解放されてしまう）。
+let holdGenerate = false;
+const heldGenerates = [];
+const releaseGenerates = () => { while (heldGenerates.length) heldGenerates.shift()(); };
+
+// A directory that already holds files. `generate.py` refuses these with 409
+// and writes nothing at all -- not even the directory.
+const GENERATE_NON_EMPTY = new Set(["data/existing"]);
+// A path the OS will not accept. The real endpoint turns the `OSError` into a
+// 400 whose detail names the path.
+const GENERATE_UNWRITABLE = new Set(["Z:/nope"]);
+
+// What the server resolves a relative `output_dir` to.
+//
+// Deliberately not the string that was sent. `write_projection_images` calls
+// `.resolve()` before anything else and every path it reports -- the response,
+// `files`, and the refusal message -- is absolute, precisely so that a refusal
+// names a place the user can find. A frontend that displayed the box's own
+// contents back would look identical against a fixture that echoed the input.
+// 送られた文字列をそのまま返さない。実物は必ず絶対パスへ解決してから答える
+// （断り文が指す場所が利用者に分かるようにするため）。入力を反響するだけの
+// フィクスチャでは「入力欄を出しているだけの実装」と区別が付かない。
+const generateAbsolute = (dir) => `C:/repo/${dir}`;
+// The three files the endpoint reports, in the order it returns them: the
+// linear compensation image, the projector image, and the metadata.
+const generateFiles = (dir) => [
+  `${generateAbsolute(dir)}/compensation_linear/compensation_image_02.png`,
+  `${generateAbsolute(dir)}/compensation_projector/inv_lut_comp_image_02.png`,
+  `${generateAbsolute(dir)}/generate_metadata.json`,
+];
+// Quoted, like the other refusal details here, so a client that rendered the
+// JSON envelope instead of the sentence shows the backslash escape.
+const generate409Detail = (dir) =>
+  `${generateAbsolute(dir)} is not empty (contains "compensation_linear"). `
+  + "Refusing to write into a directory that already holds files.";
+const generate400Detail = (dir) =>
+  `could not write to "${dir}": [WinError 3] the system cannot find the path`;
+
 const targetPostLog = [];   // every POST /api/target body, in order
 const lutPostLog = [];      // every POST /api/lut body, in order
 const lutCurveLog = [];     // every GET /api/lut/{id}/curve url, in order
@@ -919,6 +1157,38 @@ globalThis.fetch = async (url, options) => {
     }), { headers: { "content-type": "application/json" } });
   }
 
+  // POST /api/generate, answered the way routers/generate.py does.
+  //
+  // The body is recorded *before* the hold, so a test can see that a request
+  // was issued while it is still in flight -- which is the whole of what the
+  // double-submit check needs to observe.
+  // 保留の前に本文を記録する。「飛んでいる最中に発行済みである」ことが
+  // 二重送信の検査が見たい唯一の状態だからである。
+  if (url === "/api/generate") {
+    const body = JSON.parse(options.body);
+    generatePostLog.push(body);
+    if (holdGenerate) await new Promise((release) => heldGenerates.push(release));
+    const dir = String(body.output_dir ?? "");
+    if (GENERATE_UNWRITABLE.has(dir)) {
+      return new Response(JSON.stringify({ detail: generate400Detail(dir) }), {
+        status: 400, headers: { "content-type": "application/json" },
+      });
+    }
+    // Only an explicit `true` proceeds, exactly as `generate.py` has it: the
+    // 409 is not "try again", it is "nothing has been written and someone has
+    // to say so on purpose".
+    if (GENERATE_NON_EMPTY.has(dir) && body.overwrite !== true) {
+      return new Response(JSON.stringify({ detail: generate409Detail(dir) }), {
+        status: 409, headers: { "content-type": "application/json" },
+      });
+    }
+    return new Response(JSON.stringify({
+      output_dir: generateAbsolute(dir),
+      files: generateFiles(dir),
+      meta: { linearizer: body.linearizer, target_decode: body.target_decode },
+    }), { headers: { "content-type": "application/json" } });
+  }
+
   const lutCurve = url.match(/^\/api\/lut\/([^/?]+)\/curve$/);
   if (lutCurve) {
     lutCurveLog.push(url);
@@ -997,7 +1267,66 @@ globalThis.fetch = async (url, options) => {
     const tag = tagForPath[matrixPath] ?? 0;
     const interleaved = INTERLEAVED_VIEWS.has(key);
     const data = new Float32Array(H * W * spec.channels);
-    if (interleaved) {
+    if (key === "gamut") {
+      // Class indices, not `(c + 1) * tag`.
+      //
+      // Three properties are being bought here and each cost a revision, so
+      // they are written out rather than left to be re-derived.
+      //
+      // 1. **More than one class.** The generic fill gives a one-channel view a
+      //    frame of a single value, and that is symmetric in the dimension
+      //    under test: a shader painting every class the same colour could not
+      //    be told from a correct one, and neither could a legend row picked by
+      //    a constant.
+      //
+      // 2. **Not symmetric under transposition.** `(row + col) % 4` gives four
+      //    classes and still cannot see a readout that swaps the coordinates,
+      //    because pixel (row 1, col 2) and pixel (row 2, col 1) hold the same
+      //    class. Measured, against the transposed-readout mutation:
+      //
+      //      (row * 2 + col) % 3, NaN at (2,1)  -> 2 fail
+      //      (row + col) % 4,     NaN at (2,1)  -> 2 fail
+      //      (row + col) % 4,     NaN at (2,2)  -> 0 fail  (24/24 green)
+      //
+      //    The third row is the trap: the symmetric fill catches the swap only
+      //    because the swapped index lands on the masked pixel, and moving the
+      //    mask onto the diagonal -- where it is its own transpose -- takes
+      //    that away. Here (row 1, col 2) is class 1 and (row 2, col 1) is the
+      //    mask, and the classes either side of the swap differ anyway.
+      //
+      // 3. **Fewer classes in the frame than in `labels`.** `% 3` against four
+      //    labels, so the frame holds classes {0, 1, 2} and never class 3.
+      //    This is what makes the declared range observable: with all four
+      //    classes present, a client that recomputed vmin/vmax from the pixels
+      //    would get {0, 3} -- the header's own values -- and the check that
+      //    the range comes from the payload could not fail. Measured: with a
+      //    four-class frame, replacing the header range with min/max over the
+      //    data left the scenario 24/24 green. It is also the more honest
+      //    fixture, because a real frame need not contain every class: the
+      //    legend's row count then comes from `labels` because it has to,
+      //    rather than because the two happen to agree.
+      //
+      // The NaN sits at (row 2, col 1). Outside the active projection region a
+      // pixel has no class, and 0.0 is a perfectly good class 0 -- "everything
+      // here is representable", written across the part of the frame the
+      // projector never lit. It is off the first six elements, off the first
+      // and off the last, so it does not collide with the upload summary.
+      //
+      // ここで買っている性質は3つ。(1) 複数クラスがあること（共通の埋め方だと
+      // 1チャンネルのビューは全画素が同じ値になり、全クラスを同色で塗る実装も
+      // 定数で選んだ凡例も区別できない）。(2) 転置に対して非対称であること
+      // ——`(row + col) % 4` は (row 1, col 2) と (row 2, col 1) が同じクラスに
+      // なるため行と列の取り違えを検出できない（実測: 対称な埋め方でマスクを
+      // 対角へ置くと24件すべて通る）。(3) フレーム内のクラス数がラベル数より
+      // 少ないこと——4クラス揃ったフレームでは画素から再計算したレンジも
+      // {0, 3} になり、「レンジはペイロード由来」という検査が落ちなくなる
+      // （実測: 24/24 のまま通った）。実フレームが全クラスを含むとは限らない
+      // 以上、こちらのほうが正直でもある。
+      for (let row = 0; row < H; row++) {
+        for (let col = 0; col < W; col++) data[row * W + col] = (row * 2 + col) % 3;
+      }
+      data[2 * W + 1] = NaN;
+    } else if (interleaved) {
       for (let i = 0; i < data.length; i++) data[i] = ((i % spec.channels) + 1) * tag;
     } else {
       for (let c = 0; c < spec.channels; c++) {
@@ -1021,10 +1350,27 @@ globalThis.fetch = async (url, options) => {
     // 外は coef_tiles も surface も NaN を書くため、マスクされた画素は珍しく
     // ない。rgbの転送検査が見る先頭6要素・先頭・末尾のいずれでもない位置に置く。
     if (key === "surface") data[1 * H * W + 3 * W + 0] = NaN;
+    // A categorical view's range is the class index range, which
+    // routers/view.py pins to [0, len(labels) - 1] -- not the +/-1 every other
+    // fixture here declares. Sent as itself so a client that ignored the
+    // header and assumed a symmetric range would be visible: 0 and 3 are
+    // neither of the defaults, and neither is derivable from the other view's.
+    // categorical のレンジはクラス番号の範囲であり、他のフィクスチャの ±1 とは
+    // 別物である。0/3 はどちらの既定値でもないので、ヘッダを読まない実装が
+    // 見える。
+    // Keyed on the *kind*, not on `gamut`'s key: `gamut_lite` is categorical
+    // too, and a range that did not follow its label count would be a fixture
+    // disagreeing with the contract `routers/view.py` enforces
+    // (`vmax == len(labels) - 1`) rather than exercising it.
+    // キーではなく kind で決める。`gamut_lite` も categorical であり、ラベル数に
+    // 従わないレンジはルータが強制している契約と食い違うだけになる。
+    const range = spec.kind === "categorical"
+      ? { vmin: "0.0", vmax: String(viewLabels(spec).length - 1) }
+      : { vmin: "-1.0", vmax: "1.0" };
     const headers = {
       "X-Height": String(H), "X-Width": String(W),
       "X-Channels": String(spec.channels), "X-Kind": spec.kind,
-      "X-Vmin": "-1.0", "X-Vmax": "1.0",
+      "X-Vmin": range.vmin, "X-Vmax": range.vmax,
       "X-Labels-B64": Buffer.from(JSON.stringify(viewLabels(spec)), "utf-8").toString("base64"),
     };
     // Every view declares its layout, except `headerless_tiles`, whose whole
@@ -1041,6 +1387,19 @@ globalThis.fetch = async (url, options) => {
 
 // ------------------------------------------------------------------- driver
 await import(pathToFileURL(path.join(STATIC_DIR, "js", "main.js")).href);
+
+// The shipped shader module, imported for the one thing only it can answer:
+// whether the GLSL palette the GPU compiles is the same set of colours the
+// sidebar legend draws.
+//
+// `tests/test_web_golden.py` reads `shaders.js` as *text* and therefore sees
+// `${CLASS_PALETTE_GLSL}`, not the numbers it expands to. Evaluating the module
+// is the only way to compare the two consumers of `CLASS_COLORS` against each
+// other, and node is where that can happen.
+// シェーダのモジュールを評価して読み込む。ゴールデンテストはテキストとして
+// 読むので `${CLASS_PALETTE_GLSL}` しか見えず、展開後の数値を凡例と突き合わせ
+// られるのはここだけである。
+const shaders = await import(pathToFileURL(path.join(STATIC_DIR, "js", "shaders.js")).href);
 
 async function waitFor(predicate, timeoutMs = 3000) {
   const deadline = Date.now() + timeoutMs;
@@ -1072,9 +1431,31 @@ const payloadTag = () => (state.payload ? state.payload.data[0] : null);
 // whichever layout the body arrived in.
 // 各タイルが最後に載せた平面の値。layout に関わらずタイルcはチャンネルc、
 // すなわち (c + 1) * tag を受け取らねばならない。
+// The *contents* only. `internal`/`format` are recorded on the same entry but
+// read by uploadedFormats() below, so the existing contents assertions keep
+// comparing against the same four fields they always have.
+// 中身だけを見る。形式は同じ記録に入っているが下の関数で別に読む。
 const uploadedPlanes = () => views.map((v) => {
   const u = v.gl.__uploads;
-  return u.length ? u[u.length - 1] : null;
+  if (!u.length) return null;
+  const { length, first, last, head } = u[u.length - 1];
+  return { length, first, last, head };
+});
+
+// ...and the *format* only.
+//
+// Separate from the contents because a wrong format and wrong contents are
+// different failures with different symptoms: RGB32F on a one-channel plane
+// uploads exactly the same numbers and draws exactly the same first tile, with
+// the class index in the red component and two undefined components beside it.
+// The plane summary above cannot see it; nothing in the picture says so either.
+// 形式だけを見る。1チャンネルの平面を RGB32F で載せても数値は同じで、赤成分に
+// 番号が入り残り2成分が未定義になるだけなので、中身の要約では見えない。
+const uploadedFormats = () => views.map((v) => {
+  const u = v.gl.__uploads;
+  if (!u.length) return null;
+  const { internal, format } = u[u.length - 1];
+  return { internal, format };
 });
 
 // Expected per-tile plane for matrix `tag`: full size, filled with (c+1)*tag.
@@ -1162,6 +1543,65 @@ const colHeads = () => el("tile-grid").children
   .filter((e) => e.className === "col-head mono")
   .map((e) => e.textContent);
 
+// The caption under each tile, which is where computeRanges writes what the
+// tile is showing. Read separately from the column heading above it: the two
+// are written by different functions and say different things.
+// 各タイルの下の見出し。上の列見出しとは別の関数が別のことを書くので分けて読む。
+const tileCaptions = () => el("tile-grid").children
+  .filter((e) => e.className === "tile")
+  .map((cell) => (cell.children.find((c) => c.className === "tile-cap mono") ?? {}).textContent);
+
+// The class legend, read back the way the page presents it.
+//
+// Three separate readings, because three separate things can be wrong and
+// each is invisible from the others: how many rows there are, what they say,
+// and what colour each one claims. A legend built from a hard-coded list has
+// the right number of rows; one whose swatches all resolve to the same colour
+// has the right labels. Only reading all three separates them.
+// 凡例を3つの側面から読む（行数・文字・色）。どれか1つでは、ハードコードした
+// 一覧も、全行が同じ色のパレットも通ってしまう。
+const legendRows = () => el("class-legend").children;
+const legendLabels = () => legendRows().map((row) => row.children[1].textContent);
+const legendSwatches = () => legendRows().map((row) => row.children[0].style.background);
+
+// The palette the *shader* carries, read out of the expanded FRAG_SRC and
+// quantised the way the framebuffer quantises it -- so it can be compared,
+// byte for byte, with what `classColorCss` gives the legend.
+//
+// The two are supposed to be one array: `CLASS_PALETTE_GLSL` is generated from
+// `CLASS_COLORS`, and the legend derives its swatches from the same. Typing the
+// GLSL out by hand instead is the drift this reads back, and it is invisible
+// from everywhere else: the legend still shows four distinct colours and the
+// picture still shows four flat regions, they are just no longer the same four.
+// シェーダ側のパレットを展開後のソースから読み、フレームバッファと同じ量子化を
+// 掛けて凡例の色と突き合わせる。GLSLを手書きに戻すと両者はずれるが、凡例は
+// 4色、絵も4領域のままなので他のどこからも見えない。
+const shaderPalette = () =>
+  [...shaders.FRAG_SRC.matchAll(/if \(i == (\d+)\) return vec3\(([^)]*)\);/g)]
+    .map((m) => {
+      const to8 = (v) => Math.round(Math.min(Math.max(Number(v), 0), 1) * 255);
+      const [r, g, b] = m[2].split(",").map((s) => to8(s.trim()));
+      return { index: Number(m[1]), css: `rgb(${r}, ${g}, ${b})` };
+    });
+
+// The tone-chain controls' enabled state, as one object so a failure names
+// which control is wrong rather than just "false".
+//
+// A copy of main.js's TONE_CONTROL_IDS, and necessarily one: a test that read
+// the list out of the code under test would agree with it by construction. The
+// cost is that a control added to one and not the other goes unwatched, which
+// is why both sides carry a pointer to the other. `el(id)` returning null is
+// left to throw here for the same reason main.js throws: the lists having come
+// apart is the finding.
+// main.js の TONE_CONTROL_IDS の写しであり、写しであることに意味がある
+// （コード側の一覧を読むテストは構造上必ず一致する）。片方だけ足すと見落とすので
+// 双方に相互参照を置く。
+const TONE_IDS = ["ev-slider", "gamma-input", "gamma-slider", "dither-check"];
+const toneDisabled = () =>
+  Object.fromEntries(TONE_IDS.map((id) => [id, el(id) ? el(id).disabled : "missing"]));
+const allToneDisabled = (want) =>
+  TONE_IDS.every((id) => el(id) && el(id).disabled === want);
+
 // How many binary view fetches have been *issued* so far. Server-side params
 // are staged and submitted as a group, so "did changing a control fetch?" is a
 // question about this counter, not about what eventually rendered.
@@ -1206,6 +1646,15 @@ const applyPending = () => /\bpending\b/.test(el("sp-apply").className);
 
 const statusText = () => el("status").textContent;
 const settled = () => waitFor(() => !el("btn-load").disabled && !/取得中|読み込み中/.test(statusText()));
+
+// An object as a key-sorted JSON string, so two bodies can be compared for
+// equality without depending on the order their fields happen to be written
+// in -- and so that an *extra* field is a difference rather than something a
+// field-by-field comparison would never look at.
+// キー順に正規化したJSON。フィールドの記述順に依存せず比較でき、かつ余計な
+// フィールドが増えたことも差として見える（項目ごとの比較では見落とす）。
+const canonical = (o) =>
+  JSON.stringify(Object.fromEntries(Object.keys(o).sort().map((k) => [k, o[k]])));
 
 // Wait until the named responses have all been *returned* by the fake server,
 // then give the continuations that follow each await a few turns to run. This
@@ -1379,9 +1828,9 @@ if (SCENARIO === "ordering") {
 if (SCENARIO === "views") {
   const options = el("view-select").children.map((o) => o.value);
   check("view selector is populated from /api/views",
-    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,surface,"
-      + "compensation,tri_scalar,bad_rgb,mangled_layout,mono_scalar,"
-      + "headerless_tiles,refused_view",
+    options.join(",") === "coef_tiles,plain_tiles,legacy_tiles,gamut,gamut_lite,"
+      + "vector_field,surface,compensation,tri_scalar,bad_rgb,mangled_layout,"
+      + "mono_scalar,headerless_tiles,refused_view",
     options.join(","));
   check("a second registered view is reachable from the selector",
     options.includes("plain_tiles"), options.join(","));
@@ -1436,12 +1885,20 @@ if (SCENARIO === "views") {
     JSON.stringify(state.ranges && state.ranges.map((r) => r.vmax)));
 
   // --- an unsupported kind must fail loudly, not render as if it were scalar
+  //
+  // `vector_field` declares `kind: "flow"`, which no row of KIND_TRAITS
+  // answers. It replaced `gamut` here when `categorical` was implemented, and
+  // the replacement is the point: this check is about *unknown* kinds, so
+  // pointing it at whichever kind happens to be unimplemented today would
+  // retire it the moment that kind is built. See the fixture's own note.
+  // 未知の kind は `flow`。`categorical` を実装した時点で `gamut` はここの
+  // 役目を果たせなくなるため、実装予定の無いものに差し替えてある。
   const before = state.payload;
-  el("view-select").value = "gamut";
+  el("view-select").value = "vector_field";
   el("view-select").__fire("change");
   await sleep(300);
   check("unsupported kind is refused with a message naming it",
-    /未対応/.test(statusText()) && /categorical/.test(statusText()), statusText());
+    /未対応/.test(statusText()) && /flow/.test(statusText()), statusText());
   check("unsupported kind leaves state.payload identity unchanged",
     state.payload === before, `same object: ${state.payload === before}`);
 
@@ -1915,6 +2372,314 @@ if (SCENARIO === "rgb") {
     /target=target7/.test(withTarget), withTarget);
   check("the select next to it is submitted in the same group",
     /output=code/.test(withTarget), withTarget);
+}
+
+if (SCENARIO === "gamut") {
+  // A categorical view is one picture of *class indices*, and nothing about
+  // that survives being treated as a scalar view of one channel.
+  //
+  // The failure this scenario is written against is the quiet one. A class
+  // index is a perfectly good float: the scalar path uploads it, the diverging
+  // colormap gives it a colour, exposure and gamma move that colour, and the
+  // result is a smooth-looking picture of four flat regions with a ± range
+  // under it. Everything renders. What is lost is that the numbers are names,
+  // not quantities -- and once the tone chain is live, the colours stop being
+  // the ones the legend is standing next to.
+  //
+  // categorical は「クラス番号の絵」であり、1チャンネルのスカラービューとして
+  // 扱うと何も残らない。クラス番号も float なので、転送もカラーマップも露出も
+  // 通ってしまい、絵は出る。失われるのは「その数値は量ではなく名前である」
+  // ことと、トーンチェーンが効いた瞬間に凡例と色が食い違うことである。
+  clickLoad("A");
+  await settled();
+
+  // Both directions for every control this view turns off. "Always enabled"
+  // and "always disabled" each pass one half, which is how a check about a
+  // control's state stops being able to fail.
+  // 無効化の検査は両方向で見る（常時有効・常時無効のどちらも片側だけなら通る）。
+  check("the tone controls are live on a scalar view",
+    allToneDisabled(false), JSON.stringify(toneDisabled()));
+  check("the colormap control is enabled for a scalar view",
+    el("cmap-select").disabled === false, `disabled=${el("cmap-select").disabled}`);
+
+  const options = el("view-select").children.map((o) => o.value);
+  check("the categorical view is reachable from the selector",
+    options.includes("gamut"), options.join(","));
+
+  el("view-select").value = "gamut";
+  el("view-select").__fire("change");
+  await settled();
+
+  check("a categorical view renders instead of being refused as an unknown kind",
+    /表示中/.test(statusText()), statusText());
+
+  // --- one tile, and one tile that is not captioned with a class name
+  //
+  // `axesFromLabels` cannot parse these labels (no "->"), so the label-derived
+  // fallback produces a 1x1 grid captioned `labels[0]` -- "色域外" here, the
+  // name of class 0, written over a picture containing all four. The tile
+  // count is right either way, which is exactly why the heading is asserted
+  // separately from it.
+  // ラベルは "->" 形式ではないのでフォールバックは1行1列を作り、見出しは
+  // `labels[0]`（＝クラス0の名前）になる。枚数はどちらでも正しいので、
+  // 見出しは別に検証する。
+  check("a categorical payload draws one tile",
+    views.length === 1, `tiles=${views.length}`);
+  check("the tile is not headed with the name of class 0",
+    JSON.stringify(colHeads()) === JSON.stringify(["クラス"]),
+    JSON.stringify(colHeads()));
+
+  // --- the upload: contents, and the format the contents went up in
+  //
+  // Two assertions because they fail differently and neither implies the
+  // other. RGB32F on this plane uploads the same twenty numbers -- so the
+  // contents check passes -- and puts each class index in a red component with
+  // two undefined components beside it, which draws.
+  // 中身と形式は別々に見る。RGB32F でも数値は同じなので中身の検査は通り、
+  // 赤成分だけに番号が入った状態で描けてしまう。
+  check("the single tile carries the whole class-index plane",
+    JSON.stringify(uploadedPlanes())
+      === JSON.stringify([{ length: H * W, first: 0, last: 1, head: [0, 1, 2, 0, 1, 2] }]),
+    JSON.stringify(uploadedPlanes()));
+  check("class indices are uploaded as R32F/RED, not as a colour",
+    JSON.stringify(uploadedFormats())
+      === JSON.stringify([{ internal: "R32F", format: "RED" }]),
+    JSON.stringify(uploadedFormats()));
+
+  // --- and the shader is told which branch to run
+  //
+  // The texture can be uploaded correctly and the shader left in u_mode = 0,
+  // which runs the diverging colormap over 0..3: four flat regions in four
+  // shades of one ramp, which looks like a working view of a classification.
+  // テクスチャを正しく載せても u_mode が0のままなら、0〜3が発散カラーマップに
+  // 通り、1本のランプ上の4段階として「それらしく」描かれてしまう。
+  check("the shader is told u_mode = 2 for the categorical tile",
+    views[0].gl.__uniforms.u_mode === 2, `u_mode=${views[0].gl.__uniforms.u_mode}`);
+
+  // --- the display range is the class range the server declared
+  //
+  // 0 and 3, from the header -- neither of which is this harness's default
+  // ±1, and neither derivable from it. views/gamut.py takes the range from
+  // its LABELS rather than from the pixels precisely so an all-in-gamut frame
+  // does not collapse to vmin == vmax == 0; a client that recomputed it from
+  // the data would undo that from the other side, and **the fixture's frame
+  // holds only classes 0-2 so that such a client is visible here** (with all
+  // four classes present the data-derived range is {0, 3} too, and this check
+  // measured 24/24 green against exactly that mutation).
+  // レンジはヘッダの 0/3（このハーネスの既定 ±1 のどちらでもない）。フレームが
+  // クラス0〜2しか持たないのは、画素から再計算する実装をここで見えるように
+  // するためである（4クラス揃っていると再計算しても {0, 3} になり通ってしまう）。
+  check("the categorical range is the class index range from the payload",
+    JSON.stringify(state.ranges) === JSON.stringify([{ vmin: 0, vmax: 3 }]),
+    JSON.stringify(state.ranges));
+
+  // ...and it is *worded* as a class count rather than as an interval.
+  //
+  // The other half of `labelsAreClasses`, and the half nothing was watching.
+  // `[0.0000, 3.0000]` is what the shared-range branch writes for an rgb view,
+  // and it invites the reading that 1.5 is a value this view can hold. The
+  // tile caption is the same decision one line down: `labels.join(" ")` there
+  // -- again correct for rgb, where the labels are R/G/B -- puts all four class
+  // names under the tile, restating the legend in the one place with no room
+  // for it. Measured before these two existed: forcing the `classes` ternary
+  // false, and reverting the caption, each left the scenario 24/24 green.
+  // レンジの「言い方」も見る。`[0.0000, 3.0000]` は rgb 用の書き方で、1.5 という
+  // 値がありうるかのように読める。タイル見出しの `labels.join(" ")` も同様に
+  // rgb 用で、幅の無い場所に凡例を書き写すことになる。実測: この2件が無い状態
+  // では、どちらへ戻しても24件すべて通っていた。
+  check("the display range is worded as a class count, not as an interval",
+    el("range-info").textContent === "クラス 0–3", el("range-info").textContent);
+  check("the tile caption does not restate the legend under the tile",
+    JSON.stringify(tileCaptions()) === JSON.stringify(["4 クラス（凡例参照）"]),
+    JSON.stringify(tileCaptions()));
+
+  // --- the legend
+  //
+  // The one place the class -> colour mapping is stated in words, and the one
+  // thing a screenshot of this view is read against. Its labels have to come
+  // from `payload.labels`: the fixture's four are deliberately neither
+  // views/gamut.py's own class names nor in its order, so a legend built from
+  // a hard-coded list of the shipped names looks identical to a correct one
+  // against the real server and wrong only here.
+  // クラスと色の対応を言葉で述べる唯一の場所。ラベルは `payload.labels` から
+  // 取らねばならない。フィクスチャの4つは実装側の語とも順序とも違えてある。
+  check("the legend is on screen for a categorical view",
+    el("class-legend").hidden === false, `hidden=${el("class-legend").hidden}`);
+  check("the legend has one row per class in the payload",
+    legendRows().length === state.payload.labels.length,
+    `rows=${legendRows().length} labels=${state.payload.labels.length}`);
+  check("the legend's labels are the payload's, not a hard-coded list",
+    JSON.stringify(legendLabels()) === JSON.stringify(state.payload.labels),
+    `${JSON.stringify(legendLabels())} vs ${JSON.stringify(state.payload.labels)}`);
+  // Four rows are useless if two of them are the same colour: the picture
+  // would show three regions where the data has four, and the legend would
+  // insist there are four. Distinctness is what makes the mapping invertible
+  // by eye; how far apart the four are perceptually is measured on the GPU,
+  // where the pixels actually are.
+  // 4行あっても2つが同じ色なら意味がない（絵は3領域、凡例は4クラスと主張）。
+  // 見た目の距離はGPU側で測る。
+  check("each class in the legend has its own colour",
+    new Set(legendSwatches()).size === legendRows().length
+      && legendSwatches().every((c) => typeof c === "string" && c.length > 0),
+    JSON.stringify(legendSwatches()));
+  // ...and it is the *shader's* colour, not a second palette that agrees today.
+  //
+  // `CLASS_COLORS` is supposed to be one array with two consumers: the GLSL is
+  // generated from it, and `classColorCss` quantises it for the swatch. Typing
+  // the GLSL out beside the array instead is a change nothing else here can
+  // see -- the legend still lists four distinct colours, the picture still has
+  // four flat regions, and only a GPU readback would show that they are no
+  // longer the same four. Compared after 8-bit quantisation, which is the
+  // precision at which "the swatch is the pixel" either holds or does not.
+  // 凡例の色がシェーダの色そのものであること。GLSLを手書きに戻しても、凡例は
+  // 4色のまま・絵も4領域のままで、他のどこからも差が見えない。比較は8bit量子化
+  // 後に行う（「スウォッチ＝画素」が成り立つかどうかはその精度で決まる）。
+  check("the legend's colours are the palette the shader compiles",
+    (() => {
+      // A missing export is a failing check, not an exception. Everywhere else
+      // this harness lets a missing thing throw, because throwing names it --
+      // but this check sits in the middle of the scenario and an abort here
+      // would take the twenty-odd results after it with it, which reports less
+      // than "this one is false" does.
+      // 輸出が無い場合は例外ではなく失敗として扱う。ここで中断すると後続の
+      // 20件あまりの結果ごと失われ、かえって分からなくなる。
+      const palette = shaders.CLASS_COLORS;
+      if (!Array.isArray(palette) || typeof shaders.classColorCss !== "function") return false;
+      const glsl = shaderPalette();
+      if (glsl.length !== palette.length) return false;
+      return glsl.every((entry, i) => entry.index === i
+        && entry.css === shaders.classColorCss(i));
+    })(),
+    `${JSON.stringify(shaderPalette())} vs `
+      + JSON.stringify((shaders.CLASS_COLORS ?? []).map((_, i) => shaders.classColorCss?.(i))));
+  // ...and it has to be where the picture is being looked at.
+  //
+  // The sidebar is `overflow-y: auto`, and with a target and a LUT loaded its
+  // foot is off the bottom of a 1600x1000 window -- measured, in the browser,
+  // with the legend in its first position down among the two standing
+  // legends. That is the same failure the display range and the timings had
+  // before they moved into the readout strip, and it is worse here: those two
+  // restated numbers that were on screen elsewhere, while this is the only
+  // statement of what the four colours mean. Pinned by position rather than by
+  // pixels because there is no CSS engine here; the first `<hr>` is what
+  // separates the per-view controls at the top of the column from everything
+  // that scrolls below.
+  // サイドバーは縦に溢れる。ターゲットとLUTを読み込んだ1600x1000の窓では
+  // 下端が画面外にあることを実測した（凡例を最初に置いた位置）。表示レンジ
+  // と計測を移したのと同じ問題であり、しかもこちらは「4色が何を意味するか」
+  // を述べる唯一の場所なので、より重い。CSSエンジンが無いので位置で固定する。
+  check("the class legend sits above the sidebar's first divider",
+    (() => {
+      const kids = el("class-legend").parentElement.children;
+      const at = kids.indexOf(el("class-legend"));
+      const firstHr = kids.findIndex((c) => c.tagName === "HR");
+      return at >= 0 && firstHr >= 0 && at < firstHr;
+    })(),
+    panelOf("class-legend"));
+
+  // --- exposure, gamma and the colormap do not apply to a name
+  check("the colormap control is disabled for a categorical view",
+    el("cmap-select").disabled === true, `disabled=${el("cmap-select").disabled}`);
+  check("the tone controls are disabled for a categorical view",
+    allToneDisabled(true), JSON.stringify(toneDisabled()));
+
+  // --- the readout reads `labels[value]`, not `labels[channel]`
+  //
+  // The axis the brief for this task names. There is one channel and four
+  // labels: the per-channel reading every other kind uses prints `labels[0]`
+  // -- "色域外" -- beside the correct number, under the correct heading, for
+  // every pixel in the frame. The fixture's class at (col 2, row 1) is 1, so
+  // the two readings disagree here (`labels[0]` is 色域外), and its transpose
+  // (col 1, row 2) is the masked pixel, so a swapped index disagrees too.
+  // チャンネルで引く読み方は全画素で `labels[0]` を出す。フィクスチャの
+  // (col 2, row 1) はクラス1、その転置 (col 1, row 2) はマスク画素なので、
+  // ラベルの軸と添字の順序の両方について食い違いが出る。
+  views[0].onHover({ col: 2, row: 1 });
+  const classItems = viewValueItems();
+  check("the readout names the class the pixel is, not the first class",
+    classItems.length === 1
+      && classItems[0].children[1].textContent === "1 1超クリップ",
+    `${classItems.length} item(s): ${JSON.stringify(viewValueNumbers())}`);
+  check("the readout's caption is the class axis, not a channel name",
+    JSON.stringify(viewValueLabels()) === JSON.stringify(["クラス"]),
+    JSON.stringify(viewValueLabels()));
+
+  // A pixel with no class must read as no class. Outside the active
+  // projection region the payload is NaN, and 0 -- the class a rounded NaN
+  // would land on -- is "範囲内": the most reassuring possible wrong answer,
+  // over the part of the frame the projector never lit.
+  // クラスの無い画素は「無い」と読めること。丸めた NaN が落ちる先はクラス0
+  // ＝「範囲内」であり、最も安心できる誤答になる。
+  views[0].onHover({ col: 1, row: 2 });
+  check("a pixel with no class reads as NaN rather than as class 0",
+    JSON.stringify(viewValueNumbers()) === JSON.stringify(["NaN"])
+      && JSON.stringify(viewValueClasses()) === JSON.stringify(["vv-num nan"]),
+    `${JSON.stringify(viewValueNumbers())} ${JSON.stringify(viewValueClasses())}`);
+
+  // --- a categorical view whose class count is not the palette's length
+  //
+  // Every legend assertion above runs on `gamut`, which has four classes
+  // against a four-entry `CLASS_COLORS`. On that fixture alone,
+  // `rows === payload.labels.length` is `4 === 4` whichever array the loop
+  // reads, so a legend driven off the *palette* -- the obvious wrong build,
+  // since the swatches come from there -- passed every one of them (measured:
+  // `payload.labels.length` -> `CLASS_COLORS.length` left the scenario green).
+  //
+  // The failure that hides there is not this view's: it is the next
+  // categorical view's. `routers/view.py` admits any of them at
+  // `len(labels) >= 2`, so a three-class view draws four rows -- three right,
+  // and a fourth whose label is the string `undefined` beside a colour no pixel
+  // in the picture carries. The legend is the only place the mapping is stated
+  // in words, so it would be asserting a class that does not exist.
+  //
+  // The asymmetry is asserted here as well as arranged in the fixture,
+  // otherwise a later edit could quietly restore the four-class symmetry and
+  // take this check's discrimination with it while leaving it green.
+  // 上の凡例の検査はすべて `gamut`（4クラス）で走っており、`CLASS_COLORS` も
+  // 4要素なので、行数をどちらから取っても同じ数になる。ここでクラス数の違う
+  // ビューに切り替えて、行数がペイロード由来であることを見る。非対称であること
+  // 自体もチェックに書く（フィクスチャが対称に戻れば判別力が消えるため）。
+  el("view-select").value = "gamut_lite";
+  el("view-select").__fire("change");
+  await settled();
+  const paletteLength = Array.isArray(shaders.CLASS_COLORS)
+    ? shaders.CLASS_COLORS.length : -1;
+  check("the legend's row count is the payload's class count, not the palette's",
+    state.payload.labels.length === 3
+      && paletteLength !== state.payload.labels.length
+      && legendRows().length === state.payload.labels.length
+      && JSON.stringify(legendLabels()) === JSON.stringify(state.payload.labels)
+      && new Set(legendSwatches()).size === legendRows().length,
+    `labels=${JSON.stringify(state.payload.labels)} palette=${paletteLength} `
+      + `rows=${legendRows().length} shown=${JSON.stringify(legendLabels())}`);
+  // The two other places the class count is read, on the same view: a caption
+  // and a range that came from the palette would be wrong in the same way and
+  // are not covered by the `gamut` checks above for the same reason.
+  // クラス数を読む残り2箇所も同じビューで見る。
+  check("the caption and range of a three-class view count three classes",
+    el("range-info").textContent === "クラス 0–2"
+      && JSON.stringify(tileCaptions()) === JSON.stringify(["3 クラス（凡例参照）"]),
+    `range=${el("range-info").textContent} captions=${JSON.stringify(tileCaptions())}`);
+
+  // --- and every one of those has to be given back on the way out
+  //
+  // A one-way trip would leave the coefficient tiles with dead exposure and γ
+  // sliders and a class legend explaining a picture that is no longer there.
+  // 片道だと、係数タイルに戻っても露出とγが死んだままになり、消えた絵を
+  // 説明する凡例が残る。
+  el("view-select").value = "coef_tiles";
+  el("view-select").__fire("change");
+  await settled();
+  check("switching back to a scalar view restores one tile per channel",
+    views.length === 12, `tiles=${views.length}`);
+  check("switching back to a scalar view puts the shader back in u_mode = 0",
+    views.every((v) => v.gl.__uniforms.u_mode === 0),
+    JSON.stringify(views.map((v) => v.gl.__uniforms.u_mode)));
+  check("switching back to a scalar view re-enables the tone controls",
+    allToneDisabled(false), JSON.stringify(toneDisabled()));
+  check("switching back to a scalar view takes the class legend away",
+    el("class-legend").hidden === true && legendRows().length === 0,
+    `hidden=${el("class-legend").hidden} rows=${legendRows().length}`);
 }
 
 if (SCENARIO === "probe") {
@@ -3058,6 +3823,602 @@ if (SCENARIO === "lut") {
   check("loading a LUT does not fetch the view on its own",
     viewRequestCount() === viewFetchesBeforeLoading,
     `view fetches=${viewFetchesBeforeLoading} -> ${viewRequestCount()}`);
+}
+
+if (SCENARIO === "generate") {
+  // The button that writes to disk, and the one property everything here is
+  // about: **what it sends is what is on screen.**
+  //
+  // Every other check in this file is about a picture. This one is about a
+  // file, and that changes what a wrong answer costs. A tile drawn from the
+  // wrong channel is wrong until the next render; a PNG written from a stale
+  // target id, a defaulted linearizer or an unapplied decode mode is wrong on
+  // the user's disk, under a name that says it is the picture they were
+  // looking at, and there is nothing on screen afterwards to say otherwise.
+  //
+  // "Pressing the button issues a fetch" does not test this, and cannot: a
+  // build that sent `linearizer: "none"` and the first image of the directory
+  // would satisfy it exactly as well as a correct one. So the body is compared
+  // field for field, and **every fixture value below is moved off its own
+  // declared default first** -- the target is image 2 of a directory (default
+  // `""`), the linearizer is `inverse_lut` (default `"none"`), the decode mode
+  // is `gamma` (default `"srgb"`) and its exponent 1.7 (default 2.2). An
+  // expected value that coincided with a default would pass against a body
+  // built entirely of hard-coded defaults.
+  //
+  // 画面に出ている設定がそのまま送られること。他のチェックが相手にしている
+  // のは絵だが、ここで間違えると誤りはディスク上のファイルとして残り、しかも
+  // 「見ていた絵」の名前で残る。「押すと fetch が飛ぶ」ではこれは検証できない
+  // ——既定値だけで組んだ本文でも同じように通る。よって本文をフィールド単位で
+  // 突き合わせ、フィクスチャの値は**すべて既定値から動かしてから**押す。
+  check("the page has a generate control (an output directory and a button)",
+    el("gen-output-dir") !== null && el("btn-generate") !== null,
+    `dir=${el("gen-output-dir") !== null} button=${el("btn-generate") !== null}`);
+
+  // The line beside the button as the page first paints, read before anything
+  // is loaded and asserted at the end of the scenario together with its two
+  // other states.
+  //
+  // Nothing is displayed yet here, so the obstacle is "load a matrix" and the
+  // remedy is the path box at the top of the sidebar. Printing the *view*
+  // refusal instead is not a small inaccuracy -- it tells the user to switch
+  // view, which does nothing, and it spends the one sentence that has to mean
+  // something under `gamut` on a state where it is false. Measured before this
+  // was fixed: 「このビューでは生成できません」 from the first paint onward, and
+  // then on every view that *can* generate, beside an enabled button.
+  // 起動直後の行。まだ何も表示されていないので障害は「行列を読み込むこと」で
+  // あり、ここでビューの断り文を出すのは「ビューを切り替えろ」と言うに等しい。
+  const genInfoAtFirstPaint = el("gen-info").textContent;
+
+  clickLoad("A");
+  await settled();
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await settled();
+
+  // The two runtime ids, obtained the way a user obtains them: through the
+  // sidebar loaders, from the server. Not typed in -- an id this harness made
+  // up would be indistinguishable from one the frontend made up.
+  // 2つの実行時IDは利用者と同じ手順（読み込み欄経由でサーバから）取る。
+  // ここで直接打ち込むと、フロントが勝手に作ったIDと区別が付かない。
+  el("target-path").value = "data/dir";
+  el("btn-load-target").__fire("click");
+  await waitFor(() => el("sp-target").value === "target_dir_0");
+  // The *third* image, not the first: the id a client that ignored the picker
+  // would send is `target_dir_0`, which is a real id for the wrong image.
+  // 3枚目を選ぶ。選択を無視した実装が送る `target_dir_0` は「別の画像の、
+  // 実在するID」であり、最も気付きにくい誤りである。
+  el("target-images").value = "2";
+  el("target-images").__fire("change");
+  await waitFor(() => el("sp-target").value === "target_dir_2");
+
+  el("lut-path").value = "data/inverse_lut.npz";
+  el("btn-load-lut").__fire("click");
+  await waitFor(() => el("sp-lut").value === "lut_measured");
+
+  stageParam("linearizer", "inverse_lut");
+  stageParam("target_decode", "gamma");
+  stageParam("target_gamma", "1.7");
+  // Staged and applied like the rest, and deliberately *not* expected in the
+  // body: `POST /api/generate` writes both the linear compensation image and
+  // the projector image every time, so which of the two the viewer happens to
+  // be showing does not select anything. A body carrying `output` would be a
+  // field the endpoint does not declare -- which the exact-key comparison
+  // below is what catches.
+  // `output` は適用するが本文には現れない。生成は毎回2枚とも書くので選ぶ
+  // ものが無い。余計なフィールドは下のキー集合の比較が捉える。
+  stageParam("output", "code");
+  applyParams();
+  await settled();
+
+  // --- 1. the body is the settings on screen
+  el("gen-output-dir").value = "data/out_generated";
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === 1);
+  await waitFor(() => el("btn-generate").disabled === false);
+
+  const sent = generatePostLog[0];
+  const expected = {
+    matrix_id: "matrix_A",
+    target_id: "target_dir_2",
+    linearizer: "inverse_lut",
+    lut_id: "lut_measured",
+    target_decode: "gamma",
+    target_gamma: 1.7,
+    output_dir: "data/out_generated",
+    // The endpoint's own default, restated here because it is the field whose
+    // silent flip is unrecoverable: `overwrite: true` on a first press turns
+    // the 409 guard off for a user who never asked for it.
+    // 既定値であっても書く。ここが黙って true になると、409 のガードは
+    // 誰も頼んでいないのに外れる。
+    overwrite: false,
+  };
+  check("the generate call sends the settings on screen, field for field",
+    canonical(sent) === canonical(expected),
+    `sent=${canonical(sent)} expected=${canonical(expected)}`);
+
+  // The paths that come back, which are the server's absolute ones and not the
+  // relative string in the box. Reporting the box back would look right on
+  // every machine where the two happen to agree, and this endpoint's whole
+  // safety argument is that a path it names is a path the user can find.
+  // 返ってきた絶対パスを出すこと（入力欄の文字列ではない）。
+  const shownFiles = el("gen-files").children.map((c) => c.textContent);
+  check("the saved paths shown are the absolute ones the server reported",
+    JSON.stringify(shownFiles) === JSON.stringify(generateFiles("data/out_generated"))
+      && statusText().includes(generateAbsolute("data/out_generated")),
+    `files=${JSON.stringify(shownFiles)} status=${statusText()}`);
+
+  // ...and the line beside the button says a save happened.
+  //
+  // The other half of §8's line, and the half that was unasserted after the
+  // refusal half was fixed: `refreshGenerateButton` was corrected to write
+  // `generateOutcome` on both branches, but *what that variable holds after a
+  // success* was read by nothing. Deleting the success `setGenerateOutcome`
+  // left all 17 checks green (measured), and what it produces is the exact
+  // inverse of the defect that fix was for: three absolute paths appear under a
+  // line still reading 未生成, because the `finally`'s
+  // `refreshGenerateButton()` restores the stale outcome over 「生成中…」.
+  //
+  // Read again after a round trip through a view that cannot generate, so the
+  // line is asserted to *survive* the switch as well as to be written.
+  //
+  // An earlier draft of this comment claimed the round trip was what made the
+  // check discriminate -- that an immediate read "would not see the restore at
+  // all". Measured, that is false: `finally { setGenerateBusy(false) }` calls
+  // `refreshGenerateButton()` synchronously, so the restore has already run by
+  // the time `await settled()` returns, and an immediate-only assertion fails
+  // under both mutations too. The round trip adds the survives-a-switch half,
+  // not the discrimination.
+  // 以前のこのコメントは「往復しないと復元が見えない」と書いていたが、実測では
+  // 誤り。`finally` の `refreshGenerateButton()` は同期的に走るので、
+  // `await settled()` が返る時点で復元は済んでおり、即時読みだけでも両方の
+  // 変異で落ちる。往復が足しているのは判別力ではなく「切替を跨いで保たれる」側。
+  // 断りの側を直したときに、成功の側は誰も読んでいなかった。成功時の
+  // `setGenerateOutcome` を消しても17件すべて緑だった（実測）。生じるのは
+  // 直した欠陥のちょうど裏返しで、3つの絶対パスの脇に 未生成 と出る
+  // （`finally` の `refreshGenerateButton()` が古い結果で「生成中…」を上書き
+  // するため）。行を書き換えるのはその復元経路なので、ビューを往復してから
+  // もう一度読む。
+  const genInfoAfterSuccess = el("gen-info").textContent;
+  el("view-select").value = "gamut";
+  el("view-select").__fire("change");
+  await settled();
+  const genInfoOnGamutAfterSuccess = el("gen-info").textContent;
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await settled();
+  check("a successful save is what the line beside 生成 says, and keeps saying",
+    genInfoAfterSuccess === "3 件を保存"
+      && genInfoOnGamutAfterSuccess === "このビューでは生成できません"
+      && el("gen-info").textContent === "3 件を保存"
+      && el("btn-generate").disabled === false,
+    `after the press="${genInfoAfterSuccess}" on gamut="${genInfoOnGamutAfterSuccess}" `
+      + `back on compensation="${el("gen-info").textContent}" `
+      + `disabled=${el("btn-generate").disabled}`);
+
+  // --- 2. "on screen" means the picture, not the boxes
+  //
+  // A staged-but-unapplied control is ahead of what is displayed: the tiles
+  // still show the previous value and 適用 is ringed to say so. Generating
+  // there would write a file that matches neither -- it would match the boxes,
+  // which is the one thing nobody is looking at. Both directions are checked,
+  // because "always refuse" passes the first half alone.
+  // 未適用のコントロールは表示より先に進んでいる。そこで生成すると、絵とも
+  // 一致せず、誰も見ていない入力欄とだけ一致するファイルが書かれる。
+  // 「常に断る」実装でも前半は通るので両方向を見る。
+  stageParam("target_gamma", "1.3");
+  const postsBeforePending = generatePostLog.length;
+  el("btn-generate").__fire("click");
+  await sleep(60);
+  check("生成 refuses while a staged change has not been applied, and says why",
+    generatePostLog.length === postsBeforePending
+      && /画面に出ている絵/.test(statusText())
+      && el("status").classList.contains("error"),
+    `posts=${postsBeforePending} -> ${generatePostLog.length} status=${statusText()}`);
+
+  applyParams();
+  await settled();
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBeforePending + 1);
+  check("after 適用 the newly displayed value is the one that is sent",
+    generatePostLog[postsBeforePending].target_gamma === 1.3,
+    `target_gamma=${generatePostLog[postsBeforePending].target_gamma}`);
+  await waitFor(() => el("btn-generate").disabled === false);
+
+  // --- 2b. ...and "on screen" means the matrix too, which no guard covers
+  //
+  // `POST /session/matrix` returns an id in milliseconds; the transfer that
+  // draws it takes seconds on a 1.56 GB matrix. In between, `state.matrixId`
+  // names the new one, the tiles still show the old one, and **not one control
+  // has changed** -- so the staged-vs-applied guard above passes and the press
+  // goes through. A body built from `state.matrixId` there compensates the
+  // picture the user is looking at with a matrix they have never seen, and the
+  // file is filed under the name of the one they were shown.
+  //
+  // This is the field-for-field check's blind spot: there the two ids are equal
+  // and the mutation is invisible. Here they are deliberately different, which
+  // is the only state that can tell them apart. Measured before this check
+  // existed: `matrix_id: state.shownMatrixId` -> `state.matrixId` failed 0 of
+  // the scenario's checks.
+  //
+  // 「画面に出ているもの」は行列にも及ぶ。`POST /session/matrix` はすぐ返るが
+  // 描画までは数秒あり、その間コントロールは1つも変わらないので上のガードは
+  // 通す。ここで `state.matrixId` を送ると、見ている絵を「見たことのない行列」
+  // で補償したファイルが、見ていた絵の名前で残る。2つのIDが等しくない状態は
+  // ここでしか作れない（フィールド単位の検査では両者が一致しており見えない）。
+  viewDelayMs.B = 400;
+  clickLoad("B");
+  await waitFor(() => state.matrixId === "matrix_B");
+  const shownWhileLoading = state.shownMatrixId;
+  const registeredWhileLoading = state.matrixId;
+  el("gen-output-dir").value = "data/out_during_load";
+  el("gen-output-dir").__fire("input");
+  const postsBeforeInFlight = generatePostLog.length;
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBeforeInFlight + 1);
+  const duringLoad = generatePostLog[postsBeforeInFlight];
+  check("a press while a matrix is still loading saves the matrix on screen",
+    registeredWhileLoading === "matrix_B"
+      && shownWhileLoading === "matrix_A"
+      && duringLoad.matrix_id === "matrix_A",
+    `registered=${registeredWhileLoading} shown=${shownWhileLoading} `
+      + `sent=${duringLoad.matrix_id}`);
+  // Let B land before going on, so every later press is about a settled screen.
+  await waitFor(() => state.shownMatrixId === "matrix_B");
+  viewDelayMs.B = 0;
+  await waitFor(() => el("btn-generate").disabled === false);
+
+  // --- 3. one press is one generation
+  //
+  // The call takes seconds on a real matrix (the pipeline runs, two PNGs are
+  // encoded), which is exactly long enough for a second click. Two overlapping
+  // writes into the same directory is not a slow duplicate: the second one
+  // meets the first one's files and comes back 409, so the visible result of
+  // an impatient double-click is a conflict about a directory the user is in
+  // the middle of filling.
+  // 実機では数秒かかり、その間に2度目を押せてしまう。同じディレクトリへの
+  // 二重書き込みは「遅い重複」では済まない——2つ目は1つ目のファイルに衝突して
+  // 409 になり、書いている最中のディレクトリについて衝突を告げられる。
+  holdGenerate = true;
+  const postsBeforeDouble = generatePostLog.length;
+  el("gen-output-dir").value = "data/out_twice";
+  el("gen-output-dir").__fire("input");
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBeforeDouble + 1);
+  const disabledDuring = el("btn-generate").disabled;
+  el("btn-generate").__fire("click");
+  await sleep(60);
+  check("the button is disabled while generating and a second press sends nothing",
+    disabledDuring === true && generatePostLog.length === postsBeforeDouble + 1,
+    `disabled during=${disabledDuring} posts=${postsBeforeDouble} -> `
+      + `${generatePostLog.length}`);
+  releaseGenerates();
+  holdGenerate = false;
+  await waitFor(() => el("btn-generate").disabled === false);
+
+  // --- 4. a 409 is a question, not a retry
+  //
+  // `generate.py` refuses a non-empty directory and writes nothing -- not even
+  // the directory itself -- because a mistyped path in this repository can name
+  // 99 GB of captures that cost hardware, a subject and a day to reproduce. The
+  // guard only works if the answer stays deliberate: a frontend that resent
+  // with `overwrite: true` on its own, or that offered 上書き as the default
+  // action, would turn a refusal that stops every typo into a dialog people
+  // click through.
+  // 409 は「やり直し」ではなく問いである。実物は空でないディレクトリへは
+  // 何も書かない（打ち間違いが撮り直しの効かない実測データを指しうるため）。
+  // 自動で再送する実装や、上書きを既定の動作にする実装は、あらゆる打ち間違いを
+  // 止めるはずのガードを「押して通り過ぎるもの」に変えてしまう。
+  el("gen-output-dir").value = "data/existing";
+  el("gen-output-dir").__fire("input");
+  const postsBefore409 = generatePostLog.length;
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBefore409 + 1);
+  await waitFor(() => el("gen-overwrite").hidden === false);
+  // Long enough for an automatic resend to have landed. Nothing waits on a
+  // second request here on purpose -- the assertion is that there isn't one.
+  // 自動再送があれば届くだけの時間を置く。ここで2件目を待たないのは、
+  // 「2件目が無いこと」が主張だからである。
+  await sleep(80);
+  const first409 = generatePostLog[postsBefore409];
+  // The path list is cleared as part of this, and that is not decoration: it
+  // describes *the last generation*, and this press did not produce one. Left
+  // up, three absolute paths sit on screen at the moment nothing was written
+  // -- and under a 409 they are (part of) what is in the way, so they read as
+  // "here is what was just saved". Measured before this was fixed: the
+  // successful run's three paths stayed on screen under 未生成.
+  // 一覧が「直前の生成」を説明している以上、生成していない押下のあとに残っては
+  // ならない。409 では、残った3つのパスは「邪魔をしている当のもの」であり、
+  // 何も書かれていない瞬間に「いま保存されたもの」と読めてしまう。
+  check("a 409 offers 上書き explicitly and resends nothing until it is confirmed",
+    first409.overwrite === false
+      && generatePostLog.length === postsBefore409 + 1
+      && el("gen-overwrite").hidden === false
+      && el("gen-overwrite-detail").textContent.includes("is not empty")
+      && !/\{"detail"|\\"/.test(el("gen-overwrite-detail").textContent)
+      && el("gen-files").children.length === 0,
+    `overwrite=${first409.overwrite} posts=${postsBefore409} -> `
+      + `${generatePostLog.length} hidden=${el("gen-overwrite").hidden} `
+      + `files listed=${el("gen-files").children.length} `
+      + `detail=${el("gen-overwrite-detail").textContent}`);
+
+  // Confirming resends *the same request*, with one field changed. Compared
+  // against the refused body rather than against the expectation above, so a
+  // build that rebuilt the body from scratch -- and picked up whatever the
+  // boxes hold now rather than what was refused -- is visible.
+  // 確認すると「同じ要求」が1フィールドだけ変えて再送される。上の期待値では
+  // なく断られた本文と突き合わせるので、組み直して現在の入力欄を拾う実装が
+  // 見える。
+  el("btn-generate-overwrite").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBefore409 + 2);
+  // `?? null`, because a build that never resends leaves this undefined and
+  // dereferencing it throws out of the scenario -- which pytest reports as
+  // "the harness produced no result", detecting the regression while throwing
+  // away the diagnosis. Measured: `overwrite: true` as a hardcoded default did
+  // exactly that. A missing request is a failure of this check, with a detail
+  // saying so.
+  // 再送しない実装ではここが undefined になり、参照した瞬間にシナリオごと
+  // 落ちる（pytest からは「結果が出なかった」に見え、診断が失われる）。
+  const retried = generatePostLog[postsBefore409 + 1] ?? null;
+  check("confirming 上書き resends the same request with overwrite set",
+    retried !== null
+      && retried.overwrite === true
+      && canonical({ ...retried, overwrite: false }) === canonical(first409),
+    `retried=${retried === null ? "(no second request was sent)" : canonical(retried)} `
+      + `refused=${canonical(first409)}`);
+  await waitFor(() => el("btn-generate").disabled === false);
+  check("a confirmed overwrite takes the offer back down",
+    el("gen-overwrite").hidden === true, `hidden=${el("gen-overwrite").hidden}`);
+
+  // --- 5. a failure is prose, and the control survives it
+  el("gen-output-dir").value = "Z:/nope";
+  el("gen-output-dir").__fire("input");
+  const postsBeforeUnwritable = generatePostLog.length;
+  el("btn-generate").__fire("click");
+  await waitFor(() => /could not write to/.test(statusText()));
+
+  // The press immediately after a confirmed overwrite, which is the one that
+  // says the answer was about that request and not a setting that was turned
+  // on. A checkbox would have carried it forward; so would a remembered flag,
+  // and the visible difference between the two designs is exactly this field
+  // on exactly this request.
+  //
+  // It has its own check because the alternative is a wrong diagnosis: with
+  // `overwrite` sticky, the 409 setups later in this scenario stop producing a
+  // 409 at all, and the failure surfaces under the name of the `gamut` refusal
+  // -- a headline constraint reported by an unrelated check.
+  // 確認の直後の押下。「その要求についての答え」であって「入れた設定」では
+  // ないことは、この要求のこのフィールドにしか現れない。専用のチェックにする
+  // 理由は診断で、上書きが残る実装では以降の 409 が起きなくなり、失敗は
+  // `gamut` の断りという無関係な名前で出る。
+  const afterConfirm = generatePostLog[postsBeforeUnwritable] ?? null;
+  check("the press after a confirmed 上書き starts from overwrite: false again",
+    afterConfirm !== null && afterConfirm.overwrite === false,
+    `after the confirmation: ${afterConfirm === null
+      ? "(no request was sent)" : canonical(afterConfirm)}`);
+
+  check("a failed generation is shown as its sentence and leaves the button usable",
+    statusText().includes('could not write to "Z:/nope"')
+      && !/\{"detail"|\\"/.test(statusText())
+      && el("status").classList.contains("error")
+      && el("btn-generate").disabled === false
+      && el("gen-overwrite").hidden === true
+      // Same property as the 409's, on the other branch: the paths from the
+      // overwrite that just succeeded must not survive a press that wrote
+      // nothing. 直前に成功した上書きのパスが、何も書かなかった押下のあとに
+      // 残ってはならない。
+      && el("gen-files").children.length === 0,
+    `status=${statusText()} disabled=${el("btn-generate").disabled} `
+      + `offer hidden=${el("gen-overwrite").hidden} `
+      + `files listed=${el("gen-files").children.length}`);
+
+  // --- 6. the confirmation is about one directory, and about no other
+  //
+  // 上書きして生成 is the only control in this application that destroys data,
+  // and what makes it safe is not that it has to be pressed -- it is that the
+  // sentence being agreed to names a place. An offer that outlived a change of
+  // that box would carry an agreement about `data/out_A` onto whatever the box
+  // says when the button is finally pressed, and in this repository the box can
+  // say `data/full_recalibration_20260730_iso400`: a real 99 GB tree that cost
+  // hardware, a subject and a day, and cannot be regenerated.
+  //
+  // Two independent mechanisms, so two arms. The listeners cover an edit, which
+  // is what a person does; the directory comparison at press time covers a
+  // value set **without an event** -- autofill, an extension, a driver, or a
+  // refactor that drops one listener -- which no listener can see. Both were
+  // argued at length in the report and neither was asserted anywhere: measured
+  // on the shipped code, replacing the comparison with `if (false)` and
+  // deleting both listeners each failed 0 of the scenario's checks.
+  //
+  // 確認を安全にしているのは「押させること」ではなく「同意する文が場所を名指し
+  // していること」である。入力欄の変更を越えて残る確認は、Aについての同意を
+  // 押下時点の値へ持ち越す——この repository ではその値が実測データ 99 GB の
+  // ディレクトリでありうる。機構は2つあるので腕も2本: リスナは「人が編集した
+  // 場合」を、押下時のディレクトリ照合は「イベントを伴わない設定」を覆う
+  // （自動入力・拡張機能・自動操作・リスナを1つ落とす改修）。
+  // Each arm waits on **its own** request rather than on the offer being
+  // visible: an offer left standing by a previous arm satisfies that condition
+  // before this press has even been issued, and the arm would then measure a
+  // state it did not create. (Measured: with both listeners deleted, the
+  // visibility-only wait made two unrelated checks fail as well, hiding which
+  // guard the mutation had actually removed.)
+  // 各腕は「自分が出した要求」を待つ（確認が出ていることだけを待つと、前の腕が
+  // 残した確認で条件が既に満たされ、作っていない状態を測ることになる）。
+  const offer409 = async () => {
+    el("gen-output-dir").value = "data/existing";
+    el("gen-output-dir").__fire("input");
+    const before = generatePostLog.length;
+    el("btn-generate").__fire("click");
+    await waitFor(() => generatePostLog.length === before + 1);
+    await waitFor(() => el("btn-generate").disabled === false);
+    await waitFor(() => el("gen-overwrite").hidden === false);
+  };
+
+  await offer409();
+  el("gen-output-dir").value = "data/out_typed_instead";
+  el("gen-output-dir").__fire("input");
+  const hiddenAfterInput = el("gen-overwrite").hidden;
+
+  await offer409();
+  el("gen-output-dir").value = "data/out_chosen_instead";
+  // `change` as well as `input`: a value can arrive by either, and one listener
+  // covering for the other is a coincidence of which events this stub fires.
+  el("gen-output-dir").__fire("change");
+  const hiddenAfterChange = el("gen-overwrite").hidden;
+  check("editing the output directory retires the 上書き offer it was made for",
+    hiddenAfterInput === true && hiddenAfterChange === true,
+    `after input=${hiddenAfterInput} after change=${hiddenAfterChange}`);
+
+  await offer409();
+  // Set with no event at all, which is what every programmatic write looks
+  // like. The offer is still on screen and still enabled; only the comparison
+  // at press time stands between the agreement about `data/existing` and this.
+  // イベントを伴わない設定。確認は画面に出たままで、押下時の照合だけが残る。
+  el("gen-output-dir").value = "data/full_recalibration_20260730_iso400";
+  const postsBeforeSilentSwap = generatePostLog.length;
+  el("btn-generate-overwrite").__fire("click");
+  await sleep(60);
+  check("上書き agreed for one directory cannot be spent on another",
+    generatePostLog.length === postsBeforeSilentSwap
+      && el("gen-overwrite").hidden === true
+      && /出力先が変わりました/.test(statusText())
+      && el("status").classList.contains("error"),
+    `posts=${postsBeforeSilentSwap} -> ${generatePostLog.length} `
+      + `offer hidden=${el("gen-overwrite").hidden} status=${statusText()}`);
+
+  // --- 7. a view that does not declare a linearizer does not generate
+  //
+  // The decision this task's brief leaves open, pinned as behaviour. `gamut`
+  // has no 線形化 control and `views/gamut.py` argues at length that it must
+  // not have one -- which pixels are out of gamut is a property of the
+  // *unclipped linear* compensation, decided before any linearization. So
+  // there is no on-screen answer to what a saved projector image should be
+  // linearized with, and the two ways to invent one are both the failure this
+  // whole scenario exists against: carrying `compensation`'s last value would
+  // send a setting that is nowhere on screen, and giving the generate box its
+  // own linearizer would put a second, disagreeing control beside the one the
+  // picture is drawn from. Refusing is the only answer that keeps "what is
+  // saved is what is displayed" true.
+  // 本課題が実装者に委ねた判断を、挙動として固定する。`gamut` に線形化は無く、
+  // `views/gamut.py` は「持たせてはならない」ことを長く論じている（色域外か
+  // どうかはクリップ前の線形値の性質であり、線形化より前に決まる）。よって
+  // 保存する投影画像を何で線形化するかについて、画面上に答えが存在しない。
+  // 作り出す方法は2つともこのシナリオが相手にしている失敗そのものである
+  // （`compensation` の最後の値を持ち回れば画面に無い設定で保存され、生成欄に
+  // 独自の線形化を置けば絵を描いている側と食い違う2つ目のコントロールになる）。
+  // A 409 is left standing first, unanswered, so the offer is genuinely on
+  // screen when the view changes underneath it -- otherwise the assertion
+  // about its button below would be about an element nobody can see.
+  // 先に 409 を出したまま（確認せずに）ビューを切り替える。そうしないと、
+  // 下の確認ボタンについての主張は「誰にも見えない要素」の話になる。
+  await offer409();
+
+  el("view-select").value = "gamut";
+  el("view-select").__fire("change");
+  await settled();
+  const postsBeforeGamut = generatePostLog.length;
+  const offerSurvived = el("gen-overwrite").hidden === false;
+  const disabledUnderGamut = el("btn-generate").disabled;
+  // The 上書き offer from the 409 above is deliberately still on screen -- its
+  // sentence is the only written record of why that directory was refused --
+  // so its button has to go dead with 生成. A live-looking 上書きして生成 under
+  // a view that cannot generate is a control whose only outcome is the refusal
+  // already printed beside 生成.
+  // 上の 409 の確認は意図して残っている（断られた理由が書かれている唯一の場所
+  // である）ため、そのボタンは 生成 と一緒に無効化されなければならない。
+  const overwriteDisabledUnderGamut = el("btn-generate-overwrite").disabled;
+  const genInfoUnderGamut = el("gen-info").textContent;
+  // `__fire`, not a click a user could make: a disabled button dispatches
+  // nothing, so this sentence is reachable only from something that calls
+  // `runGenerate` regardless -- a driver, or an already-dispatched click. It is
+  // the backstop, not the announcement. What a person sees before pressing is
+  // the button's own appearance and the line beside it, which are the two
+  // checks below.
+  // `__fire` は「無効でも届く経路」（自動操作、発行済みのクリック）を表す。
+  // 無効なボタンはクリックを配送しないので、この文は控えの砦であって告知では
+  // ない。押す前に人が見るのはボタンの見た目と脇の行で、それは下の2件。
+  el("btn-generate").__fire("click");
+  await sleep(60);
+  check("a view that declares no linearizer cannot generate, and names itself",
+    disabledUnderGamut === true
+      && offerSurvived === true
+      && overwriteDisabledUnderGamut === true
+      && generatePostLog.length === postsBeforeGamut
+      // The parameter it is missing, named **alone**: the fixture declares the
+      // same three `views/gamut.py` does, so a refusal that listed `target` as
+      // well would be answering about a view nobody ships. Measured: against
+      // the old `params: []` fixture the sentence read
+      // 「target, linearizer を宣言していないため」 and a looser test of it
+      // passed -- which is what made the fixture symmetric in the one dimension
+      // this check exists for.
+      && statusText().includes("は linearizer を宣言していないため")
+      && statusText().includes("色域外判定")
+      && el("status").classList.contains("error"),
+    `disabled=${disabledUnderGamut} offer on screen=${offerSurvived} `
+      + `overwrite disabled=${overwriteDisabledUnderGamut} `
+      + `posts=${postsBeforeGamut} -> ${generatePostLog.length} status=${statusText()}`);
+
+  // ...and it has to *look* disabled, which is a stylesheet declaration and so
+  // is asserted the way `.readout`'s row is: no CSS engine here, the rule
+  // itself is what is pinned.
+  //
+  // `button` sets a background, `cursor: pointer` and a hover brightening, and
+  // none of them stop applying to a disabled button. Without these two rules
+  // the 生成 button under `gamut` was full accent blue, showed a pointer, and
+  // lit up under the cursor while dispatching nothing -- pixel-identical to the
+  // live one two screenshots earlier. Since a disabled button dispatches no
+  // click, that leaves a user who presses it with no answer of any kind, and
+  // the whole `gamut` decision resting on a state with no visible form.
+  // 無効なボタンは無効に見えること。CSS エンジンは無いので宣言そのものを固定
+  // する（`.readout` の行と同じ方式）。この2規則が無いと `gamut` の 生成 は
+  // 青いまま・ポインタのまま・ホバーで明るくなり、しかもクリックは配送されない
+  // ので、押した人には何の答えも返らない。
+  const disabledButtonRule = cssDeclarations("button:disabled");
+  const disabledHoverRule = cssDeclarations("button:disabled:hover");
+  check("a disabled button looks disabled and does not light up under the cursor",
+    /opacity:\s*0?\.\d/.test(disabledButtonRule)
+      && /cursor:\s*not-allowed/.test(disabledButtonRule)
+      && /filter:\s*none/.test(disabledHoverRule)
+      && /border-color:/.test(disabledHoverRule),
+    `button:disabled { ${disabledButtonRule.trim().replace(/\s+/g, " ")} } `
+      + `button:disabled:hover { ${disabledHoverRule.trim().replace(/\s+/g, " ")} }`);
+
+  // --- 8. the line beside the button is about the obstacle in front of it
+  //
+  // `#gen-info` is the only text a user reads before pressing 生成, and it has
+  // three states in this scenario: nothing loaded (the remedy is the path box),
+  // `gamut` (the remedy is the view selector) and `compensation` after a 409
+  // (there is no obstacle -- the button is live and the line reports what last
+  // happened). All three are asserted together because the defect they were
+  // written against is a single missing `else`, whose effect is that the second
+  // state's sentence is printed in all three.
+  //
+  // Measured on the shipped code before the fix: 「このビューでは生成できません」
+  // at the first paint, when nothing was loaded, and still there on
+  // `compensation` beside an *enabled* button -- including in the screenshot
+  // captioned "the settings about to be sent". A sentence that says the same
+  // thing on every view says nothing on any of them, and it is the only textual
+  // signal that `gamut` genuinely cannot generate.
+  // 押す前に読まれる唯一の文字列。この場面では状態が3つあり（未読み込み /
+  // `gamut` / 409 のあとの `compensation`）、3つまとめて検証する。相手にして
+  // いる欠陥は `else` の欠落1つで、その効果は「2番目の文が3つとも出る」こと
+  // だからである。
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await settled();
+  const genInfoBackOnCompensation = el("gen-info").textContent;
+  const GAMUT_REFUSAL_LINE = "このビューでは生成できません";
+  check("the line beside 生成 names the obstacle, and goes when the obstacle does",
+    genInfoAtFirstPaint !== GAMUT_REFUSAL_LINE
+      && /読み込/.test(genInfoAtFirstPaint)
+      && genInfoUnderGamut === GAMUT_REFUSAL_LINE
+      // Back where generating is possible: the button is live again and the
+      // line is the last thing that actually happened -- the 409 two steps up.
+      && el("btn-generate").disabled === false
+      && genInfoBackOnCompensation === "既存のため中止",
+    `first paint="${genInfoAtFirstPaint}" gamut="${genInfoUnderGamut}" `
+      + `back on compensation="${genInfoBackOnCompensation}" `
+      + `disabled=${el("btn-generate").disabled}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

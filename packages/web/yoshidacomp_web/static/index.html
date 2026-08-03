@@ -33,6 +33,42 @@
         <select id="view-select"></select>
       </div>
 
+      <!-- The class legend for a `categorical` view, and deliberately empty.
+
+           Both the colours and the labels are written by js/main.js's
+           renderClassLegend: the swatches from CLASS_COLORS (the array the
+           fragment shader's palette is generated from) and the text from
+           `payload.labels`. Writing the four Japanese class names here instead
+           would be the second source of truth for a mapping the server owns --
+           views/gamut.py says in as many words that the *order* of its LABELS
+           is the class index and is part of the wire contract -- so a
+           relabelling or a reordering on that side would leave this page
+           explaining the previous meaning of the same four colours, with
+           nothing failing anywhere.
+
+           Directly under the view picker, not down with the two standing
+           legends at the foot of this column. Those describe things that are
+           true of every view and can be read once; this one is the key to the
+           picture currently on screen, and without it the tiles are four
+           unexplained colours. The sidebar is `overflow-y: auto`, and measured
+           on a 1600x1000 window with a target and a LUT loaded, the foot of it
+           is off the bottom -- the same way the display range and the timings
+           used to be, for the same reason, before they moved into the readout
+           strip. Hidden until a categorical view renders, so for every other
+           view this costs the column nothing.
+
+           `categorical` ビュー用のクラス凡例。中身は空で、色もラベルも
+           js/main.js が書く（色は CLASS_COLORS、文字は `payload.labels`）。
+           和文のラベルをここに書くと、サーバが持っている対応関係の写しが
+           できてしまう。views/gamut.py の LABELS は並び自体がクラス番号で
+           あり、ワイヤ契約の一部である。
+           下端の凡例2つと並べずビュー選択の直下に置くのは、あちらが全ビュー
+           共通で一度読めば済むのに対し、これは今出ている絵を読むための鍵だから
+           である。サイドバーは `overflow-y: auto` で、1600x1000 の窓で
+           ターゲットとLUTを読み込むと下端は画面外にある（表示レンジと計測を
+           読み取り欄へ移した理由と同じ）。 -->
+      <div id="class-legend" class="group class-legend" hidden></div>
+
       <hr />
 
       <div class="group">
@@ -135,6 +171,65 @@
       <div class="group">
         <label class="lbl">サーバ側パラメータ <span class="muted">（適用で再取得）</span></label>
         <div id="server-params"></div>
+      </div>
+
+      <hr />
+
+      <!-- The only control on this page that writes to the user's disk.
+
+           Placed directly under the server-parameter group, and that is the
+           argument for its position rather than a matter of taste: what it
+           sends *is* that group. `POST /api/generate` takes the ids and the
+           settings the picture above was rendered with, so the group it reads
+           and the button that reads it belong in the same column, in that
+           order. Up in the toolbar, beside 読み込み, it would be a save button
+           whose inputs are three hundred pixels away and a scroll down.
+
+           Nothing here holds a default path. `output_dir` is resolved by the
+           *server*, against its working directory, so a pre-filled relative
+           path would name a place on the machine the server runs on that the
+           person typing has no reason to have looked at -- and the one thing
+           this endpoint must never do is write somewhere the user did not
+           name. (`path-input` in the toolbar is pre-filled and stays that way;
+           reading a matrix is not writing a file. See the note on the two
+           loader boxes above.)
+
+           The 上書き block below is `hidden` until a 409 says the directory is
+           not empty, and that is the whole of the overwrite affordance: there
+           is no checkbox, because a checkbox is set once and then applies to
+           every press afterwards. `generate.py` refuses a non-empty directory
+           and writes *nothing* -- a mistyped path in this repository can name
+           99 GB of captures that cost hardware, a subject and a day to
+           reproduce -- and that refusal only holds if answering it stays an
+           act rather than a setting.
+
+           このページで唯一ディスクへ書くコントロール。サーバ側パラメータ群の
+           直下に置くのは好みではなく、送るものがその群そのものだからである
+           （上の絵が描かれたときのIDと設定を送る）。既定のパスは持たせない。
+           `output_dir` はサーバの作業ディレクトリ基準で解決されるので、
+           既定値を入れると「打っていない場所」を指しうる。上書きの操作は
+           409 が出るまで隠れているボタン1つだけで、チェックボックスにはしない
+           ——チェックボックスは一度入れれば以後すべての押下に効いてしまう。 -->
+      <div class="group">
+        <label class="lbl" for="gen-output-dir">投影画像の生成</label>
+        <input id="gen-output-dir" class="mono loader" type="text" spellcheck="false"
+               placeholder="出力先ディレクトリ（空でなければ確認します）" />
+        <div class="group inline">
+          <button id="btn-generate" class="primary">生成</button>
+          <span id="gen-info" class="muted mono">未生成</span>
+        </div>
+        <!-- The paths the server reports back, absolute. Written by
+             js/main.js::showGeneratedFiles from the response, never from the
+             box above: `write_projection_images` resolves `output_dir` before
+             anything else precisely so that what it names is a place the user
+             can find, and echoing the typed string back would throw that away
+             on every machine where the two differ.
+             サーバが返す絶対パスを出す欄。入力欄の文字列を反響させない。 -->
+        <div id="gen-files" class="gen-files mono"></div>
+        <div id="gen-overwrite" class="gen-overwrite" hidden>
+          <div id="gen-overwrite-detail" class="muted"></div>
+          <button id="btn-generate-overwrite">上書きして生成</button>
+        </div>
       </div>
 
       <hr />

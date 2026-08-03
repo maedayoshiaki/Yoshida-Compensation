@@ -80,11 +80,12 @@ _DET_REL_EPS = 1e-6
 # 描いてしまう。
 _CAMERA_SPACE_REFUSAL = (
     'view "surface" needs a projector-space matrix; this one is in camera '
+    # B5 -- see the same sentence in ``target_view.py`` for why not B4.
     "space. Warping a camera-space matrix into projector space is planned for "
-    "B4 -- until then, load a matrix whose frame matches the configured "
+    "B5 -- until then, load a matrix whose frame matches the configured "
     "projector. "
     "（surface はプロジェクタ座標の行列を必要とします。カメラ座標からの"
-    "ワープは計画B4の予定です。）"
+    "ワープは計画B5の予定です。）"
 )
 
 
