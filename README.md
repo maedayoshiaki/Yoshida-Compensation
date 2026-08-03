@@ -275,12 +275,32 @@ uv run python examples/python/capture.py --config path/to/config.toml
 
 ## 色変換行列ビューア
 
+ブラウザ上で色変換行列を見る、オフライン専用のビューア。
+**現況・アーキテクチャ・次の作業は
+[`docs/matrix_viewer_status_20260803.md`](docs/matrix_viewer_status_20260803.md) にまとめてある。**
+
 ```bash
 uv sync --extra sample --extra web
 uv run --no-sync python -m yoshidacomp_web
 ```
 
 `http://127.0.0.1:8000` を開き、行列の `.npy` パスを入力する。
+
+表示できるビュー:
+
+| key | 内容 |
+| --- | --- |
+| `coef_tiles` | 4行(in_R/in_G/in_B/bias)×3列(out_R/out_G/out_B) の係数マップ |
+| `surface` | 投影面の色（順方向モデル `C = (P − b)·A⁻¹`） |
+| `compensation` | ターゲット画像に行列を適用した補償結果と投影コード値 |
+| `gamut` | 補償が破綻する画素（負クリップ / 1超クリップ / 両方 / 範囲内） |
+
+ホバーするとどのビューでもその画素の 4×3 係数が読める。ターゲット画像と逆LUTを
+読み込めば、線形化方式（なし / 解析ガンマ / 実測逆LUT）を切り替えて比較でき、
+LUTカーブも表示される。`POST /api/generate` で CLI と同じ投影画像を保存できる。
+
+**カメラ座標の行列はまだプロジェクタ座標へワープできない**（計画B5）。
+現状は明示的に 400 で断る。
 
 ポート 8000 が別のプロセスに使われている環境では、起動が
 `[WinError 10013] ソケットにアクセスしようとしました` で失敗する。
