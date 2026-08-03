@@ -1445,6 +1445,19 @@ let generatesInFlight = 0;
 // 残る確認は、その同意を何も説明していない別の場所へ持ち越す。
 let overwriteOfferedFor = null;
 
+// What the generate control last *did*, so the line beside it can be put back
+// when a refusal stops applying. The initial value is the one in index.html,
+// because the line is on screen before any of this runs and the two would
+// otherwise disagree for one paint.
+// 生成が最後に何をしたか。断り文が消えたときに戻す先であり、初期値は
+// index.html が書いているものと同じにする（起動直後の1描画ぶん食い違うため）。
+let generateOutcome = "未生成";
+
+function setGenerateOutcome(text) {
+  generateOutcome = text;
+  $("gen-info").textContent = text;
+}
+
 function hideOverwriteOffer() {
   overwriteOfferedFor = null;
   $("gen-overwrite").hidden = true;
@@ -1457,22 +1470,41 @@ function hideOverwriteOffer() {
 // everything else in this section is: the question is about the picture, and
 // during a view switch `state.spec` already names a view whose transfer has
 // not landed.
+//
+// Returned in two forms, because the answer is read in two places and one
+// string cannot serve both: `sentence` is what the status line prints when the
+// button is pressed anyway, and `short` is the line that sits beside the button
+// in a 250px column *before* it is pressed. Both are per-reason. "Nothing is
+// loaded yet" and "this view cannot" are different situations with different
+// remedies -- the path box at the top of the sidebar, and the view selector --
+// so one sentence covering both would be an instruction to do the wrong thing
+// in whichever of the two it was not written for.
+//
 // 画面の絵を保存できない理由（保存できるなら null）。問うているのは絵の性質
-// なので `state.spec` ではなく `state.shown*` に訊く。
+// なので `state.spec` ではなく `state.shown*` に訊く。答えは2つの形で返す:
+// `sentence` は押されたときにステータス行へ出す文、`short` は押される前に
+// ボタンの脇（250pxの段）に出す行である。理由ごとに書き分ける——「まだ読み
+// 込んでいない」と「このビューでは無理」は遷移先が違うので、片方の文を
+// もう片方に流用すれば、そちらでは「間違った操作の指示」になる。
 function generateUnavailableReason() {
   if (!state.shownMatrixId || !state.shownSpec) {
-    return "まだ何も表示されていません。行列を読み込んでから生成してください。";
+    return {
+      short: "行列が未読み込み",
+      sentence: "まだ何も表示されていません。行列を読み込んでから生成してください。",
+    };
   }
   const params = state.shownParams || {};
   const missing = GENERATE_REQUIRES.filter((name) => !(name in params));
   if (missing.length) {
     const label = state.shownSpec.label || state.shownSpec.key;
-    return (
-      `ビュー "${label}" は ${missing.join(", ")} を宣言していないため、` +
-      "この画面からは生成できません（宣言されていない設定で保存すると、" +
-      "画面に出ていないもので線形化した画像がディスクに残ります）。" +
-      `${missing.join(", ")} を持つビューに切り替えてから生成してください。`
-    );
+    return {
+      short: "このビューでは生成できません",
+      sentence:
+        `ビュー "${label}" は ${missing.join(", ")} を宣言していないため、` +
+        "この画面からは生成できません（宣言されていない設定で保存すると、" +
+        "画面に出ていないもので線形化した画像がディスクに残ります）。" +
+        `${missing.join(", ")} を持つビューに切り替えてから生成してください。`,
+    };
   }
   return null;
 }
@@ -1507,8 +1539,19 @@ function refreshGenerateButton() {
   if (busy) return;
   // Short, because this sits in a 250px column beside the button; the sentence
   // itself is the status line's, on the press.
-  // 短く書く（250pxの段でボタンの隣に並ぶ）。文そのものは押したときに出す。
-  if (reason) $("gen-info").textContent = "このビューでは生成できません";
+  //
+  // **Written on both branches.** Without the `else` the refusal was stamped
+  // over 未生成 at the first paint -- when the reason is "nothing is loaded",
+  // not "this view" -- and then stayed on every view that *can* generate,
+  // beside an enabled button. A permanently displayed sentence saying the
+  // opposite of what the button does is worse than no sentence at all: it is
+  // the one textual signal that `gamut` genuinely cannot generate, and a line
+  // that says the same thing everywhere says nothing anywhere.
+  // 両方の枝で書く。`else` が無いと、初回描画で（理由は「未読み込み」なのに）
+  // ビューの文が 未生成 の上に書かれ、以後そのまま——生成できるビューでも、
+  // 有効なボタンの脇に「このビューでは生成できません」と出続ける。どこでも
+  // 同じことを言う行は、どこでも何も言っていない。
+  $("gen-info").textContent = reason ? reason.short : generateOutcome;
 }
 
 function setGenerateBusy(busy) {
@@ -1526,6 +1569,15 @@ function setGenerateBusy(busy) {
 function generateBody(overwrite) {
   const params = state.shownParams || {};
   const body = {
+    // The matrix the tiles are drawn from, never `state.matrixId`. The two
+    // differ for the whole of a load -- `POST /session/matrix` returns an id in
+    // milliseconds and the transfer that draws it takes seconds on a 1.56 GB
+    // matrix -- and nothing else on the page changes in that window, so the
+    // stale-screen guard below lets a press through. A body carrying
+    // `state.matrixId` there compensates the picture the user was looking at
+    // with a matrix they have never seen.
+    // 描かれている行列を使う（`state.matrixId` ではない）。読み込み中は2つが
+    // 食い違い、その間コントロールは何も変わらないので下のガードは通す。
     matrix_id: state.shownMatrixId,
     target_id: params.target,
     linearizer: params.linearizer,
@@ -1570,21 +1622,23 @@ function showGeneratedFiles(files) {
 async function runGenerate(overwrite) {
   // The double-submit guard, and it is here rather than only on the button's
   // `disabled` attribute because `disabled` is a statement to the user, not a
-  // guarantee: a click that was already dispatched, an Enter key, a driver, or
-  // anything that calls this function reaches it regardless. The call takes
-  // seconds on a real matrix (the pipeline runs and two PNGs are encoded),
-  // which is long enough for a second press, and two overlapping writes into
-  // one directory make the second meet the first one's files and come back
-  // 409 -- a conflict reported about a directory that is being filled by the
-  // very request it conflicts with.
+  // guarantee: a click that was already dispatched, a driver, or anything else
+  // that calls this function reaches it regardless. (Enter in the output box is
+  // *not* an example -- it delegates to `.click()`, which a disabled button
+  // swallows.) The call takes seconds on a real matrix (the pipeline runs and
+  // two PNGs are encoded), which is long enough for a second press, and two
+  // overlapping writes into one directory make the second meet the first one's
+  // files and come back 409 -- a conflict reported about a directory that is
+  // being filled by the very request it conflicts with.
   // 二重送信のガード。`disabled` は利用者への表示であって保証ではない
-  // （既に発行されたクリック、Enter、自動操作はいずれもここへ届く）。実機では
+  // （既に発行されたクリックも自動操作もここへ届く。ただし出力先欄の Enter は
+  // `.click()` 経由なので無効なボタンでは届かない）。実機では
   // 数秒かかるので2度目を押せてしまい、同じディレクトリへの二重書き込みでは
   // 2つ目が1つ目のファイルに衝突して 409 になる。
   if (generatesInFlight > 0) return;
 
   const unavailable = generateUnavailableReason();
-  if (unavailable) { status(unavailable, true); return; }
+  if (unavailable) { status(unavailable.sentence, true); return; }
 
   // The screen and the controls have to be the same thing before either can be
   // saved. If they are not, the file would match the boxes -- which is the one
@@ -1592,6 +1646,26 @@ async function runGenerate(overwrite) {
   // the user last saw rendered.
   // 画面とコントロールが一致していなければ保存できない。一致していない状態で
   // 書くと、ファイルは「誰も見ていない入力欄」とだけ一致する。
+  //
+  // **This guard is what makes `generateBody`'s choice of source safe, and it
+  // covers the parameters only.** While it stands, `serverParams()`,
+  // `state.sentParams` and `state.shownParams` are all equal at the moment of
+  // the call, so building the body from any of the three would produce the
+  // same bytes and no test can tell them apart -- the reason the report's
+  // three-candidate argument is about a hazard this guard removes rather than
+  // about a difference the suite can see. Relaxing it (a plausible request:
+  // "let me generate without pressing 適用 first") makes that choice
+  // load-bearing with nothing asserting it, so anyone relaxing it has to pin
+  // the source first. `matrix_id` is the field the guard does *not* cover:
+  // `state.matrixId` moves when `POST /session/matrix` returns, seconds before
+  // the transfer that draws it, and the controls do not change -- so that one
+  // is pinned on its own, by the check named for a load in flight.
+  // このガードが `generateBody` の出所の選択を安全にしている（ただし対象は
+  // パラメータだけである）。ガードがある限り3つの候補は押下時点で等しく、
+  // どれで組んでも同じ本文になるためテストでは区別できない。緩めた瞬間に
+  // 選択が効いてくるので、緩めるなら先に出所を固定すること。`matrix_id` は
+  // このガードの対象外（読み込み中は `state.matrixId` だけが先に進み、
+  // コントロールは動かない）なので、専用のチェックで固定してある。
   if (state.spec !== state.shownSpec
     || JSON.stringify(serverParams()) !== JSON.stringify(state.shownParams)) {
     status(
@@ -1609,12 +1683,18 @@ async function runGenerate(overwrite) {
 
   setGenerateBusy(true);
   try {
+    // Not an outcome: nothing has been produced yet, and this line is replaced
+    // by `refreshGenerateButton` the moment the call settles either way. It is
+    // written straight to the element for that reason -- recording it would
+    // make "生成中…" the line a later view switch restored.
+    // これは結果ではないので `generateOutcome` には残さない（残すと、後の
+    // ビュー切替で「生成中…」が復元されてしまう）。
     $("gen-info").textContent = "生成中…";
     status(`投影画像を生成中: ${body.output_dir}`);
     const result = await generateProjectionImages(body);
     hideOverwriteOffer();
     showGeneratedFiles(result.files);
-    $("gen-info").textContent = `${(result.files || []).length} 件を保存`;
+    setGenerateOutcome(`${(result.files || []).length} 件を保存`);
     status(`生成しました: ${result.output_dir}`);
   } catch (e) {
     // The path list describes *the last generation*, and this press did not
@@ -1628,7 +1708,7 @@ async function runGenerate(overwrite) {
     // している当のものなので、何も書かれていない瞬間に「いま書いたもの」と
     // 読めてしまう。分岐より前に消す。
     showGeneratedFiles([]);
-    $("gen-info").textContent = e && e.status === 409 ? "既存のため中止" : "生成に失敗";
+    setGenerateOutcome(e && e.status === 409 ? "既存のため中止" : "生成に失敗");
     // 409 is the directory saying it already holds files, with nothing
     // written. It is the one failure here that is a question rather than an
     // error, so it gets the offer rather than only the sentence -- and the

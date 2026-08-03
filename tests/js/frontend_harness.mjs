@@ -544,7 +544,32 @@ const VIEWS = [
   // channel count would let the two axes be confused with no visible effect.
   // クラス番号1チャンネルとクラス名4つ。ラベル数とチャンネル数が一致する
   // フィクスチャにすると、2つの軸を取り違えても見た目に差が出なくなる。
-  { key: "gamut", label: "色域外判定", kind: "categorical", channels: 1, params: [] },
+  //
+  // Its parameters mirror the shipped `views/gamut.py`: `target`,
+  // `target_decode` and `target_gamma`, and **`linearizer` omitted** -- which
+  // is the only difference between it and `compensation` that matters to the
+  // 生成 decision. With `params: []` the fixture was symmetric in the dimension
+  // under test: a refusal keyed on how many parameters a view declares, or one
+  // that special-cased "any view that is not `compensation`", would pass here
+  // and diverge against the real registry, where `gamut` declares three of the
+  // four fields the request body needs. The refusal check reads the sentence,
+  // which names the missing parameters, so it now has to name `linearizer`
+  // alone -- against `params: []` it said `target, linearizer`.
+  //
+  // パラメータは出荷側の `views/gamut.py` を写す（`linearizer` だけが無い）。
+  // `params: []` では「宣言数で断る実装」や「compensation 以外は断る実装」と
+  // 区別が付かず、検証したい次元についてフィクスチャが対称になっていた。
+  {
+    key: "gamut", label: "色域外判定", kind: "categorical", channels: 1,
+    params: [
+      { name: "target", label: "ターゲットID", type: "text", default: "", choices: [] },
+      {
+        name: "target_decode", label: "ターゲット復号", type: "select",
+        default: "srgb", choices: ["none", "srgb", "gamma"],
+      },
+      { name: "target_gamma", label: "ターゲットγ", type: "number", default: 2.2 },
+    ],
+  },
   // A kind no frontend implements, and the only reason it exists.
   //
   // `gamut` used to be this fixture -- `categorical` was the unimplemented
@@ -3748,6 +3773,21 @@ if (SCENARIO === "generate") {
     el("gen-output-dir") !== null && el("btn-generate") !== null,
     `dir=${el("gen-output-dir") !== null} button=${el("btn-generate") !== null}`);
 
+  // The line beside the button as the page first paints, read before anything
+  // is loaded and asserted at the end of the scenario together with its two
+  // other states.
+  //
+  // Nothing is displayed yet here, so the obstacle is "load a matrix" and the
+  // remedy is the path box at the top of the sidebar. Printing the *view*
+  // refusal instead is not a small inaccuracy -- it tells the user to switch
+  // view, which does nothing, and it spends the one sentence that has to mean
+  // something under `gamut` on a state where it is false. Measured before this
+  // was fixed: 「このビューでは生成できません」 from the first paint onward, and
+  // then on every view that *can* generate, beside an enabled button.
+  // 起動直後の行。まだ何も表示されていないので障害は「行列を読み込むこと」で
+  // あり、ここでビューの断り文を出すのは「ビューを切り替えろ」と言うに等しい。
+  const genInfoAtFirstPaint = el("gen-info").textContent;
+
   clickLoad("A");
   await settled();
   el("view-select").value = "compensation";
@@ -3855,6 +3895,49 @@ if (SCENARIO === "generate") {
     `target_gamma=${generatePostLog[postsBeforePending].target_gamma}`);
   await waitFor(() => el("btn-generate").disabled === false);
 
+  // --- 2b. ...and "on screen" means the matrix too, which no guard covers
+  //
+  // `POST /session/matrix` returns an id in milliseconds; the transfer that
+  // draws it takes seconds on a 1.56 GB matrix. In between, `state.matrixId`
+  // names the new one, the tiles still show the old one, and **not one control
+  // has changed** -- so the staged-vs-applied guard above passes and the press
+  // goes through. A body built from `state.matrixId` there compensates the
+  // picture the user is looking at with a matrix they have never seen, and the
+  // file is filed under the name of the one they were shown.
+  //
+  // This is the field-for-field check's blind spot: there the two ids are equal
+  // and the mutation is invisible. Here they are deliberately different, which
+  // is the only state that can tell them apart. Measured before this check
+  // existed: `matrix_id: state.shownMatrixId` -> `state.matrixId` failed 0 of
+  // the scenario's checks.
+  //
+  // 「画面に出ているもの」は行列にも及ぶ。`POST /session/matrix` はすぐ返るが
+  // 描画までは数秒あり、その間コントロールは1つも変わらないので上のガードは
+  // 通す。ここで `state.matrixId` を送ると、見ている絵を「見たことのない行列」
+  // で補償したファイルが、見ていた絵の名前で残る。2つのIDが等しくない状態は
+  // ここでしか作れない（フィールド単位の検査では両者が一致しており見えない）。
+  viewDelayMs.B = 400;
+  clickLoad("B");
+  await waitFor(() => state.matrixId === "matrix_B");
+  const shownWhileLoading = state.shownMatrixId;
+  const registeredWhileLoading = state.matrixId;
+  el("gen-output-dir").value = "data/out_during_load";
+  el("gen-output-dir").__fire("input");
+  const postsBeforeInFlight = generatePostLog.length;
+  el("btn-generate").__fire("click");
+  await waitFor(() => generatePostLog.length === postsBeforeInFlight + 1);
+  const duringLoad = generatePostLog[postsBeforeInFlight];
+  check("a press while a matrix is still loading saves the matrix on screen",
+    registeredWhileLoading === "matrix_B"
+      && shownWhileLoading === "matrix_A"
+      && duringLoad.matrix_id === "matrix_A",
+    `registered=${registeredWhileLoading} shown=${shownWhileLoading} `
+      + `sent=${duringLoad.matrix_id}`);
+  // Let B land before going on, so every later press is about a settled screen.
+  await waitFor(() => state.shownMatrixId === "matrix_B");
+  viewDelayMs.B = 0;
+  await waitFor(() => el("btn-generate").disabled === false);
+
   // --- 3. one press is one generation
   //
   // The call takes seconds on a real matrix (the pipeline runs, two PNGs are
@@ -3938,11 +4021,21 @@ if (SCENARIO === "generate") {
   // 見える。
   el("btn-generate-overwrite").__fire("click");
   await waitFor(() => generatePostLog.length === postsBefore409 + 2);
-  const retried = generatePostLog[postsBefore409 + 1];
+  // `?? null`, because a build that never resends leaves this undefined and
+  // dereferencing it throws out of the scenario -- which pytest reports as
+  // "the harness produced no result", detecting the regression while throwing
+  // away the diagnosis. Measured: `overwrite: true` as a hardcoded default did
+  // exactly that. A missing request is a failure of this check, with a detail
+  // saying so.
+  // 再送しない実装ではここが undefined になり、参照した瞬間にシナリオごと
+  // 落ちる（pytest からは「結果が出なかった」に見え、診断が失われる）。
+  const retried = generatePostLog[postsBefore409 + 1] ?? null;
   check("confirming 上書き resends the same request with overwrite set",
-    retried.overwrite === true
+    retried !== null
+      && retried.overwrite === true
       && canonical({ ...retried, overwrite: false }) === canonical(first409),
-    `retried=${canonical(retried)} refused=${canonical(first409)}`);
+    `retried=${retried === null ? "(no second request was sent)" : canonical(retried)} `
+      + `refused=${canonical(first409)}`);
   await waitFor(() => el("btn-generate").disabled === false);
   check("a confirmed overwrite takes the offer back down",
     el("gen-overwrite").hidden === true, `hidden=${el("gen-overwrite").hidden}`);
@@ -3950,8 +4043,30 @@ if (SCENARIO === "generate") {
   // --- 5. a failure is prose, and the control survives it
   el("gen-output-dir").value = "Z:/nope";
   el("gen-output-dir").__fire("input");
+  const postsBeforeUnwritable = generatePostLog.length;
   el("btn-generate").__fire("click");
   await waitFor(() => /could not write to/.test(statusText()));
+
+  // The press immediately after a confirmed overwrite, which is the one that
+  // says the answer was about that request and not a setting that was turned
+  // on. A checkbox would have carried it forward; so would a remembered flag,
+  // and the visible difference between the two designs is exactly this field
+  // on exactly this request.
+  //
+  // It has its own check because the alternative is a wrong diagnosis: with
+  // `overwrite` sticky, the 409 setups later in this scenario stop producing a
+  // 409 at all, and the failure surfaces under the name of the `gamut` refusal
+  // -- a headline constraint reported by an unrelated check.
+  // 確認の直後の押下。「その要求についての答え」であって「入れた設定」では
+  // ないことは、この要求のこのフィールドにしか現れない。専用のチェックにする
+  // 理由は診断で、上書きが残る実装では以降の 409 が起きなくなり、失敗は
+  // `gamut` の断りという無関係な名前で出る。
+  const afterConfirm = generatePostLog[postsBeforeUnwritable] ?? null;
+  check("the press after a confirmed 上書き starts from overwrite: false again",
+    afterConfirm !== null && afterConfirm.overwrite === false,
+    `after the confirmation: ${afterConfirm === null
+      ? "(no request was sent)" : canonical(afterConfirm)}`);
+
   check("a failed generation is shown as its sentence and leaves the button usable",
     statusText().includes('could not write to "Z:/nope"')
       && !/\{"detail"|\\"/.test(statusText())
@@ -3967,7 +4082,81 @@ if (SCENARIO === "generate") {
       + `offer hidden=${el("gen-overwrite").hidden} `
       + `files listed=${el("gen-files").children.length}`);
 
-  // --- 6. a view that does not declare a linearizer does not generate
+  // --- 6. the confirmation is about one directory, and about no other
+  //
+  // 上書きして生成 is the only control in this application that destroys data,
+  // and what makes it safe is not that it has to be pressed -- it is that the
+  // sentence being agreed to names a place. An offer that outlived a change of
+  // that box would carry an agreement about `data/out_A` onto whatever the box
+  // says when the button is finally pressed, and in this repository the box can
+  // say `data/full_recalibration_20260730_iso400`: a real 99 GB tree that cost
+  // hardware, a subject and a day, and cannot be regenerated.
+  //
+  // Two independent mechanisms, so two arms. The listeners cover an edit, which
+  // is what a person does; the directory comparison at press time covers a
+  // value set **without an event** -- autofill, an extension, a driver, or a
+  // refactor that drops one listener -- which no listener can see. Both were
+  // argued at length in the report and neither was asserted anywhere: measured
+  // on the shipped code, replacing the comparison with `if (false)` and
+  // deleting both listeners each failed 0 of the scenario's checks.
+  //
+  // 確認を安全にしているのは「押させること」ではなく「同意する文が場所を名指し
+  // していること」である。入力欄の変更を越えて残る確認は、Aについての同意を
+  // 押下時点の値へ持ち越す——この repository ではその値が実測データ 99 GB の
+  // ディレクトリでありうる。機構は2つあるので腕も2本: リスナは「人が編集した
+  // 場合」を、押下時のディレクトリ照合は「イベントを伴わない設定」を覆う
+  // （自動入力・拡張機能・自動操作・リスナを1つ落とす改修）。
+  // Each arm waits on **its own** request rather than on the offer being
+  // visible: an offer left standing by a previous arm satisfies that condition
+  // before this press has even been issued, and the arm would then measure a
+  // state it did not create. (Measured: with both listeners deleted, the
+  // visibility-only wait made two unrelated checks fail as well, hiding which
+  // guard the mutation had actually removed.)
+  // 各腕は「自分が出した要求」を待つ（確認が出ていることだけを待つと、前の腕が
+  // 残した確認で条件が既に満たされ、作っていない状態を測ることになる）。
+  const offer409 = async () => {
+    el("gen-output-dir").value = "data/existing";
+    el("gen-output-dir").__fire("input");
+    const before = generatePostLog.length;
+    el("btn-generate").__fire("click");
+    await waitFor(() => generatePostLog.length === before + 1);
+    await waitFor(() => el("btn-generate").disabled === false);
+    await waitFor(() => el("gen-overwrite").hidden === false);
+  };
+
+  await offer409();
+  el("gen-output-dir").value = "data/out_typed_instead";
+  el("gen-output-dir").__fire("input");
+  const hiddenAfterInput = el("gen-overwrite").hidden;
+
+  await offer409();
+  el("gen-output-dir").value = "data/out_chosen_instead";
+  // `change` as well as `input`: a value can arrive by either, and one listener
+  // covering for the other is a coincidence of which events this stub fires.
+  el("gen-output-dir").__fire("change");
+  const hiddenAfterChange = el("gen-overwrite").hidden;
+  check("editing the output directory retires the 上書き offer it was made for",
+    hiddenAfterInput === true && hiddenAfterChange === true,
+    `after input=${hiddenAfterInput} after change=${hiddenAfterChange}`);
+
+  await offer409();
+  // Set with no event at all, which is what every programmatic write looks
+  // like. The offer is still on screen and still enabled; only the comparison
+  // at press time stands between the agreement about `data/existing` and this.
+  // イベントを伴わない設定。確認は画面に出たままで、押下時の照合だけが残る。
+  el("gen-output-dir").value = "data/full_recalibration_20260730_iso400";
+  const postsBeforeSilentSwap = generatePostLog.length;
+  el("btn-generate-overwrite").__fire("click");
+  await sleep(60);
+  check("上書き agreed for one directory cannot be spent on another",
+    generatePostLog.length === postsBeforeSilentSwap
+      && el("gen-overwrite").hidden === true
+      && /出力先が変わりました/.test(statusText())
+      && el("status").classList.contains("error"),
+    `posts=${postsBeforeSilentSwap} -> ${generatePostLog.length} `
+      + `offer hidden=${el("gen-overwrite").hidden} status=${statusText()}`);
+
+  // --- 7. a view that does not declare a linearizer does not generate
   //
   // The decision this task's brief leaves open, pinned as behaviour. `gamut`
   // has no 線形化 control and `views/gamut.py` argues at length that it must
@@ -3992,10 +4181,7 @@ if (SCENARIO === "generate") {
   // about its button below would be about an element nobody can see.
   // 先に 409 を出したまま（確認せずに）ビューを切り替える。そうしないと、
   // 下の確認ボタンについての主張は「誰にも見えない要素」の話になる。
-  el("gen-output-dir").value = "data/existing";
-  el("gen-output-dir").__fire("input");
-  el("btn-generate").__fire("click");
-  await waitFor(() => el("gen-overwrite").hidden === false);
+  await offer409();
 
   el("view-select").value = "gamut";
   el("view-select").__fire("change");
@@ -4011,6 +4197,16 @@ if (SCENARIO === "generate") {
   // 上の 409 の確認は意図して残っている（断られた理由が書かれている唯一の場所
   // である）ため、そのボタンは 生成 と一緒に無効化されなければならない。
   const overwriteDisabledUnderGamut = el("btn-generate-overwrite").disabled;
+  const genInfoUnderGamut = el("gen-info").textContent;
+  // `__fire`, not a click a user could make: a disabled button dispatches
+  // nothing, so this sentence is reachable only from something that calls
+  // `runGenerate` regardless -- a driver, or an already-dispatched click. It is
+  // the backstop, not the announcement. What a person sees before pressing is
+  // the button's own appearance and the line beside it, which are the two
+  // checks below.
+  // `__fire` は「無効でも届く経路」（自動操作、発行済みのクリック）を表す。
+  // 無効なボタンはクリックを配送しないので、この文は控えの砦であって告知では
+  // ない。押す前に人が見るのはボタンの見た目と脇の行で、それは下の2件。
   el("btn-generate").__fire("click");
   await sleep(60);
   check("a view that declares no linearizer cannot generate, and names itself",
@@ -4018,12 +4214,81 @@ if (SCENARIO === "generate") {
       && offerSurvived === true
       && overwriteDisabledUnderGamut === true
       && generatePostLog.length === postsBeforeGamut
-      && /linearizer/.test(statusText())
+      // The parameter it is missing, named **alone**: the fixture declares the
+      // same three `views/gamut.py` does, so a refusal that listed `target` as
+      // well would be answering about a view nobody ships. Measured: against
+      // the old `params: []` fixture the sentence read
+      // 「target, linearizer を宣言していないため」 and a looser test of it
+      // passed -- which is what made the fixture symmetric in the one dimension
+      // this check exists for.
+      && statusText().includes("は linearizer を宣言していないため")
       && statusText().includes("色域外判定")
       && el("status").classList.contains("error"),
     `disabled=${disabledUnderGamut} offer on screen=${offerSurvived} `
       + `overwrite disabled=${overwriteDisabledUnderGamut} `
       + `posts=${postsBeforeGamut} -> ${generatePostLog.length} status=${statusText()}`);
+
+  // ...and it has to *look* disabled, which is a stylesheet declaration and so
+  // is asserted the way `.readout`'s row is: no CSS engine here, the rule
+  // itself is what is pinned.
+  //
+  // `button` sets a background, `cursor: pointer` and a hover brightening, and
+  // none of them stop applying to a disabled button. Without these two rules
+  // the 生成 button under `gamut` was full accent blue, showed a pointer, and
+  // lit up under the cursor while dispatching nothing -- pixel-identical to the
+  // live one two screenshots earlier. Since a disabled button dispatches no
+  // click, that leaves a user who presses it with no answer of any kind, and
+  // the whole `gamut` decision resting on a state with no visible form.
+  // 無効なボタンは無効に見えること。CSS エンジンは無いので宣言そのものを固定
+  // する（`.readout` の行と同じ方式）。この2規則が無いと `gamut` の 生成 は
+  // 青いまま・ポインタのまま・ホバーで明るくなり、しかもクリックは配送されない
+  // ので、押した人には何の答えも返らない。
+  const disabledButtonRule = cssDeclarations("button:disabled");
+  const disabledHoverRule = cssDeclarations("button:disabled:hover");
+  check("a disabled button looks disabled and does not light up under the cursor",
+    /opacity:\s*0?\.\d/.test(disabledButtonRule)
+      && /cursor:\s*not-allowed/.test(disabledButtonRule)
+      && /filter:\s*none/.test(disabledHoverRule)
+      && /border-color:/.test(disabledHoverRule),
+    `button:disabled { ${disabledButtonRule.trim().replace(/\s+/g, " ")} } `
+      + `button:disabled:hover { ${disabledHoverRule.trim().replace(/\s+/g, " ")} }`);
+
+  // --- 8. the line beside the button is about the obstacle in front of it
+  //
+  // `#gen-info` is the only text a user reads before pressing 生成, and it has
+  // three states in this scenario: nothing loaded (the remedy is the path box),
+  // `gamut` (the remedy is the view selector) and `compensation` after a 409
+  // (there is no obstacle -- the button is live and the line reports what last
+  // happened). All three are asserted together because the defect they were
+  // written against is a single missing `else`, whose effect is that the second
+  // state's sentence is printed in all three.
+  //
+  // Measured on the shipped code before the fix: 「このビューでは生成できません」
+  // at the first paint, when nothing was loaded, and still there on
+  // `compensation` beside an *enabled* button -- including in the screenshot
+  // captioned "the settings about to be sent". A sentence that says the same
+  // thing on every view says nothing on any of them, and it is the only textual
+  // signal that `gamut` genuinely cannot generate.
+  // 押す前に読まれる唯一の文字列。この場面では状態が3つあり（未読み込み /
+  // `gamut` / 409 のあとの `compensation`）、3つまとめて検証する。相手にして
+  // いる欠陥は `else` の欠落1つで、その効果は「2番目の文が3つとも出る」こと
+  // だからである。
+  el("view-select").value = "compensation";
+  el("view-select").__fire("change");
+  await settled();
+  const genInfoBackOnCompensation = el("gen-info").textContent;
+  const GAMUT_REFUSAL_LINE = "このビューでは生成できません";
+  check("the line beside 生成 names the obstacle, and goes when the obstacle does",
+    genInfoAtFirstPaint !== GAMUT_REFUSAL_LINE
+      && /読み込/.test(genInfoAtFirstPaint)
+      && genInfoUnderGamut === GAMUT_REFUSAL_LINE
+      // Back where generating is possible: the button is live again and the
+      // line is the last thing that actually happened -- the 409 two steps up.
+      && el("btn-generate").disabled === false
+      && genInfoBackOnCompensation === "既存のため中止",
+    `first paint="${genInfoAtFirstPaint}" gamut="${genInfoUnderGamut}" `
+      + `back on compensation="${genInfoBackOnCompensation}" `
+      + `disabled=${el("btn-generate").disabled}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

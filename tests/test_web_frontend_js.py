@@ -316,7 +316,25 @@ def test_the_generate_button_saves_the_settings_that_are_on_screen() -> None:
       the UI keeps the answer deliberate.
     - **A view with no linearizer does not generate.** See the harness's own
       note, and the task report, for why refusing is the only answer that keeps
-      "what is saved is what is displayed" true under ``gamut``.
+      "what is saved is what is displayed" true under ``gamut``. The fixture
+      declares the same three parameters ``views/gamut.py`` does and omits only
+      ``linearizer``, so a refusal keyed on how many parameters a view declares
+      -- or on "any view that is not ``compensation``" -- fails here rather than
+      passing against a shape nobody ships.
+    - **The screen includes the matrix.** ``state.matrixId`` moves seconds
+      before the transfer that draws it, and no control changes in between, so
+      the staged-vs-applied guard passes and a press goes through. The body has
+      to carry the matrix on screen, which is the one field of it whose source
+      cannot be seen once a load has settled.
+    - **The refusal is discoverable before the press.** A disabled button
+      dispatches no click, so what a person meets under ``gamut`` is the
+      button's appearance and the line beside it -- both asserted, after both
+      shipped broken: the button was pixel-identical to a live one (no
+      ``button:disabled`` rule existed) and the line said "this view cannot
+      generate" on every view, from the first paint onward.
+    - **The 上書き confirmation is about one directory.** Bound to the path the
+      409 named, retired when the box is edited, and re-checked at press time so
+      that a value set without an event cannot spend an agreement about A on B.
 
     唯一ディスクへ書くコントロールが、画面に出ている設定で書くこと。誤りは
     絵ではなくファイルとして残り、しかも「見ていた絵」の名前で残る。「押すと
@@ -1833,6 +1851,146 @@ _MUTATIONS = [
         [("js/main.js", "    target_id: params.target,", '    target_id: "target_dir_0",')],
         ("the generate call sends the settings on screen",),
         id="the_generate_body_carries_a_fixed_target_id",
+    ),
+    # ...and the matrix, which the stale-screen guard does not cover.
+    #
+    # ``state.matrixId`` moves when ``POST /session/matrix`` returns; the
+    # transfer that draws it takes seconds on a 1.56 GB matrix. In that window
+    # every control still says what it said, so the guard passes and a press
+    # goes through -- and a body built from ``state.matrixId`` compensates the
+    # picture on screen with a matrix that has never been drawn. This is the one
+    # field of the body whose source cannot be checked at rest: with the load
+    # settled the two ids are equal and the mutation is invisible.
+    # 行列のIDにも同じ性質がある。`POST /session/matrix` はすぐ返るが描画までは
+    # 数秒あり、その間コントロールは変わらないのでガードは通す。
+    pytest.param(
+        "generate",
+        [("js/main.js", "    matrix_id: state.shownMatrixId,", "    matrix_id: state.matrixId,")],
+        ("a press while a matrix is still loading",),
+        id="the_generate_body_carries_the_newest_matrix_not_the_shown_one",
+    ),
+    # ---- the three guards on the destructive confirmation
+    #
+    # The line beside 生成, left unwritten when the refusal stops applying.
+    #
+    # This is the shape the defect shipped in: an ``if (reason)`` with no
+    # ``else``. It runs once before the first render -- when the reason is
+    # "nothing is loaded", not "this view" -- and then never clears, so
+    # ``compensation`` carried 「このビューでは生成できません」 beside an
+    # *enabled* 生成 button, in every state including the screenshot captioned
+    # as the settings about to be sent. The sentence is the only textual signal
+    # that ``gamut`` genuinely cannot generate; one that appears everywhere
+    # signals nothing anywhere, and a permanently false statement stands next to
+    # the one control on this page that writes to the user's disk.
+    # `else` の無い `if (reason)`。初回描画では理由が「未読み込み」なのにビューの
+    # 文が出て、以後消えない——生成できるビューでも、有効なボタンの脇に出続ける。
+    pytest.param(
+        "generate",
+        [(
+            "js/main.js",
+            '  $("gen-info").textContent = reason ? reason.short : generateOutcome;',
+            '  if (reason) $("gen-info").textContent = reason.short;',
+        )],
+        ("the line beside 生成 names the obstacle",),
+        id="the_reason_line_beside_generate_is_never_cleared",
+    ),
+    # The disabled button, left looking exactly like a live one.
+    #
+    # ``button`` sets a background, ``cursor: pointer`` and a hover brightening,
+    # and none of them stop applying when it is disabled. A disabled button also
+    # dispatches no click, so the view-naming refusal ``runGenerate`` prints is
+    # unreachable from the page: pressing 生成 under ``gamut`` produced full
+    # accent blue, a pointer cursor, a hover highlight -- and silence. The
+    # button's appearance is the whole pre-press answer to "why can I not save
+    # this view", which is the half of the ``gamut`` decision that has to be
+    # visible rather than merely true of the DOM.
+    # 無効なボタンが生きているボタンと同じ見た目になる変異。クリックは配送
+    # されないので、押した人には何の答えも返らない。
+    pytest.param(
+        "generate",
+        [(
+            "style.css",
+            "input:disabled, select:disabled, button:disabled { opacity: 0.45; cursor: not-allowed; }",
+            "input:disabled, select:disabled { opacity: 0.45; cursor: not-allowed; }",
+        )],
+        ("a disabled button looks disabled",),
+        id="a_disabled_button_is_styled_like_a_live_one",
+    ),
+    # The confirmation, unbound from the directory it was given for.
+    #
+    # 上書きして生成 is the only control here that destroys data, and what makes
+    # it safe is that the sentence being agreed to names a place. Without the
+    # comparison at press time, a value set **without an event** -- autofill, an
+    # extension, a driver, a refactor that drops a listener -- spends an
+    # agreement about ``data/out_A`` on whatever the box says when the button is
+    # finally pressed, and in this repository that can be
+    # ``data/full_recalibration_20260730_iso400``: a real 99 GB tree that cost
+    # hardware, a subject and a day and cannot be regenerated.
+    # 確認を安全にしているのは「同意する文が場所を名指ししていること」である。
+    # イベントを伴わない設定（自動入力・拡張機能・自動操作）でも、Aについての
+    # 同意がBに使われてはならない。
+    pytest.param(
+        "generate",
+        [(
+            "js/main.js",
+            '    if (overwriteOfferedFor === null\n'
+            '      || overwriteOfferedFor !== $("gen-output-dir").value.trim()) {',
+            "    if (false) {",
+        )],
+        ("上書き agreed for one directory cannot be spent on another",),
+        id="the_overwrite_confirmation_is_not_bound_to_a_directory",
+    ),
+    # ...and the same guard's other half: the offer left standing over an edit.
+    #
+    # Either listener alone covers the other in this scenario, so the entry
+    # removes both -- but each was measured on its own as well and each fails
+    # this same check, which is the reason both are wired rather than whichever
+    # one the stub happens to fire.
+    # 片方だけでもこのシナリオは覆えるので両方外す（個別にも測っており、
+    # どちらを外してもこのチェックが落ちる）。
+    pytest.param(
+        "generate",
+        [(
+            "js/main.js",
+            '  $("gen-output-dir").addEventListener("input", () => { hideOverwriteOffer(); });\n'
+            '  $("gen-output-dir").addEventListener("change", () => { hideOverwriteOffer(); });\n',
+            "",
+        )],
+        ("editing the output directory retires the 上書き offer",),
+        id="editing_the_output_directory_leaves_the_offer_standing",
+    ),
+    # The confirmation turned into a setting.
+    #
+    # A remembered ``overwrite`` is the difference between answering a question
+    # and turning something on: every later press writes over whatever the box
+    # names, with no 409 and nothing to answer. Three checks fail and the order
+    # is the point -- the first names the constraint, and the other two are the
+    # 409 path disappearing from the rest of the scenario, which is exactly what
+    # made this regression previously surface under the name of the ``gamut``
+    # refusal and nowhere else.
+    # 上書きを記憶する実装は「問いに答えること」を「設定を入れること」に変える。
+    # 落ちる3件のうち先頭が制約を名指しし、残り2件は 409 の経路が以降のシナリオ
+    # から消えたことの現れである。
+    pytest.param(
+        "generate",
+        [
+            (
+                "js/main.js",
+                "let overwriteOfferedFor = null;",
+                "let overwriteOfferedFor = null;\nlet stickyOverwrite = false;",
+            ),
+            (
+                "js/main.js",
+                "    overwrite: !!overwrite,",
+                "    overwrite: (stickyOverwrite = stickyOverwrite || !!overwrite),",
+            ),
+        ],
+        (
+            "the press after a confirmed 上書き starts from overwrite: false",
+            "a view that declares no linearizer cannot generate",
+            "the line beside 生成 names the obstacle",
+        ),
+        id="a_confirmed_overwrite_is_remembered_for_every_later_press",
     ),
 ]
 

@@ -190,7 +190,13 @@ canvas.lut-curve {
    読み込みボタンの隣に出す「読み込んだもの」の行。250pxの段では、これが
    長くなるとボタンのほうが2行に折れていた。譲るのは行のほうにする。 */
 .group.inline > button { flex: none; white-space: nowrap; }
-#target-info, #lut-info {
+/* The line beside each of the three sidebar buttons that report what they did
+   (読み込んだターゲット / 読み込んだLUT / 生成の結果). One rule rather than
+   three copies of the same four declarations: they are the same element in
+   three places, and the copies drifted the moment one was written out again.
+   ボタンの脇に出す「何をしたか」の行。同じ4宣言を写すのではなく1つの規則に
+   まとめる。 */
+#target-info, #lut-info, #gen-info {
   min-width: 0; flex: 1 1 auto; text-align: right;
   font-size: 10.5px; line-height: 1.35; overflow-wrap: anywhere;
 }
@@ -220,7 +226,6 @@ canvas.lut-curve {
   border: 1px solid color-mix(in srgb, var(--error) 45%, var(--border));
   background: color-mix(in srgb, var(--error) 8%, transparent);
 }
-.gen-overwrite[hidden] { display: none; }
 .gen-overwrite > div {
   font-size: 10.5px; line-height: 1.45; margin-bottom: 6px;
   overflow-wrap: anywhere;
@@ -235,10 +240,6 @@ canvas.lut-curve {
    破壊的な確認を既定の見た目にすると、ガードは「通り過ぎる段」になる。 */
 .gen-overwrite > button { border-color: var(--error); color: var(--error); }
 .gen-overwrite > button:hover { border-color: var(--error); filter: brightness(1.1); }
-#gen-info {
-  min-width: 0; flex: 1 1 auto; text-align: right;
-  font-size: 10.5px; line-height: 1.35; overflow-wrap: anywhere;
-}
 
 .legend { display: flex; align-items: center; gap: 7px; font-size: 11px; }
 .legend-swatch { width: 34px; height: 12px; border-radius: 3px; border: 1px solid var(--border); flex-shrink: 0; }
@@ -260,12 +261,28 @@ canvas.lut-curve {
    a hand-toggled class would eventually do. The ディザ checkbox is inside its
    own label, hence the third selector.
 
+   **Buttons included, and that is not decoration.** `button` above sets its own
+   background, `cursor: pointer` and a hover, and none of them stop applying
+   when the button is disabled: 生成 under `gamut` was full accent blue, showed
+   a pointer cursor and *brightened under the cursor* while dispatching nothing
+   at all. A disabled button dispatches no click, so the sentence `runGenerate`
+   prints when it is called anyway is unreachable from the page -- pressing it
+   is silence. That makes the button's own appearance the entire pre-press
+   answer to "why can I not save this view", which is the half of the `gamut`
+   decision that has to be visible rather than merely true of the DOM. The
+   hover is neutralised explicitly (later in the sheet, same specificity as
+   `button.primary:hover`, so it wins) because "it lights up under the cursor"
+   is the strongest signal a control has that it is live.
+
    無効なコントロールは無効に見えること。`disabled` だけではγの数値入力は
    見た目が変わらず、見出しも明るいままになる。categorical では4つとも同時に
    無効になるので、これは例外的な状態ではなくこのビューの見た目そのものである。
    見出しは `:has()` でコントロールに追従させる（別途クラスを付ける方式だと
-   いずれ食い違う）。 */
-input:disabled, select:disabled { opacity: 0.45; cursor: not-allowed; }
+   いずれ食い違う）。ボタンも同じ扱いにする——無効なボタンはクリックを配送
+   しないため「押しても何も起きない」だけになり、押す前の見た目が唯一の答えに
+   なる。ホバーの明滅は「生きている」ことの最も強い合図なので明示的に消す。 */
+input:disabled, select:disabled, button:disabled { opacity: 0.45; cursor: not-allowed; }
+button:disabled:hover { border-color: var(--border); filter: none; }
 .group:has(> input:disabled) > .lbl,
 .group:has(> select:disabled) > .lbl,
 label:has(> input:disabled) { opacity: 0.45; }
