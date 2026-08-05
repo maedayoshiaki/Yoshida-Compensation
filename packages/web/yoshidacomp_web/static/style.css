@@ -391,7 +391,7 @@ footer#status.error { color: var(--error); }
   gap: 8px;
   padding: 12px;
   background: var(--panel, #1b1b1f);
-  border: 1px solid var(--line, #3a3a42);
+  border: 1px solid var(--border);
   border-radius: 6px;
 }
 
@@ -401,6 +401,10 @@ footer#status.error { color: var(--error); }
   gap: 8px;
 }
 .picker-head .path { flex: 1; overflow-x: auto; white-space: nowrap; }
+/* `.toolbar .spacer` (above) is scoped to the toolbar and does not reach this
+   element, so 取消/選択 sat flush against `#picker-chosen` instead of at the
+   right edge. `.toolbar .spacer` は範囲外のため、この spacer には効かない。 */
+.picker-foot .spacer { flex: 1; }
 
 /* The only element that scrolls. Fixed-height rows so a long listing does not
    reflow as sizes arrive. 唯一スクロールする要素。行高は固定。 */
@@ -408,7 +412,7 @@ footer#status.error { color: var(--error); }
   flex: 1;
   min-height: 200px;
   overflow-y: auto;
-  border: 1px solid var(--line, #3a3a42);
+  border: 1px solid var(--border);
 }
 .picker-row {
   display: flex;
@@ -417,7 +421,14 @@ footer#status.error { color: var(--error); }
   cursor: pointer;
   white-space: nowrap;
 }
-.picker-row:hover { background: rgba(255, 255, 255, 0.06); }
+/* `rgba(255,255,255,...)` is white-on-white on the light theme, which this
+   sheet's `:root` default is (`--panel: #ffffff`; dark comes from the
+   `prefers-color-scheme` block below it) -- so the only feedback about which
+   row is about to be clicked disappeared there. `--panel-2` is the raised-
+   surface token the rest of this file already uses for that purpose.
+   `rgba(255,255,255,...)` は既定の明テーマでは白地に白。挙げるべき合図が
+   消える。`--panel-2` は他所で使っている「浮いた面」の色。 */
+.picker-row:hover { background: var(--panel-2); }
 .picker-row.selected { background: rgba(120, 170, 255, 0.22); }
 .picker-row .size { margin-left: auto; opacity: 0.7; }
 
@@ -425,5 +436,10 @@ footer#status.error { color: var(--error); }
 .picker-newdir[hidden] { display: none; }
 
 /* Red only when there is something to say; `#picker-error` is always present
-   and usually empty. 空のときは色を持たない。 */
-#picker-error:not(:empty) { color: var(--err, #ff8080); }
+   and usually empty. `--err`/`--line` do not exist in this sheet (the real
+   tokens are `--error`/`--border`, :10/:26 and :8/:25), so the fallback
+   value was always what rendered -- on the light theme's white panel that is
+   about 2.4:1 contrast, against this site's own `--error` at about 5.7:1.
+   空のときは色を持たない。存在しないトークン名だったため、フォールバック値
+   （暗テーマ想定）が常に使われていた。明テーマの白地では読みにくい。 */
+#picker-error:not(:empty) { color: var(--error); }

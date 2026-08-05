@@ -1101,23 +1101,31 @@ const browseLog = [];
 // `.npy` rather than the brief's `notes.txt` / `IMG_0001.png` /
 // `IMG_0002.png`: this scenario opens the picker exclusively through
 // `btn-browse-matrix`, whose suffix filter (`.npy`, from `GET
-// /api/browse/suffixes`) is session-wide, per `browse.py::list_directory` --
-// it applies to every navigation for the life of one dialog, up-clicks
-// included, the same way the real endpoint filters every request it answers.
-// A `.txt`/`.png` file at those paths would be filtered out before the
-// listing ever reaches the client (measured: the pre-fix names produced
-// "data/,Delta/" with no third entry, and "12800件中0件を表示" with an
-// empty `entries` array), which is not a harness bug -- it is what a
-// `.npy`-only picker is supposed to do to a non-`.npy` file.
+// /api/browse/suffixes`) applies to every navigation for the life of one
+// dialog, up-clicks included. Two separate facts combine to make that true:
+// `browse.py::list_directory` filters whichever suffixes *that one request*
+// carries (it is stateless -- it knows nothing of a session), and it is
+// `filepicker.js`'s `session.suffixes`, fixed once at `pickPath()` time and
+// reused unchanged by every `navigate()` call the dialog makes afterwards,
+// that is session-wide. A `.txt`/`.png` file at those paths would be
+// filtered out before the listing ever reaches the client (measured: the
+// pre-fix names produced "data/,Delta/" with no third entry, and
+// "12800件中0件を表示" with an empty `entries` array), which is not a
+// harness bug -- it is what a `.npy`-only picker is supposed to do to a
+// non-`.npy` file.
 //
 // `/repo` の唯一のファイルと `/repo/data/shots` の2件を `.npy` にしてある
 // （ブリーフ原文は `notes.txt` / `IMG_0001.png` / `IMG_0002.png`）。このシナリオは
 // `btn-browse-matrix` からしか開かず、その拡張子フィルタ（`.npy`）はダイアログの
-// 生存期間中ずっと有効（`browse.py::list_directory` と同じく、上へ を含む
-// 全リクエストに掛かる）。`.txt`/`.png` のままでは一覧に届く前に落ちる
-// （実測: 3件目が消えて "data/,Delta/"、`entries` が空になって
-// "12800件中0件を表示"）。これはハーネスの不具合ではなく、`.npy` 専用の
-// ファイラが `.npy` でないファイルにすべき振る舞いそのものである。
+// 生存期間中ずっと有効（上へ を含む全リクエストに掛かる）。これは2つの事実の
+// 組み合わせである: `browse.py::list_directory` は1回のリクエストが運ぶ
+// 拡張子だけを見て絞る（セッションという概念自体を持たない）。セッション全体に
+// 効くのは `filepicker.js` の `session.suffixes` の側で、`pickPath()` の時点で
+// 一度だけ決まり、以後の `navigate()` 呼び出しがそれをそのまま使い回すことに
+// よる。`.txt`/`.png` のままでは一覧に届く前に落ちる（実測: 3件目が消えて
+// "data/,Delta/"、`entries` が空になって "12800件中0件を表示"）。これは
+// ハーネスの不具合ではなく、`.npy` 専用のファイラが `.npy` でないファイルに
+// すべき振る舞いそのものである。
 const BROWSE_TREE = {
   "/repo": {
     parent: null,
@@ -1192,8 +1200,16 @@ globalThis.fetch = async (url, options) => {
   }
 
   if (url === "/api/browse/suffixes") {
+    // `target` mirrors `SUPPORTED_TARGET_IMAGE_SUFFIXES`
+    // (packages/core/yoshidacomp/compensation/pipeline.py:41), the real
+    // `SUFFIX_TABLE["target"]`'s only source -- not a shorter list picked for
+    // convenience here, which a later task pinning the target request string
+    // would otherwise have to notice and fix.
+    // `target` は SUPPORTED_TARGET_IMAGE_SUFFIXES と同じ内容にする（唯一の
+    // 出所）。ここで短く済ませると、後のタスクがリクエスト文字列を固定する
+    // ときに食い違いに気付かないまま進む。
     return new Response(JSON.stringify({
-      matrix: [".npy"], target: [".png", ".jpg"], lut: [".npz"],
+      matrix: [".npy"], target: [".png", ".jpg", ".jpeg"], lut: [".npz"],
     }), { headers: { "content-type": "application/json" } });
   }
 
@@ -4623,22 +4639,27 @@ if (SCENARIO === "picker") {
     `before=${chooseBeforePick} after=${el("picker-choose").disabled} `
       + `chosen="${el("picker-chosen").textContent}"`);
 
-  // --- 7. 確定は欄を書き換え、`change` を発火する
+  // --- 7. 確定は欄を書き換え、`input` と `change` の両方を発火する
   //
   // 代入だけの実装と区別できない検査にしない。`gen-output-dir` の編集リスナは
   // 上書き合意を失効させるので、イベント無しの代入は「Aについての合意をBに
   // 使う」経路になる。ここで見るのは行列の欄だが、発火は4欄で共通の1箇所である。
-  // 選択の確定は /api/browse を発行しないため、待つ対象は `change` の発火
-  // そのもの（`sawChange`）にする。
-  let sawChange = 0;
+  // `change` だけを見ていると、`main.js` の `input` 発火行だけを削る変異が
+  // 通ってしまう（`change` は残るため）。両方数える。
+  // 選択の確定は /api/browse を発行しないため、待つ対象はイベントの発火
+  // そのもの（`sawChange`）にする。`input` は `change` より先に発火するので、
+  // `change` を待てば `input` も既に届いている。
+  let sawInput = 0, sawChange = 0;
+  el("path-input").addEventListener("input", () => { sawInput += 1; });
   el("path-input").addEventListener("change", () => { sawChange += 1; });
   el("picker-choose").__fire("click");
   await waitFor(() => sawChange > 0);
-  check("choosing writes the box and fires change on it",
+  check("choosing writes the box and fires input and change on it",
     el("path-input").value === "/repo/data/matrices_linear_gamma.npy"
+      && sawInput === 1
       && sawChange === 1
       && el("picker-backdrop").hidden === true,
-    `value="${el("path-input").value}" change=${sawChange} `
+    `value="${el("path-input").value}" input=${sawInput} change=${sawChange} `
       + `hidden=${el("picker-backdrop").hidden}`);
 
   // --- 8. 取消は欄に触れない

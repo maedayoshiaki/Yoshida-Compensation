@@ -2131,7 +2131,7 @@ _MUTATIONS = [
             "keeps the order the server sent",
             "entering a directory costs exactly one /api/browse",
             "選択 is dead until a file is picked, and names exactly what it will return",
-            "choosing writes the box and fires change on it",
+            "choosing writes the box and fires input and change on it",
             "a refusal is shown inside the dialog, which stays where it was",
         ),
         id="picker_re_sorts_the_listing_on_the_client",
@@ -2149,7 +2149,7 @@ _MUTATIONS = [
             '        box.dispatchEvent(new Event("change", { bubbles: true }));',
             "",
         )],
-        ("fires change on it",),
+        ("fires input and change on it",),
         id="picker_sets_the_box_without_firing_its_events",
     ),
     # The cut, made silent. The list is right; the sentence over it is the lie.

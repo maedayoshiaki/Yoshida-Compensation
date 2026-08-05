@@ -118,7 +118,29 @@ function renderRoots(roots, cwd) {
 async function navigate(path) {
   const params = new URLSearchParams({ path });
   if (session.suffixes.length) params.set("suffixes", session.suffixes.join(","));
-  const res = await fetch(`/api/browse?${params.toString()}`);
+  let res;
+  try {
+    res = await fetch(`/api/browse?${params.toString()}`);
+  } catch (e) {
+    // A transport-level failure (server down, connection dropped) is not an
+    // HTTP refusal -- `fetch` rejects instead of resolving -- and `navigate`
+    // is called from three unawaited sites (a directory row, `↑ 上へ`, the
+    // root <select>) plus `pickPath`'s own initial call, none of which had a
+    // `.catch`. Left uncaught, the rejection was unhandled *and*
+    // `pickPath`'s own Promise -- whose `settle` only close() calls, and
+    // close() is never reached here -- stayed pending forever, so the
+    // backdrop never closed and 参照 stopped working for the rest of the
+    // page's life. Handled the same way as an HTTP refusal: shown inside the
+    // dialog, which stays open where it was.
+    // 輸送層の失敗（サーバ停止・断線）は HTTP の拒否と違い fetch 自体が
+    // reject する。navigate() は3つの結線＋pickPath 自身の初回呼び出しから
+    // await も catch も無いまま呼ばれており、ここを捕らないと pickPath の
+    // Promise（settle を呼ぶのは close() だけで、ここには届かない）が
+    // 永久に解決せず、以後ページを再読み込みするまで 参照 が効かなくなる。
+    // HTTP の拒否と同じ扱いにする（モーダル内に出し、開いたまま留まる）。
+    $("picker-error").textContent = `${e.message || e}`;
+    return;
+  }
   if (!res.ok) {
     // Shown inside the dialog and the dialog stays where it was. Putting this
     // on the page's status bar would print it behind the backdrop, and a
