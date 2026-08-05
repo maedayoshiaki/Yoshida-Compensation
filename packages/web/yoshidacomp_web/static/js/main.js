@@ -1364,19 +1364,7 @@ const BROWSE_FIELDS = [
 
 function wireBrowseButtons() {
   for (const field of BROWSE_FIELDS) {
-    // The table is written complete (all four boxes) so that giving the
-    // sidebar its own three buttons later needs no second edit here -- but
-    // this branch ships wired to only one of them (`btn-browse-matrix`), and
-    // an unguarded lookup would throw on `main()`'s very first pass, taking
-    // every other control on the page down with it before its own try/catch
-    // is even reached.
-    // 表は4欄分を完成させて書く（サイドバーに残る3個を足す側で二度書かずに
-    // 済むように）。ただしこの変更が出荷する時点でボタンがあるのは
-    // `btn-browse-matrix` だけなので、無条件に取得すると main() の最初の
-    // 一巡で例外になり、まだ try/catch に入ってすらいない他の結線ごと道連れに
-    // なる。
     const button = $(field.button);
-    if (!button) continue;
     button.addEventListener("click", () => {
       (async () => {
         const suffixes = field.suffixKey ? await suffixesFor(field.suffixKey) : [];

@@ -4709,6 +4709,126 @@ if (SCENARIO === "picker") {
     `count="${el("picker-count").textContent}"`);
   el("picker-cancel").__fire("click");
   await settled();
+
+  // --- 11. ターゲットの欄は画像とディレクトリの両方を返せる
+  //
+  // `target-path` は「画像1枚」と「画像を並べたディレクトリ」のどちらも取る
+  // 唯一の欄で、`POST /api/target` はその区別を自分で付ける。ファイラ側で
+  // どちらかに寄せると、片方が選べない欄になる。
+  el("target-path").value = "";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-target").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  const targetRequest = browseLog[browseLog.length - 1];
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("picker-entry-0").__fire("click");            // data/
+  await browseSettled(prevCwd, prevError);
+  const dirIsAnswerable = el("picker-choose").disabled === false
+    && el("picker-chosen").textContent === "/repo/data";
+  // `/repo/data` filtered to target suffixes drops readme.txt, the .npy and
+  // the .npz, leaving [shots/, nature_1_sq.png] -- index 1, not the brief's
+  // unfiltered index 3.
+  //
+  // `browseSettled()`, not `settled()`, even though this row is a file under
+  // the shipped listing order: a file click is synchronous and this would
+  // still be safe if it stalled the full timeout for nothing, but a directory
+  // click is not, and this same index is a directory under
+  // `picker_re_sorts_the_listing_on_the_client`. Racing that unawaited
+  // `navigate()` against the confirm below (which closes the session as soon
+  // as `session.cwd` alone is a valid answer, `file_or_dir` mode) crashed the
+  // harness outright the one time this was `settled()`: the late response
+  // wrote into a `session` already nulled by close() (measured).
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("picker-entry-1").__fire("click");            // nature_1_sq.png
+  await browseSettled(prevCwd, prevError);
+  check("the target box can answer with an image or with a directory",
+    targetRequest.suffixes === ".png,.jpg,.jpeg"
+      && dirIsAnswerable
+      && el("picker-chosen").textContent === "/repo/data/nature_1_sq.png",
+    `suffixes="${targetRequest.suffixes}" dirAnswerable=${dirIsAnswerable} `
+      + `chosen="${el("picker-chosen").textContent}"`);
+  // 選択の確定は /api/browse を発行しないため、browseSettled() は使えない
+  // （navigate() が一度も走らず、picker-cwd も picker-error も動かない）。
+  // 確定自体の完了を直接見る。
+  let sawTargetChange = 0;
+  el("target-path").addEventListener("change", () => { sawTargetChange += 1; });
+  el("picker-choose").__fire("click");
+  await waitFor(() => sawTargetChange > 0);
+  check("the target box receives the picked image",
+    el("target-path").value === "/repo/data/nature_1_sq.png",
+    `value="${el("target-path").value}"`);
+
+  // --- 12. LUT の欄は .npz を絞る
+  el("lut-path").value = "";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-lut").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  check("the lut box asks the server for .npz only",
+    browseLog[browseLog.length - 1].suffixes === ".npz",
+    `suffixes="${browseLog[browseLog.length - 1].suffixes}"`);
+  el("picker-cancel").__fire("click");
+  await settled();
+
+  // --- 13. 出力先はディレクトリモードで、新規フォルダ名を連結する
+  //
+  // 書き込み先なので「まだ存在しないディレクトリ」を指せなければならない。
+  // ファイラは存在するものしか一覧できないので、現在地＋入力名という形になる。
+  // **ここで作りはしない。** 作成は POST /api/generate の仕事のままである。
+  el("gen-output-dir").value = "";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-output").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  const newdirShown = el("picker-newdir").hidden === false;
+  const emptyMeansHere = el("picker-chosen").textContent === "/repo";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("picker-entry-0").__fire("click");            // data/
+  await browseSettled(prevCwd, prevError);
+  el("picker-newdir-name").value = "proj_20260805";
+  el("picker-newdir-name").__fire("input");
+  await settled();
+  check("the output box picks a directory that need not exist yet",
+    newdirShown && emptyMeansHere
+      && el("picker-chosen").textContent === "/repo/data/proj_20260805",
+    `newdirShown=${newdirShown} emptyMeansHere=${emptyMeansHere} `
+      + `chosen="${el("picker-chosen").textContent}"`);
+
+  // --- 14. その欄では 上書き合意 が失効する
+  //
+  // 確定はイベントを発火するので、`gen-output-dir` の編集リスナに届く。
+  // 届かなければ、A というディレクトリについて取った上書きの合意が B に
+  // 使われうる（押下時にも再確認しているが、リスナを迂回する経路を残さない）。
+  let sawOutputChange = 0;
+  el("gen-output-dir").addEventListener("change", () => { sawOutputChange += 1; });
+  el("picker-choose").__fire("click");
+  await waitFor(() => sawOutputChange > 0);
+  check("the output box is written and its edit listeners are reached",
+    el("gen-output-dir").value === "/repo/data/proj_20260805" && sawOutputChange === 1,
+    `value="${el("gen-output-dir").value}" change=${sawOutputChange}`);
+
+  // --- 15. 新規フォルダ名は次に開いたとき残らない
+  //
+  // 残ると、別の出力先を選びに来た押下が前回の名前を連れてくる。
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-output").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  check("the new-folder name does not survive into the next dialog",
+    el("picker-newdir-name").value === "" && el("picker-chosen").textContent === "/repo/data",
+    `name="${el("picker-newdir-name").value}" chosen="${el("picker-chosen").textContent}"`);
+  el("picker-cancel").__fire("click");
+  await settled();
+
+  // --- 16. ファイル用の欄には新規フォルダ名を出さない
+  //
+  // 読む側の欄で「まだ無いファイル」を名乗れてしまうと、必ず 404 になる
+  // パスを組み立てる道具を渡すことになる。
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-matrix").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  check("the new-folder box is absent where the path must already exist",
+    el("picker-newdir").hidden === true,
+    `hidden=${el("picker-newdir").hidden}`);
+  el("picker-cancel").__fire("click");
+  await settled();
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

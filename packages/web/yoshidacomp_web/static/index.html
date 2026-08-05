@@ -145,6 +145,7 @@
         <input id="target-path" class="mono loader" type="text" spellcheck="false"
                placeholder="画像ファイル または画像を並べたディレクトリ" />
         <div class="group inline">
+          <button id="btn-browse-target">参照</button>
           <button id="btn-load-target">読み込み</button>
           <span id="target-info" class="muted mono">未読み込み</span>
         </div>
@@ -157,6 +158,7 @@
         <input id="lut-path" class="mono loader" type="text" spellcheck="false"
                placeholder="inverse_lut.npz のパス" />
         <div class="group inline">
+          <button id="btn-browse-lut">参照</button>
           <button id="btn-load-lut">読み込み</button>
           <span id="lut-info" class="muted mono">未読み込み</span>
         </div>
@@ -216,6 +218,7 @@
         <input id="gen-output-dir" class="mono loader" type="text" spellcheck="false"
                placeholder="出力先ディレクトリ（空でなければ確認します）" />
         <div class="group inline">
+          <button id="btn-browse-output">参照</button>
           <button id="btn-generate" class="primary">生成</button>
           <span id="gen-info" class="muted mono">未生成</span>
         </div>

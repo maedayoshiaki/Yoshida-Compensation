@@ -2085,8 +2085,17 @@ _MUTATIONS = [
     # The filter, moved to the client: the server cuts at MAX_ENTRIES and *then*
     # the client would drop the non-matching files, so a directory of 12800
     # captures shows "12800件中2件を表示" over a list that is neither.
+    #
+    # Task 4 widens the blast radius: `session.suffixes` is never sent for
+    # *any* box now, not only the matrix one, so the target box's own suffix
+    # check fails the same way, and with `/repo/data` unfiltered its
+    # `picker-entry-1` (chosen for being `nature_1_sq.png` under the target
+    # filter) is `matrices_linear_gamma.npy` instead -- the same wrong file
+    # both checks that follow the selection then report (measured).
     # フィルタをクライアント側へ移す。サーバが2000件で切ったあとに絞ることに
-    # なり、件数表示が実際の一覧と対応しなくなる。
+    # なり、件数表示が実際の一覧と対応しなくなる。Task 4 でどの欄も拡張子を
+    # 送らなくなるため、ターゲットの欄と LUT の欄の絞り込み検査も同様に落ち、
+    # `/repo/data` が絞られないせいで `picker-entry-1` は別のファイルを指す。
     pytest.param(
         "picker",
         [(
@@ -2094,7 +2103,12 @@ _MUTATIONS = [
             '  if (session.suffixes.length) params.set("suffixes", session.suffixes.join(","));',
             "",
         )],
-        ("asks the server for .npy only",),
+        (
+            "asks the server for .npy only",
+            "the target box can answer with an image or with a directory",
+            "the target box receives the picked image",
+            "the lut box asks the server for .npz only",
+        ),
         id="picker_filters_on_the_client_instead_of_the_server",
     ),
     # The listing, re-sorted locally. `LoadTargetRequest.index` is an index into
@@ -2120,6 +2134,37 @@ _MUTATIONS = [
     # 添字であり、並び替え検査より後のほとんどが、その並び替えられた
     # 「/repo」の一覧を使い回しているためである。ダイアログを開き直す2件
     # （取消・打ち切り表示）だけは影響を受けない。
+    #
+    # Task 4 adds five more of the same kind. `Delta` sorts before `data`
+    # under *any* suffix filter that keeps both (the target box's and the
+    # output box's), so each box's own `picker-entry-0` -- documented `//
+    # data/` -- lands on `Delta` and 403s instead. The target box (checks 11
+    # and 12) then answers from `/repo` rather than
+    # `/repo/data/nature_1_sq.png`. The output box (check 13) types its
+    # new-folder name against `/repo` instead of `/repo/data`, writes
+    # `/repo/proj_20260805` (check 14), and its reopen (check 15) inherits the
+    # `picker-error` that 403 left set -- which `dir` mode's `pickPath()`
+    # clears *synchronously*, with no suffix lookup ahead of it to defer that
+    # reset by a tick the way the other three boxes' opens do, so
+    # `browseSettled()` reports "settled" against the stale render one
+    # navigation early (measured -- not a crash, just the wrong string).
+    #
+    # The harness itself needed one fix for this mutation, not an entry here:
+    # check 11's second `picker-entry-N` click is a file under the shipped
+    # order but a directory under this one, and racing its unawaited
+    # `navigate()` against the confirm button crashed the process outright
+    # (`session` written to after `close()` had nulled it) until that click
+    # started waiting on `browseSettled()` instead of `settled()`. See the
+    # comment at that call site.
+    # Task 4 で5件が同様に道連れになる。`Delta` は `data` を残す拡張子フィルタ
+    # であれば常に `data` より先に並ぶため、ターゲットの欄・出力先の欄それぞれの
+    # `picker-entry-0`（コメント上は `data/`）が `Delta` に当たって403になる。
+    # 出力先の欄はその403が残した `picker-error` を次に開いたとき
+    # （`pickPath()` が同期的に消す）引き継ぎ、`browseSettled()` が1回早く
+    # 「落ち着いた」と報告する（実測——クラッシュはせず、値が違うだけ）。
+    # このミューテーションはハーネス自体の修正も1件要した（11番目の検査の
+    # 2回目のクリック先が、この変異下ではファイルではなくディレクトリになり、
+    # 未 await の navigate() と確定ボタンが競合してプロセスごと落ちた）。
     pytest.param(
         "picker",
         [(
@@ -2133,14 +2178,29 @@ _MUTATIONS = [
             "選択 is dead until a file is picked, and names exactly what it will return",
             "choosing writes the box and fires input and change on it",
             "a refusal is shown inside the dialog, which stays where it was",
+            "the target box can answer with an image or with a directory",
+            "the target box receives the picked image",
+            "the output box picks a directory that need not exist yet",
+            "the output box is written and its edit listeners are reached",
+            "the new-folder name does not survive into the next dialog",
         ),
         id="picker_re_sorts_the_listing_on_the_client",
     ),
     # The confirmation, assigned instead of dispatched. `gen-output-dir`'s two
     # edit listeners retire the 上書き agreement, and this is the one way into
     # that box that would bypass them.
+    #
+    # `wireBrowseButtons()` fires both events from the one shared handler, so
+    # removing them is removed for all four boxes at once. Task 4's own check
+    # on the output box -- built for exactly this guard, the same way the
+    # matrix-box check above already was -- fails alongside it: `box.value =
+    # chosen` still runs, so `gen-output-dir` still gets its text, but the
+    # `change` listener this check counts never fires.
     # 確定を代入で済ませる。`gen-output-dir` の編集リスナ2つを迂回する唯一の
-    # 経路になる。
+    # 経路になる。`wireBrowseButtons()` は1つのハンドラで4欄分のイベントを
+    # 発火するため、外すと4欄とも道連れになる。Task 4 が足した出力先の欄の
+    # 検査（同じガードを見るために作った）も同様に落ちる——代入はされるが
+    # `change` は発火しない。
     pytest.param(
         "picker",
         [(
@@ -2149,7 +2209,10 @@ _MUTATIONS = [
             '        box.dispatchEvent(new Event("change", { bubbles: true }));',
             "",
         )],
-        ("fires input and change on it",),
+        (
+            "fires input and change on it",
+            "the output box is written and its edit listeners are reached",
+        ),
         id="picker_sets_the_box_without_firing_its_events",
     ),
     # The cut, made silent. The list is right; the sentence over it is the lie.
@@ -2165,6 +2228,74 @@ _MUTATIONS = [
         )],
         ("says how much of it is shown",),
         id="picker_truncates_the_listing_silently",
+    ),
+    # ---- the three modes collapsed into one, one at a time
+    #
+    # The modes are one function (`chosenPath`) and each collapse leaves a
+    # dialog that opens, lists and returns a plausible string.
+    # 3つのモードは1つの関数に閉じており、どれに潰しても「開いて一覧して
+    # それらしい文字列を返すダイアログ」のままである。
+    #
+    # `dir` folded into "the current directory, always": the new-folder name is
+    # ignored, so 出力先 can only ever name a directory that already exists --
+    # and `generate.py` refuses a non-empty one. The box becomes unable to
+    # express its own ordinary case.
+    #
+    # A third check falls with it, and it is downstream rather than
+    # independent: the "does not survive into the next dialog" check reopens
+    # the dialog by trimming the *box's own* last path segment off the value
+    # the previous check just wrote. Under this mutation that value is
+    # `/repo/data` (the folder name never made it in), so stripping its last
+    # segment lands one directory too high, at `/repo` instead of
+    # `/repo/data` -- not a second guard, the same missing name surfacing at
+    # its next read (measured).
+    # 新規フォルダ名を無視する。出力先は既存ディレクトリしか名乗れなくなり、
+    # generate.py は空でないディレクトリを拒むので、通常の使い方ができなくなる。
+    # 3件目が道連れで落ちるのは別のガードではない: 「次に開いたとき残らない」
+    # 検査は直前の検査が書いた欄の値そのものから最後の1区切りを削って開き直す
+    # ため、フォルダ名が入っていない値（`/repo/data`）では1段上の `/repo` に
+    # 着地する（実測）。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            "    const name = $(\"picker-newdir-name\").value.trim();\n"
+            "    return name ? `${session.cwd}/${name}` : session.cwd;",
+            "    return session.cwd;",
+        )],
+        ("picks a directory that need not exist yet",
+         "the output box is written and its edit listeners are reached",
+         "the new-folder name does not survive into the next dialog"),
+        id="picker_dir_mode_ignores_the_new_folder_name",
+    ),
+    # `file_or_dir` narrowed to `file`: the target box can no longer answer with
+    # a directory, and a directory of images is half of what that endpoint takes
+    # (`LoadTargetRequest.index` exists for exactly that case).
+    # ターゲットの欄がディレクトリを返せなくなる。画像を並べたディレクトリは
+    # このエンドポイントの用途の半分である（index はそのために在る）。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            '  return session.mode === "file_or_dir" ? session.cwd : "";',
+            '  return "";',
+        )],
+        ("can answer with an image or with a directory",),
+        id="picker_target_mode_refuses_a_directory",
+    ),
+    # The new-folder box, shown everywhere: a reading box then offers to name a
+    # file that does not exist, which can only ever be a 404.
+    # 読む側の欄にも新規フォルダ名を出す。必ず404になるパスを組み立てる道具に
+    # なる。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            '    $("picker-newdir").hidden = mode !== "dir";',
+            '    $("picker-newdir").hidden = false;',
+        )],
+        ("absent where the path must already exist",),
+        id="picker_offers_a_new_folder_name_on_a_reading_box",
     ),
 ]
 
