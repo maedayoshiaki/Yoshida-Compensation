@@ -149,3 +149,129 @@ def test_the_suffix_table_takes_target_images_from_the_pipeline() -> None:
     assert browse.SUFFIX_TABLE["target"] == tuple(SUPPORTED_TARGET_IMAGE_SUFFIXES)
     assert browse.SUFFIX_TABLE["matrix"] == (".npy",)
     assert browse.SUFFIX_TABLE["lut"] == (".npz",)
+
+
+# ------------------------------------------------------------------ HTTP 層
+
+from fastapi.testclient import TestClient  # noqa: E402
+
+from yoshidacomp_web.app import create_app  # noqa: E402
+
+
+def test_browse_returns_the_listing_as_posix_paths(tmp_path: Path) -> None:
+    """パスは POSIX 区切りで返す。Windows の ``\\`` は JSON でも URL でも扱いにくい。"""
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "a.npy").write_bytes(b"0")
+    client = TestClient(create_app())
+
+    body = client.get("/api/browse", params={"path": str(tmp_path)}).json()
+
+    assert body["path"] == tmp_path.resolve().as_posix()
+    assert body["parent"] == tmp_path.resolve().parent.as_posix()
+    assert [e["name"] for e in body["entries"]] == ["sub", "a.npy"]
+    assert body["total"] == 2
+    assert body["truncated"] is False
+
+
+def test_browse_with_no_path_lists_the_working_directory() -> None:
+    """欄が空のまま ``参照`` を押したときの出発点。"""
+    client = TestClient(create_app())
+
+    body = client.get("/api/browse").json()
+
+    assert body["path"] == Path.cwd().resolve().as_posix()
+
+
+def test_browse_applies_the_suffix_filter_from_the_query(tmp_path: Path) -> None:
+    (tmp_path / "keep.npy").write_bytes(b"0")
+    (tmp_path / "drop.txt").write_text("x", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    client = TestClient(create_app())
+
+    body = client.get(
+        "/api/browse", params={"path": str(tmp_path), "suffixes": ".npy"}
+    ).json()
+
+    assert [e["name"] for e in body["entries"]] == ["sub", "keep.npy"]
+
+
+@pytest.mark.parametrize(
+    ("make", "status"),
+    [
+        (lambda p: p / "missing", 404),
+        (lambda p: p / "a.npy", 400),
+    ],
+)
+def test_browse_translates_the_two_ordinary_mistakes(
+    tmp_path: Path, make, status: int
+) -> None:
+    """存在しないパスと、ディレクトリでないパス。どちらも手打ちの日常。"""
+    (tmp_path / "a.npy").write_bytes(b"0")
+    client = TestClient(create_app())
+
+    res = client.get("/api/browse", params={"path": str(make(tmp_path))})
+
+    assert res.status_code == status
+    assert str(make(tmp_path).name) in res.json()["detail"]
+
+
+def test_browse_reports_an_unreadable_directory_as_403_not_500(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """マシン全体を辿れる以上、権限の無いディレクトリは通り道に必ず現れる。"""
+    def deny(_path):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(browse.os, "listdir", deny)
+    client = TestClient(create_app())
+
+    res = client.get("/api/browse", params={"path": str(tmp_path)})
+
+    assert res.status_code == 403
+
+
+def test_the_suffix_endpoint_serves_all_three_filters() -> None:
+    client = TestClient(create_app())
+
+    body = client.get("/api/browse/suffixes").json()
+
+    assert body["matrix"] == [".npy"]
+    assert body["lut"] == [".npz"]
+    assert ".png" in body["target"]
+
+
+# --------------------------------------------------------------- Host 検査
+#
+# CORS が無いため他オリジンのページは応答を読めないが、DNS リバインディングは
+# その保護を迂回する（攻撃者のドメインを 127.0.0.1 に再解決させると、ブラウザ
+# から見て同一オリジンになり CORS の判定自体が起きない）。ファイラはマシン全体の
+# ファイル名を返すので、この検査とセットでなければ成立しない。
+
+
+def test_a_foreign_host_header_is_refused() -> None:
+    client = TestClient(create_app())
+
+    res = client.get("/api/browse", headers={"Host": "evil.example"})
+
+    assert res.status_code == 400
+    assert "host" in res.text.lower()
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1:8123", "localhost:8123", "127.0.0.1"])
+def test_the_loopback_hosts_are_allowed_with_and_without_a_port(host: str) -> None:
+    client = TestClient(create_app())
+
+    assert client.get("/api/health", headers={"Host": host}).status_code == 200
+
+
+def test_the_host_check_also_covers_the_pre_existing_endpoints() -> None:
+    """検査はアプリ全体に掛かる。ファイラだけを守っても意味が無い --
+    ``POST /api/session/matrix`` は既に任意のパスを読み、``/api/generate`` は
+    既に任意のパスへ書く。"""
+    client = TestClient(create_app())
+
+    res = client.post(
+        "/api/session/matrix", json={"path": "x.npy"}, headers={"Host": "evil.example"}
+    )
+
+    assert res.status_code == 400
