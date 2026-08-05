@@ -439,7 +439,9 @@ footer#status.error { color: var(--error); }
    and usually empty. `--err`/`--line` do not exist in this sheet (the real
    tokens are `--error`/`--border`, :10/:26 and :8/:25), so the fallback
    value was always what rendered -- on the light theme's white panel that is
-   about 2.4:1 contrast, against this site's own `--error` at about 5.7:1.
+   2.43:1 contrast, against this site's own `--error` at 5.11:1 (WCAG relative
+   luminance, both computed against `--panel: #ffffff`; the 5.11 was written
+   here as "about 5.7" until it was actually computed).
    空のときは色を持たない。存在しないトークン名だったため、フォールバック値
    （暗テーマ想定）が常に使われていた。明テーマの白地では読みにくい。 */
 #picker-error:not(:empty) { color: var(--error); }

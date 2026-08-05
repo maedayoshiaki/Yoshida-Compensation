@@ -1369,8 +1369,15 @@ function wireBrowseButtons() {
       (async () => {
         const suffixes = field.suffixKey ? await suffixesFor(field.suffixKey) : [];
         const box = $(field.input);
+        // `returnFocusTo` is this button, named rather than read back out of
+        // `document.activeElement`: a press does not focus a <button> on every
+        // browser (Safari does not), so the dialog would have nothing to give
+        // focus back to on exactly the platforms where it matters most.
+        // フォーカスの戻し先はこのボタンを明示する（押下でボタンにフォーカス
+        // が移らないブラウザがあり、activeElement からは取れない）。
         const chosen = await pickPath({
           mode: field.mode, suffixes, start: box.value.trim(), title: field.title,
+          returnFocusTo: button,
         });
         if (chosen === null) return;      // cancelled: the box is not touched
         box.value = chosen;

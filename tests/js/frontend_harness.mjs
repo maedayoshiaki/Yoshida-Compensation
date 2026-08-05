@@ -255,6 +255,16 @@ function makeEl(tag = "div") {
     },
     getBoundingClientRect() { return { left: 0, top: 0 }; },
     setPointerCapture() {},
+    // Recorded on `document.activeElement`, the way the DOM records it, rather
+    // than swallowed by an empty function -- the same argument as `classList`
+    // above. `filepicker.js` moves focus into the dialog on open and hands it
+    // back to the 参照 button on close, and both are the whole of a promise
+    // the spec makes (§6); with the call dropped on the floor here, a build
+    // that does neither would be indistinguishable from one that does both.
+    // フォーカスは `document.activeElement` に記録する（空関数にしない）。
+    // 開いたらダイアログへ、閉じたら 参照 へ、という約束は外から見えなければ
+    // 検証できない。検証できない理由がスタブ側にあってはならない。
+    focus() { globalThis.document.activeElement = el; },
   };
   // Assigning an id registers the element, so dynamically built controls
   // (buildServerParams' `sp-*`) are findable exactly as in a real document.
@@ -471,6 +481,12 @@ globalThis.document = {
   documentElement: documentTree.children.find((e) => e.tagName === "HTML") ?? makeEl("html"),
   getElementById: (id) => registry.get(id) ?? null,
   createElement: (tag) => makeEl(tag),
+  // Written by `makeEl`'s `focus()`, read by the picker's focus checks. `null`
+  // to start, as a document nobody has focused anything in: the stub does not
+  // move focus on a click, so anything non-null here is something the page
+  // asked for. 初期値は null（クリックでは動かないので、非nullはページ自身が
+  // 動かした結果である）。
+  activeElement: null,
 };
 globalThis.ResizeObserver = class { observe() {} disconnect() {} };
 globalThis.Event = class { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } };
@@ -4656,10 +4672,56 @@ if (SCENARIO === "generate") {
 // 一度も変わらない3箇所で実際にそうなっており（実測 各3002〜3003ms）、
 // 以降のどこにも違いを検出する手段が無かった。`waitFor` 側の既定にしない
 // 理由は `waitFor` のコメントを参照。
+//
+// "either of them changed" is not enough on its own. A press clears both
+// before the request goes out (`pickPath`, so that a dialog which fails to
+// open shows nothing of the one it replaced), and reading that clear as an
+// arrival walks off mid-round-trip -- the click on the next line would then
+// address `picker-entry-*` of a listing that has not been drawn. One
+// navigation is over when a *non-empty* side appears: `picker-cwd` for a
+// listing, `picker-error` for a refusal.
+// 「どちらかが変わった」だけでは足りない: `pickPath()` は要求を出す前に
+// 現在地と誤りの両方を空にする（開けなかったダイアログに前のダイアログの
+// 一覧を映さないため）。空になった瞬間を「着いた」と読むと、往復の途中で
+// 次の行へ進んでしまう——直後のクリックは、まだ描かれていない一覧の
+// `picker-entry-*` を叩くことになる。空でない側が現れるまでを1回とする
+// （拒否で終わった開き直しは `picker-error` が埋まって着地する）。
 function browseSettled(prevCwd, prevError) {
-  return waitFor(() => el("picker-cwd").textContent !== prevCwd
-    || el("picker-error").textContent !== prevError, 3000, true);
+  return waitFor(() => {
+    const cwd = el("picker-cwd").textContent;
+    const error = el("picker-error").textContent;
+    return (cwd !== prevCwd || error !== prevError) && (cwd !== "" || error !== "");
+  }, 3000, true);
 }
+
+// The same thing for an open that lands where the dialog already was.
+//
+// `browseSettled()` cannot serve those: `picker-cwd` ends at the value it
+// started from and `picker-error` never fills in, so nothing ever differs
+// from what was recorded before the press and the wait runs the full timeout
+// (measured, 3002-3003ms, at three call sites). Both callers below are the
+// 出力先 box in `dir` mode with an empty new-folder name, where `picker-cwd`
+// and `picker-chosen` end at the same string -- and `picker-chosen` is
+// written by `renderFoot()`, which `navigate()` calls last, after every other
+// DOM write. Requiring both to read the destination is therefore a condition
+// that cannot hold before this specific round trip has fully landed: the
+// press itself clears them both (`pickPath`), and only the response fills
+// them back in.
+//
+// The condition includes what one of the callers then asserts. That is the
+// shape this harness already has -- a wait that times out is quiet, and the
+// check afterwards reports the actual DOM values in its own words (see
+// `waitFor`) -- so the check can still fail; it fails 3s later.
+//
+// 直前のダイアログと同じ場所へ着地する開き直しのための待機。`browseSettled()`
+// では変化が起きず、フルに止まる（実測 3002〜3003ms・3箇所）。呼び出し元は
+// いずれも dir モードの出力先の欄（新規フォルダ名は空）で、`picker-cwd` と
+// `picker-chosen` が同じ文字列に落ち着く。`picker-chosen` を書くのは
+// `renderFoot()` で、`navigate()` は他の全ての書き込みのあとにそれを呼ぶ
+// ため、両方が行き先を指すのは往復が完全に終わったときだけである。
+const dirDialogSettled = (at) => waitFor(
+  () => el("picker-cwd").textContent === at && el("picker-chosen").textContent === at,
+);
 
 if (SCENARIO === "picker") {
   await import(pathToFileURL(path.join(STATIC_DIR, "js", "main.js")).href);
@@ -4883,37 +4945,15 @@ if (SCENARIO === "picker") {
   // ファイラは存在するものしか一覧できないので、現在地＋入力名という形になる。
   // **ここで作りはしない。** 作成は POST /api/generate の仕事のままである。
   //
-  // Waits for `picker-chosen` to change rather than for `browseSettled()` --
-  // or for `picker-cwd` alone to reach the expected `/repo`. Neither of
-  // those is safe here: an empty box always lands at `/repo` (the fake
-  // server's own default for an empty `path`), which is exactly where check
-  // 12 (LUT) also left the dialog, so `browseSettled()`'s delta on
-  // `picker-cwd`/`picker-error` never fires (stalls the full 3s timeout,
-  // measured 3003ms) -- and waiting for `picker-cwd === "/repo"` directly is
-  // worse, not slower: `picker-cwd` is *already* `"/repo"` from check 12
-  // before this box's own `navigate()` has even resolved, so that wait
-  // returns instantly and wrongly, reading `picker-chosen` a full round
-  // trip early (measured: `emptyMeansHere` false, because check 12's `file`
-  // mode left it `""`, and this box's own answer had not landed yet).
-  // `picker-chosen` is written by `renderFoot()`, which `navigate()` calls
-  // last, after every other DOM write -- so a change in it is the one signal
-  // that cannot fire before this specific round trip has fully landed, and
-  // `""` (LUT box, `file` mode, nothing selected) truly differs from `/repo`
-  // (this box, `dir` mode, nothing typed) once it does.
-  // `browseSettled()` でも `picker-cwd` 単独の到達確認でもなく、
-  // `picker-chosen` の変化を待つ。空欄は常に `/repo` に着地するが、直前の
-  // 12番目（LUT）のダイアログも同じ `/repo` で終わっているため、
-  // `browseSettled()` は変化せず3秒フルに止まる（実測 3003ms）。
-  // `picker-cwd === "/repo"` を直接待つのはさらに悪い——12番目からすでに
-  // `/repo` なので、この欄自身の navigate() が終わる前に真になり、
-  // `picker-chosen` を1往復早く読んでしまう（実測: emptyMeansHere が false。
-  // 12番目は file モードで "" を残していた）。`picker-chosen` は
-  // `renderFoot()` が書き、`navigate()` は他の全ての書き込みのあとに
-  // それを呼ぶため、変化はこの往復が完全に終わったことの唯一の合図になる。
-  const prevChosenBeforeOutputOpen = el("picker-chosen").textContent;
+  // An empty box lands at `/repo` (the fake server's default for an empty
+  // `path`), which is exactly where check 12 (LUT) also left the dialog, so
+  // `browseSettled()` has nothing to see here -- `dirDialogSettled` is the
+  // wait for that case; its comment says why it takes the form it does.
+  // 空欄は `/repo` に着地するが、直前の12番目（LUT）も同じ `/repo` で終わって
+  // いるため `browseSettled()` は使えない。理由は `dirDialogSettled` の注記。
   el("gen-output-dir").value = "";
   el("btn-browse-output").__fire("click");
-  await waitFor(() => el("picker-chosen").textContent !== prevChosenBeforeOutputOpen);
+  await dirDialogSettled("/repo");
   const newdirShown = el("picker-newdir").hidden === false;
   const emptyMeansHere = el("picker-chosen").textContent === "/repo";
   prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
@@ -4953,33 +4993,14 @@ if (SCENARIO === "picker") {
   // check depending on state an earlier one happened to leave, which failed
   // exactly that way once (measured) and is why this line exists.
   //
-  // Waits for `picker-chosen` to change rather than for `browseSettled()`
-  // or for `picker-cwd` alone to reach `/repo/data`: this reopen and check
-  // 13 both land there, so a `browseSettled()` delta on
-  // `picker-cwd`/`picker-error` never fires and stalls the full 3s timeout
-  // (measured, 3003ms) -- and `picker-cwd` alone would be worse, not
-  // slower, for the same reason it was at check 13's own open: it is
-  // *already* `/repo/data` before this reopen's `navigate()` resolves, so
-  // that wait returns instantly and reads `picker-chosen` a round trip
-  // early. `picker-chosen` itself does change: check 14 left it
-  // `/repo/data/proj_20260805` (the typed name, still concatenated), and
-  // `renderFoot()` -- called last in `navigate()`, after the new-folder box
-  // has been reset to empty by this reopen's own `pickPath()` -- writes it
-  // back down to the bare `/repo/data` once the round trip lands.
-  // `browseSettled()` でも `picker-cwd` 単独の到達確認でもなく、
-  // `picker-chosen` の変化を待つ：このチェックと13番目は同じ `/repo/data`
-  // に着地するため、`browseSettled()` は変化せず3秒フルに止まる
-  // （実測 3003ms）。`picker-cwd` 単独の確認はさらに悪い——13番目の開始点の
-  // 節と同じ理由で、この開き直しの navigate() が終わる前からすでに
-  // `/repo/data` であり、`picker-chosen` を1往復早く読んでしまう。
-  // `picker-chosen` 自体は変化する：14番目は `/repo/data/proj_20260805`
-  // （入力した名前つき）を残しており、`renderFoot()`（navigate() の最後に
-  // 呼ばれ、この開き直し自身の pickPath() が新規フォルダ名欄を空に戻した
-  // あと）が往復の完了時にそれを裸の `/repo/data` へ書き戻す。
-  const prevChosenBeforeOutputReopen = el("picker-chosen").textContent;
+  // This reopen and check 13 both land at a directory the dialog is already
+  // showing, so the wait is `dirDialogSettled`'s and not `browseSettled()`'s
+  // for the reason set out there.
+  // この開き直しも13番目も、ダイアログが既に居る場所へ着地する。待ち方の
+  // 理由は `dirDialogSettled` の注記にある。
   el("gen-output-dir").value = "/repo/data/proj_20260805";   // this check sets its own start
   el("btn-browse-output").__fire("click");
-  await waitFor(() => el("picker-chosen").textContent !== prevChosenBeforeOutputReopen);
+  await dirDialogSettled("/repo/data");
   check("the new-folder name does not survive into the next dialog",
     el("picker-newdir-name").value === "" && el("picker-chosen").textContent === "/repo/data",
     `name="${el("picker-newdir-name").value}" chosen="${el("picker-chosen").textContent}"`);
@@ -5054,6 +5075,120 @@ if (SCENARIO === "picker") {
     `before="${cwdBeforeStaleResponse}" after="${el("picker-cwd").textContent}"`);
   el("picker-cancel").__fire("click");
   await settled();
+
+  // --- 18. 開けなかったダイアログは、前のダイアログを映さない
+  //
+  // The opening `navigate()` can end in a refusal like any other: the box
+  // holds `data/proj_old/x`, `data/proj_old` has since been renamed or its
+  // drive is not mounted, and 参照 gets a 404. What the dialog must not do
+  // then is keep the previous dialog's header, rows and count -- it would be
+  // naming a directory it is not in, over that directory's listing, while
+  // `session.cwd` is still `""`.
+  //
+  // Check 17 left the ターゲット dialog on `/repo` with two rows on screen, so
+  // there is something concrete to fail to clear.
+  //
+  // 開始の navigate() も他と同じく拒否されうる（欄に入っているディレクトリが
+  // 改名された・ドライブが繋がっていない）。そのとき前のダイアログの見出し・
+  // 行・件数を残してはならない。直前の17番目は `/repo` の2行を残している。
+  el("gen-output-dir").value = "/repo/gone/x";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  const rowsBeforeFailedOpen = el("picker-list").children.length;
+  el("btn-browse-output").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  check("a dialog whose listing never arrived shows nothing of the one before it",
+    rowsBeforeFailedOpen > 0
+      && el("picker-cwd").textContent === ""
+      && el("picker-list").children.length === 0
+      && el("picker-count").textContent === ""
+      && el("picker-chosen").textContent === ""
+      && el("picker-choose").disabled === true
+      && /404/.test(el("picker-error").textContent),
+    `rowsBefore=${rowsBeforeFailedOpen} cwd="${el("picker-cwd").textContent}" `
+      + `rows=${el("picker-list").children.length} `
+      + `count="${el("picker-count").textContent}" `
+      + `chosen="${el("picker-chosen").textContent}" `
+      + `disabled=${el("picker-choose").disabled} `
+      + `error="${el("picker-error").textContent}"`);
+
+  // --- 19. 着地していない現在地からはパスを組まない
+  //
+  // The 出力先 box is where this is expensive rather than merely wrong: type
+  // a folder name into a dialog whose `session.cwd` is `""` and the
+  // concatenation is `/proj_20260806` -- the root of the current drive, which
+  // is where `POST /api/generate` would then write.
+  //
+  // 選択 is pressed even though it is disabled, and the disabled flag is
+  // asserted separately: a real browser fires no click on a disabled button,
+  // but "disabled" and "hands back nothing when pressed" are two different
+  // guards and this scenario can reach both.
+  //
+  // 出力先の欄では、これは誤りであるだけでなく高くつく: 現在地が空のまま
+  // フォルダ名を打つと `/proj_20260806`（現在のドライブ直下）になり、
+  // そこが `POST /api/generate` の書き込み先になる。選択 は disabled でも
+  // 押す——実ブラウザは押せないが、「押せない」と「押しても何も返さない」は
+  // 別のガードであり、ここでは両方に手が届く。
+  el("picker-newdir-name").value = "proj_20260806";
+  el("picker-newdir-name").__fire("input");
+  await settled();
+  const chosenFromNowhere = el("picker-chosen").textContent;
+  const chooseDeadFromNowhere = el("picker-choose").disabled;
+  el("picker-choose").__fire("click");
+  await settled();
+  check("選択 builds no path out of a directory that never landed",
+    chosenFromNowhere === "" && chooseDeadFromNowhere === true
+      && el("gen-output-dir").value === "/repo/gone/x"
+      && el("picker-backdrop").hidden === false,
+    `chosen="${chosenFromNowhere}" disabled=${chooseDeadFromNowhere} `
+      + `value="${el("gen-output-dir").value}" hidden=${el("picker-backdrop").hidden}`);
+  el("picker-cancel").__fire("click");
+  await settled();
+
+  // --- 20. Esc は取消である
+  //
+  // 仕様6節の約束。背景クリックと同じ扱いで、欄には触れない。
+  el("path-input").value = "/repo/data/matrices_linear_gamma.npy";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-matrix").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  el("picker-backdrop").__fire("keydown", { key: "Escape" });
+  await settled();
+  check("Esc closes the dialog and leaves the box exactly as it was",
+    el("picker-backdrop").hidden === true
+      && el("path-input").value === "/repo/data/matrices_linear_gamma.npy",
+    `hidden=${el("picker-backdrop").hidden} value="${el("path-input").value}"`);
+
+  // --- 21. フォーカスはダイアログへ入り、閉じたら 参照 へ戻る
+  //
+  // Not presentation. Focus left on 参照 sits *behind* the backdrop, where
+  // Space or Enter presses it again -- and a second 参照 replaces `session`
+  // without calling `close()`, orphaning the first call's Promise (check 17
+  // is about what a shared `session` does to a response in flight). The
+  // keyboard reaches that path with no mouse involved.
+  //
+  // Waits on the focus move itself rather than on the listing: the dialog is
+  // cancelled below without needing one, and a build that never moves focus
+  // makes this wait time out quietly and the check report where focus
+  // actually is (see `waitFor`).
+  //
+  // 体裁の話ではない。背景の裏の 参照 にフォーカスが残ると Space/Enter で
+  // 2度目の 参照 が走り、1つ目の Promise が宙に浮く（17番目は、共有された
+  // session が飛行中の応答に何をするかの話である）。一覧は待たない——下では
+  // 取消しかしないため。フォーカスを動かさない実装ではこの待機が静かに
+  // タイムアウトし、チェックが実際の位置を報告する。
+  el("path-input").value = "/repo/data/matrices_linear_gamma.npy";
+  el("btn-browse-matrix").__fire("click");
+  await waitFor(() => globalThis.document.activeElement === el("picker"));
+  const focusOnOpen = globalThis.document.activeElement;
+  el("picker-cancel").__fire("click");
+  await settled();
+  check("opening moves focus into the dialog and closing returns it to 参照",
+    focusOnOpen === el("picker")
+      && globalThis.document.activeElement === el("btn-browse-matrix"),
+    `onOpen=${focusOnOpen === null ? "null" : focusOnOpen.id || focusOnOpen.tagName} `
+      + `afterClose=${globalThis.document.activeElement === null
+        ? "null" : globalThis.document.activeElement.id
+          || globalThis.document.activeElement.tagName}`);
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

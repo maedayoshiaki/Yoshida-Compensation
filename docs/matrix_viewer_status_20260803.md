@@ -56,8 +56,25 @@ examples/python/               薄いCLI
 | POST | `/api/lut` | 逆LUT `.npz` |
 | GET | `/api/lut/{id}/curve` | LUTカーブ `(3, 256)` と `t_grid` |
 | POST | `/api/generate` | 投影画像とメタデータJSONを保存 |
+| GET | `/api/browse` | 1階層分のディレクトリ一覧（4つのパス欄の `参照` が使う） |
+| GET | `/api/browse/suffixes` | 欄ごとの拡張子フィルタ（`{"matrix": [".npy"], …}`） |
 
 **未実装（計画B5）**: `POST /api/matrix/{id}/warp`、`GET /api/job/{job_id}`。
+
+### `Host` ヘッダ検査（2026-08-06 追加、全ルート）
+
+`/api/browse` はマシン全体のファイル名を返すので、`app.py` に
+`TrustedHostMiddleware` を入れてある。**`Host` が `127.0.0.1` / `localhost` /
+`testserver` のいずれでもない要求は、`/api` も静的ファイルも含めた全ルートで
+400 `Invalid host header`（plain text）になる。**
+
+つまり `--host 0.0.0.0` で起動して LAN の IP（`http://192.168.x.x:8123/`）や
+マシン名で開くと、以前は動いていたものが 400 になる。ページ側には何も出ない
+（ミドルウェアの応答なので、フロントの JavaScript まで届かない）。
+必要になったら `app.py::ALLOWED_HOSTS` にその名前を足す ── ただしこの検査は
+DNS リバインディング対策そのものであり、`*` や任意のホスト名を足すことは
+「マシン全体を閲覧できる」という判断の前提を外すことになる
+（`docs/superpowers/specs/2026-08-05-file-picker-design.md` 4節）。
 
 ### ビュー
 

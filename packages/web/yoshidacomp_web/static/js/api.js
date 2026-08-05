@@ -34,18 +34,25 @@ function decodeLabels(header) {
 // `routers/session.py`. Anything else (a bare 500's plain text, a proxy's HTML
 // error page) has no `detail` to find and is shown as it arrived.
 //
-// Both callers use this. `fetchView` used to `throw new Error(await
-// res.text())` instead, which put the raw body on screen: the camera-space
-// refusal rendered as the literal string `{"detail":"view \"surface\" needs a
-// projector-space matrix; …"}`, backslashes and braces included, in a status
-// bar that is otherwise Japanese prose.
+// Every caller in this file uses it, and it is exported for the one outside:
+// `filepicker.js` shows a refused `GET /api/browse` inside the dialog rather
+// than on the status bar, but the sentence it shows is the same sentence. It
+// carried a copy of this function for a while and the copy had already lost
+// the empty-body fallback below, which is the argument for there being one of
+// these and not two. モーダルの中に出す文もここで作る（複製は既にずれていた）。
+//
+// `fetchView` used to `throw new Error(await res.text())` instead, which put
+// the raw body on screen: the camera-space refusal rendered as the literal
+// string `{"detail":"view \"surface\" needs a projector-space matrix; …"}`,
+// backslashes and braces included, in a status bar that is otherwise Japanese
+// prose.
 //
 // 失敗応答から、ステータス行に出すべき文を作る。FastAPI は JSON の
 // `{"detail": …}` で理由を返すので、意図的な拒否はその形になる。それ以外
 // （素の500のテキスト、プロキシのHTML）は `detail` を持たないのでそのまま出す。
 // 以前 `fetchView` は本文をそのまま投げており、カメラ座標の拒否が
 // `{"detail":"…"}` という生の文字列のまま画面に出ていた。
-async function errorMessage(res) {
+export async function errorMessage(res) {
   const body = await res.text();
   try {
     const parsed = JSON.parse(body);

@@ -2369,6 +2369,102 @@ _MUTATIONS = [
         ("does not repaint the one now open",),
         id="navigate_writes_a_late_response_into_whichever_dialog_is_open",
     ),
+    # ---- an opening `navigate()` that never lands, in its two halves
+    #
+    # The dialog is opened from a box holding a path whose directory has since
+    # been renamed (or whose drive is not mounted), so the *first* request a
+    # dialog makes is the one that is refused. Nothing throws, and both halves
+    # below leave a dialog that looks like it is working.
+    #
+    # 開始の navigate() が着地しない場合の2つの半分。欄に入っているディレクトリ
+    # が改名された・ドライブが繋がっていない、という普通の理由で起きる。
+    #
+    # The screen, not cleared: `#picker-list`, `#picker-cwd` and `#picker-count`
+    # still hold the previous dialog's answer, so the header names a directory
+    # this dialog is not in, over that directory's rows. `chosenPath()` still
+    # refuses to build a path out of it (the guard below is a separate line and
+    # this mutation leaves it in place, measured: 選択 stays dead), which is
+    # what makes this the quieter half -- what is on screen and what 選択 would
+    # return disagree, and only one of them is visible.
+    # 画面を消さない側。見出しと一覧は前のダイアログのもののままになる。
+    # パスの組み立て自体は下のガードが別行で止めるため（実測: 選択 は死んだ
+    # まま）、画面と 選択 の返す値が食い違う。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            '    $("picker-list").textContent = "";\n'
+            '    $("picker-cwd").textContent = "";\n'
+            '    $("picker-count").textContent = "";\n'
+            "    renderFoot();\n",
+            "",
+        )],
+        ("shows nothing of the one before it",),
+        id="picker_leaves_the_dialog_it_replaced_on_screen",
+    ),
+    # The path, built from an empty `cwd`: `${session.cwd}/${name}` with no
+    # `cwd` is `/proj_20260806` -- the root of the current drive. In the 出力先
+    # box that string is not a lookup that will 404, it is the directory
+    # `POST /api/generate` writes the projection images into.
+    # 現在地が空のまま連結する。`/入力名` は現在のドライブ直下であり、出力先の
+    # 欄ではそこが書き込み先になる。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            '  if (session.cwd === "") return "";\n',
+            "",
+        )],
+        ("builds no path out of a directory that never landed",),
+        id="picker_builds_a_path_from_a_directory_that_never_landed",
+    ),
+    # ---- the keyboard and focus contract (spec §6)
+    #
+    # `Esc`, removed. A modal with no way out but the mouse.
+    # Esc を外す。マウス以外に出口の無いモーダルになる。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            '  backdrop().addEventListener("keydown", (e) => {\n'
+            '    if (session && e.key === "Escape") close(null);\n'
+            "  });\n",
+            "",
+        )],
+        ("Esc closes the dialog",),
+        id="picker_has_no_way_out_but_the_mouse",
+    ),
+    # Focus, left on the 参照 button behind the backdrop. Two consequences, and
+    # the second is why this is not a matter of taste: `Esc` is listened for on
+    # the backdrop and never arrives, and Space or Enter presses 参照 a second
+    # time -- which replaces `session` without calling `close()`, orphaning the
+    # first call's Promise (the state the mutation above this block is about).
+    # フォーカスを背景の裏の 参照 に残す。Esc が届かなくなり、Space/Enter で
+    # 2度目の 参照 が走って1つ目の Promise が宙に浮く。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            '    $("picker").focus();\n',
+            "",
+        )],
+        ("moves focus into the dialog",),
+        id="picker_leaves_focus_behind_the_backdrop",
+    ),
+    # Focus, not handed back: the dialog closes and nothing on the page has it,
+    # so the next Tab starts from the top of the document rather than from the
+    # box the user was filling in.
+    # 閉じてもフォーカスを返さない。次の Tab は文書の先頭から始まる。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            "  if (returnFocusTo) returnFocusTo.focus();\n",
+            "",
+        )],
+        ("closing returns it to 参照",),
+        id="picker_never_gives_focus_back_to_the_button_that_opened_it",
+    ),
 ]
 
 

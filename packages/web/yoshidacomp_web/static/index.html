@@ -270,7 +270,16 @@
        切り取られて細長い断片になるため。中身は空で、全行を filepicker.js が
        応答から書く。 -->
   <div id="picker-backdrop" class="picker-backdrop" hidden>
-    <div id="picker" class="picker">
+    <!-- `tabindex="-1"` so js/filepicker.js can move focus here on open: a
+         <div> is not focusable otherwise, and the `Esc` handler sits on the
+         backdrop, where the key only arrives if focus is inside it. `-1` and
+         not `0` because this is a focus target for code, not a stop on the
+         page's tab order.
+         `tabindex="-1"` は開いたときにここへフォーカスを移すため（div は
+         そのままでは受け取れない）。Esc は背景で拾うので、内側にフォーカスが
+         無いとキーが届かない。 -->
+    <div id="picker" class="picker" role="dialog" aria-modal="true"
+         aria-labelledby="picker-title" tabindex="-1">
       <div class="picker-head">
         <span id="picker-title" class="lbl"></span>
         <select id="picker-roots" class="mono"></select>
