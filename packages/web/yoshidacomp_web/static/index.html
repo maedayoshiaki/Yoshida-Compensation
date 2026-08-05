@@ -12,6 +12,7 @@
     <input id="path-input" class="mono path" type="text" spellcheck="false"
            value="data/linear_pipeline_1080/matrices_linear_gamma.npy"
            placeholder="行列 .npy のパス (H, W, 4, 3)" />
+    <button id="btn-browse-matrix">参照</button>
     <button id="btn-load" class="primary">読み込み</button>
     <div class="spacer"></div>
     <div id="meta-info" class="muted mono">行列未読み込み</div>
@@ -244,6 +245,58 @@
       </div>
     </aside>
   </main>
+
+  <!-- The file picker, shared by all four path boxes.
+
+       One dialog rather than four, because what differs between the boxes is
+       three values (mode, suffix filter, title) and not any behaviour. Four
+       copies would be four places to fix the next time a listing gets a column.
+
+       It lives here, outside <main>, because it covers the whole page: nested
+       inside the sidebar it would be clipped by that column's `overflow-y:
+       auto` and appear as a scrollable sliver.
+
+       Empty on purpose. Every row is written by js/filepicker.js from the
+       `GET /api/browse` response -- names, sizes and the truncation notice are
+       the server's facts, and a hard-coded row here would be a second source
+       for one of them. The same argument as the class legend above.
+
+       4つのパス欄で1つのダイアログを共有する。欄ごとに違うのは3つの値
+       （モード・拡張子フィルタ・見出し）だけで、挙動は同じだからである。
+       <main> の外に置くのは、サイドバーの中では `overflow-y: auto` に
+       切り取られて細長い断片になるため。中身は空で、全行を filepicker.js が
+       応答から書く。 -->
+  <div id="picker-backdrop" class="picker-backdrop" hidden>
+    <div id="picker" class="picker">
+      <div class="picker-head">
+        <span id="picker-title" class="lbl"></span>
+        <select id="picker-roots" class="mono"></select>
+        <span id="picker-cwd" class="mono path"></span>
+      </div>
+      <div class="picker-bar">
+        <button id="picker-up">↑ 上へ</button>
+        <span id="picker-count" class="muted mono"></span>
+        <span id="picker-error" class="mono"></span>
+      </div>
+      <div id="picker-list" class="picker-list mono"></div>
+      <div id="picker-newdir" class="picker-newdir" hidden>
+        <label class="lbl" for="picker-newdir-name">新規フォルダ名（任意）</label>
+        <input id="picker-newdir-name" class="mono" type="text" spellcheck="false" />
+      </div>
+      <div class="picker-foot">
+        <!-- What 選択 will hand back, exactly. The three modes differ in what a
+             press means -- a file in `file`, the current directory in `dir`,
+             either in `file_or_dir` -- and this line is how that stops being
+             something the user has to infer from the mode they did not choose.
+             押したときに返る文字列そのもの。モードによって意味が変わるので、
+             推測させずに出す。 -->
+        <span id="picker-chosen" class="mono"></span>
+        <div class="spacer"></div>
+        <button id="picker-cancel">取消</button>
+        <button id="picker-choose" class="primary">選択</button>
+      </div>
+    </div>
+  </div>
 
   <!-- The readout is one row of panels, not a stack.
 

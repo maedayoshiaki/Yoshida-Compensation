@@ -367,3 +367,63 @@ footer#status.error { color: var(--error); }
 @media (max-width: 860px) {
   main { grid-template-columns: 1fr; }
 }
+
+/* --------------------------------------------------------------- file picker
+   `position: fixed` on the backdrop, not `absolute`: the sidebar scrolls and
+   an absolutely positioned overlay would scroll with it.
+   背景は fixed。absolute だとサイドバーのスクロールに追従してしまう。 */
+.picker-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.picker-backdrop[hidden] { display: none; }
+
+.picker {
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 90vw);
+  max-height: 80vh;
+  gap: 8px;
+  padding: 12px;
+  background: var(--panel, #1b1b1f);
+  border: 1px solid var(--line, #3a3a42);
+  border-radius: 6px;
+}
+
+.picker-head, .picker-bar, .picker-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.picker-head .path { flex: 1; overflow-x: auto; white-space: nowrap; }
+
+/* The only element that scrolls. Fixed-height rows so a long listing does not
+   reflow as sizes arrive. 唯一スクロールする要素。行高は固定。 */
+.picker-list {
+  flex: 1;
+  min-height: 200px;
+  overflow-y: auto;
+  border: 1px solid var(--line, #3a3a42);
+}
+.picker-row {
+  display: flex;
+  gap: 8px;
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.picker-row:hover { background: rgba(255, 255, 255, 0.06); }
+.picker-row.selected { background: rgba(120, 170, 255, 0.22); }
+.picker-row .size { margin-left: auto; opacity: 0.7; }
+
+.picker-newdir { display: flex; align-items: center; gap: 8px; }
+.picker-newdir[hidden] { display: none; }
+
+/* Red only when there is something to say; `#picker-error` is always present
+   and usually empty. 空のときは色を持たない。 */
+#picker-error:not(:empty) { color: var(--err, #ff8080); }

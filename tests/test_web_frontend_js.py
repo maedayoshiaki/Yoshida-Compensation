@@ -357,6 +357,22 @@ def test_load_button_is_released_after_a_reload_during_a_load() -> None:
     _assert_all_passed(_run_harness(_STATIC_DIR, "button"))
 
 
+def test_the_browse_button_fills_the_box_the_way_typing_would() -> None:
+    """``参照`` がパス欄を埋め、手打ちと区別が付かない状態にすること。
+
+    ファイラの3つの性質はどれも静かに壊れる。フィルタをサーバへ渡さずに
+    クライアント側で絞れば、2000件で切ったあとに絞ることになり件数表示が嘘に
+    なる。一覧をクライアントで並べ替え直せば、``LoadTargetRequest.index`` の
+    基準である ``target.py::_listing`` の casefold 順とずれ、「3枚目」が別の
+    画像を指す。そして確定を代入だけで済ませれば、``gen-output-dir`` の編集
+    リスナ（上書き合意を失効させる）を迂回する欄が1つできる。
+
+    拒否の出し先も同じ種類の問題である。ページのステータス行は背景の裏に
+    あるので、そこへ出した 403 は読めない。
+    """
+    _assert_all_passed(_run_harness(_STATIC_DIR, "picker"))
+
+
 # ------------------------------------------------------------- discrimination
 
 # (id, scenario, [(file under static/, find, replace), ...], the checks that must fail)
@@ -2059,6 +2075,96 @@ _MUTATIONS = [
         )],
         ("the legend's row count is the payload's class count",),
         id="the_class_legend_is_drawn_from_the_palette_not_the_payload",
+    ),
+    # ---- the picker's four silent failure modes
+    #
+    # None of these throws, and none of them is visible in a screenshot of a
+    # working dialog. ここに挙げた4つはどれも例外を出さず、動いている
+    # ダイアログの画面写真からも見えない。
+    #
+    # The filter, moved to the client: the server cuts at MAX_ENTRIES and *then*
+    # the client would drop the non-matching files, so a directory of 12800
+    # captures shows "12800件中2件を表示" over a list that is neither.
+    # フィルタをクライアント側へ移す。サーバが2000件で切ったあとに絞ることに
+    # なり、件数表示が実際の一覧と対応しなくなる。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            '  if (session.suffixes.length) params.set("suffixes", session.suffixes.join(","));',
+            "",
+        )],
+        ("asks the server for .npy only",),
+        id="picker_filters_on_the_client_instead_of_the_server",
+    ),
+    # The listing, re-sorted locally. `LoadTargetRequest.index` is an index into
+    # the *server's* casefold order (`target.py::_listing`), so a client-side
+    # sort makes "the third image" name a different file in the box than in the
+    # request. Bytewise sort puts `Delta` before `data`.
+    #
+    # Four more checks fail alongside the order check, and the breadth is the
+    # finding rather than something to narrow away: `picker-entry-N` is an
+    # index into whichever render is currently on screen, and every check
+    # after the order check reuses the "/repo" listing that check renders --
+    # entering a directory (`picker-entry-0`, now `Delta` instead of `data`),
+    # picking a file and confirming it (both keyed off the directory that
+    # click was supposed to open), and the refusal check (which revisits
+    # `Delta`, now reached by a different route). Only the two checks whose
+    # own click reopens the dialog from scratch (取消 with a fresh "untouched"
+    # path, and the truncated listing under `/repo/data/shots`) are
+    # independent of the corrupted render and keep passing.
+    #
+    # クライアント側で並べ替え直す。index の基準はサーバ側の casefold 順なので、
+    # 「3枚目」が欄と要求とで別のファイルを指すようになる。並び替え検査の他に
+    # 4件が道連れで落ちるのは、`picker-entry-N` が「今画面にある一覧」への
+    # 添字であり、並び替え検査より後のほとんどが、その並び替えられた
+    # 「/repo」の一覧を使い回しているためである。ダイアログを開き直す2件
+    # （取消・打ち切り表示）だけは影響を受けない。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            "  body.entries.forEach((entry, i) => {",
+            "  [...body.entries].sort((a, b) => (a.name < b.name ? -1 : 1)).forEach((entry, i) => {",
+        )],
+        (
+            "keeps the order the server sent",
+            "entering a directory costs exactly one /api/browse",
+            "選択 is dead until a file is picked, and names exactly what it will return",
+            "choosing writes the box and fires change on it",
+            "a refusal is shown inside the dialog, which stays where it was",
+        ),
+        id="picker_re_sorts_the_listing_on_the_client",
+    ),
+    # The confirmation, assigned instead of dispatched. `gen-output-dir`'s two
+    # edit listeners retire the 上書き agreement, and this is the one way into
+    # that box that would bypass them.
+    # 確定を代入で済ませる。`gen-output-dir` の編集リスナ2つを迂回する唯一の
+    # 経路になる。
+    pytest.param(
+        "picker",
+        [(
+            "js/main.js",
+            '        box.dispatchEvent(new Event("input", { bubbles: true }));\n'
+            '        box.dispatchEvent(new Event("change", { bubbles: true }));',
+            "",
+        )],
+        ("fires change on it",),
+        id="picker_sets_the_box_without_firing_its_events",
+    ),
+    # The cut, made silent. The list is right; the sentence over it is the lie.
+    # 切り詰めを黙って行う。一覧そのものは正しく、その上の文だけが嘘になる。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            "  $(\"picker-count\").textContent = body.truncated\n"
+            "    ? `${body.total}件中${body.entries.length}件を表示`\n"
+            "    : `${body.total}件`;",
+            "  $(\"picker-count\").textContent = `${body.entries.length}件`;",
+        )],
+        ("says how much of it is shown",),
+        id="picker_truncates_the_listing_silently",
     ),
 ]
 

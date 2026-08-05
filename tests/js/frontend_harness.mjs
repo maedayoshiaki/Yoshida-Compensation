@@ -227,6 +227,12 @@ function makeEl(tag = "div") {
     __fire(name, event = {}) {
       for (const fn of listeners[name] || []) fn({ target: el, ...event });
     },
+    // The page's own way to fire an event, as distinct from `__fire`, which is
+    // the test's. `main.js` uses it to make a picked path indistinguishable
+    // from a typed one, and without it here that call throws -- the stub must
+    // not be the reason a behaviour cannot be checked.
+    // ページ自身がイベントを出す口。`__fire` はテスト側の口で、別物である。
+    dispatchEvent(event) { el.__fire(String(event.type), event); return true; },
     // One context per element *per type*, kept, so each tile's uploads
     // accumulate on its own GLView rather than on a fresh proxy per call --
     // and so the LUT canvas's 2D calls accumulate across the redraws a scenario
@@ -467,6 +473,7 @@ globalThis.document = {
   createElement: (tag) => makeEl(tag),
 };
 globalThis.ResizeObserver = class { observe() {} disconnect() {} };
+globalThis.Event = class { constructor(type, init = {}) { this.type = type; Object.assign(this, init); } };
 globalThis.requestAnimationFrame = (fn) => setTimeout(fn, 0);
 globalThis.performance = { now: () => Date.now() };
 globalThis.window = {
@@ -1078,6 +1085,68 @@ const viewDelayMs = {};
 // matrix's tag, so state.payload.data[0] names its origin unambiguously.
 const tagForPath = { A: 1, B: 2, C: 3, D: 4 };
 const requestLog = [];
+// Every /api/browse the picker issues, so "one navigation is one request" is
+// observable. 移動1回が要求1回であることを外から見るための記録。
+const browseLog = [];
+
+// The fake filesystem the picker walks.
+//
+// `Delta` sorts before `alpha` bytewise and after it casefold, so a listing
+// rendered in the order it arrives is distinguishable from one re-sorted in
+// the client -- the client must not re-sort, because `LoadTargetRequest.index`
+// is the *server's* casefold order.
+// バイト順と casefold 順で並びが変わる名前を入れてある。クライアント側で
+// 並べ替える実装と区別するため（index の基準はサーバ側の順序である）。
+// The lone file at "/repo" and the two at "/repo/data/shots" are named
+// `.npy` rather than the brief's `notes.txt` / `IMG_0001.png` /
+// `IMG_0002.png`: this scenario opens the picker exclusively through
+// `btn-browse-matrix`, whose suffix filter (`.npy`, from `GET
+// /api/browse/suffixes`) is session-wide, per `browse.py::list_directory` --
+// it applies to every navigation for the life of one dialog, up-clicks
+// included, the same way the real endpoint filters every request it answers.
+// A `.txt`/`.png` file at those paths would be filtered out before the
+// listing ever reaches the client (measured: the pre-fix names produced
+// "data/,Delta/" with no third entry, and "12800件中0件を表示" with an
+// empty `entries` array), which is not a harness bug -- it is what a
+// `.npy`-only picker is supposed to do to a non-`.npy` file.
+//
+// `/repo` の唯一のファイルと `/repo/data/shots` の2件を `.npy` にしてある
+// （ブリーフ原文は `notes.txt` / `IMG_0001.png` / `IMG_0002.png`）。このシナリオは
+// `btn-browse-matrix` からしか開かず、その拡張子フィルタ（`.npy`）はダイアログの
+// 生存期間中ずっと有効（`browse.py::list_directory` と同じく、上へ を含む
+// 全リクエストに掛かる）。`.txt`/`.png` のままでは一覧に届く前に落ちる
+// （実測: 3件目が消えて "data/,Delta/"、`entries` が空になって
+// "12800件中0件を表示"）。これはハーネスの不具合ではなく、`.npy` 専用の
+// ファイラが `.npy` でないファイルにすべき振る舞いそのものである。
+const BROWSE_TREE = {
+  "/repo": {
+    parent: null,
+    entries: [
+      { name: "data", is_dir: true, size: null, mtime: 1 },
+      { name: "Delta", is_dir: true, size: null, mtime: 1 },
+      { name: "notes.npy", is_dir: false, size: 12, mtime: 1 },
+    ],
+  },
+  "/repo/data": {
+    parent: "/repo",
+    entries: [
+      { name: "shots", is_dir: true, size: null, mtime: 1 },
+      { name: "matrices_linear_gamma.npy", is_dir: false, size: 99532800, mtime: 1 },
+      { name: "readme.txt", is_dir: false, size: 5, mtime: 1 },
+      { name: "nature_1_sq.png", is_dir: false, size: 2048, mtime: 1 },
+      { name: "inverse_lut.npz", is_dir: false, size: 4096, mtime: 1 },
+    ],
+  },
+  "/repo/data/shots": {
+    parent: "/repo/data",
+    entries: [
+      { name: "IMG_0001.npy", is_dir: false, size: 10, mtime: 1 },
+      { name: "IMG_0002.npy", is_dir: false, size: 10, mtime: 1 },
+    ],
+    cap: 2, total: 12800,
+  },
+  "/repo/Delta": { parent: "/repo", denied: true, entries: [] },
+};
 // Which responses have actually been returned. `resolved` answers "has this
 // landed at all"; `viewFetchCount` answers "how many times", which the button
 // scenario needs because the same matrix and view get fetched twice there --
@@ -1089,6 +1158,44 @@ const viewFetchCount = new Map();
 
 globalThis.fetch = async (url, options) => {
   requestLog.push(url);
+
+  // GET /api/browse と /api/browse/suffixes、routers/browse.py と同じ形で。
+  //
+  // `BROWSE_TREE` は絶対パスから一覧への写像。ディレクトリが先・casefold順に
+  // 並んでいるのはサーバ側の性質で、ここではその形の応答を与えるだけである
+  // （並べ替えそのものは tests/test_web_browse.py が見る）。
+  if (String(url).startsWith("/api/browse?")) {
+    const query = new URLSearchParams(String(url).slice("/api/browse?".length));
+    const at = query.get("path") || "/repo";
+    browseLog.push({ path: at, suffixes: query.get("suffixes") ?? "" });
+    const node = BROWSE_TREE[at];
+    if (!node) {
+      return new Response(JSON.stringify({ detail: `no such directory: ${at}` }), {
+        status: 404, headers: { "content-type": "application/json" },
+      });
+    }
+    if (node.denied) {
+      return new Response(JSON.stringify({ detail: `cannot list ${at}: Access is denied` }), {
+        status: 403, headers: { "content-type": "application/json" },
+      });
+    }
+    const wanted = (query.get("suffixes") || "").split(",").filter(Boolean);
+    const entries = node.entries.filter(
+      (e) => e.is_dir || !wanted.length || wanted.some((s) => e.name.toLowerCase().endsWith(s)),
+    );
+    return new Response(JSON.stringify({
+      path: at, parent: node.parent, roots: ["/repo"],
+      entries: entries.slice(0, node.cap ?? entries.length),
+      total: node.total ?? entries.length,
+      truncated: (node.cap ?? entries.length) < (node.total ?? entries.length),
+    }), { headers: { "content-type": "application/json" } });
+  }
+
+  if (url === "/api/browse/suffixes") {
+    return new Response(JSON.stringify({
+      matrix: [".npy"], target: [".png", ".jpg"], lut: [".npz"],
+    }), { headers: { "content-type": "application/json" } });
+  }
 
   if (url === "/api/views") {
     return new Response(JSON.stringify({ views: VIEWS }), {
@@ -4419,6 +4526,168 @@ if (SCENARIO === "generate") {
     `first paint="${genInfoAtFirstPaint}" gamut="${genInfoUnderGamut}" `
       + `back on compensation="${genInfoBackOnCompensation}" `
       + `disabled=${el("btn-generate").disabled}`);
+}
+
+// ------------------------------------------------------------------- picker
+//
+// 参照 ボタンとモーダルのファイラ。ここで見るのは、画面写真からは見えず、
+// Python 側からも見えないものだけである。
+//
+// `settled()` はここでは使えない: それが見ているのは 読み込み ボタンと
+// ステータス行で、ファイラはどちらにも触れない（navigate() のエラー処理の
+// 注釈にある通り、モーダルの裏になるステータス行へは意図的に出さない）。
+// `settled()` の判定は参照クリックの直後にはすでに真であるため、待たずに
+// 次のチェックへ進んでしまう。
+//
+// `browseLog` の増加を待つのも不十分: `↑ 上へ` やディレクトリ行のクリックは
+// 素の同期リスナから直接 navigate() を呼ぶため、fetch の呼び出し（＝
+// `browseLog.push`）はクリックそのものと同じ同期区間で起き、`waitFor` の
+// 初回判定より前に真になっている。実測: それを待機条件にすると `res.json()`
+// と `session.cwd` の更新が終わる前に次のクリックへ進み、古い一覧の
+// `picker-entry-*` を叩いて別ディレクトリへ迷い込み、しまいには先に発行した
+// navigate() が閉じた後のダイアログの `session`（null）へ書き込もうとして
+// 例外になる。
+//
+// 確実なのは、navigate() が成功・失敗のどちらで終わっても必ず書き換える
+// 2箇所（`picker-cwd` と `picker-error`）そのものを見張ることだけである。
+// クリックの直前の値を控え、どちらかが変わるまで待つ。
+function browseSettled(prevCwd, prevError) {
+  return waitFor(() => el("picker-cwd").textContent !== prevCwd
+    || el("picker-error").textContent !== prevError);
+}
+
+if (SCENARIO === "picker") {
+  await import(pathToFileURL(path.join(STATIC_DIR, "js", "main.js")).href);
+  await settled();
+
+  // --- 1. 開く前は隠れている
+  check("the picker starts hidden",
+    el("picker-backdrop").hidden === true,
+    `hidden=${el("picker-backdrop").hidden}`);
+
+  // --- 2. 参照 が開き、欄の値のディレクトリ部分から始まる
+  //
+  // 出発点が「作業ディレクトリ」に固定されていると、`data/…/matrices…npy` が
+  // 入っている欄から開いても毎回ルートに戻る。ファイルそのものを問い合わせると
+  // サーバは 400 を返すので、ディレクトリ部分でなければならない。
+  el("path-input").value = "/repo/data/matrices_linear_gamma.npy";
+  let prevCwd = el("picker-cwd").textContent, prevError = el("picker-error").textContent;
+  el("btn-browse-matrix").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  check("参照 opens the dialog at the directory of the path in the box",
+    el("picker-backdrop").hidden === false && el("picker-cwd").textContent === "/repo/data",
+    `hidden=${el("picker-backdrop").hidden} cwd="${el("picker-cwd").textContent}"`);
+
+  // --- 3. 行列の欄は .npy だけを絞って要求する
+  //
+  // フィルタはサーバに渡さなければ意味が無い。クライアント側で絞る実装は
+  // 打ち切り件数を狂わせる（サーバが2000件を切ったあとで絞ることになる）。
+  const matrixRequest = browseLog[browseLog.length - 1];
+  check("the matrix box asks the server for .npy only",
+    matrixRequest.suffixes === ".npy",
+    `suffixes="${matrixRequest.suffixes}"`);
+
+  // --- 4. 一覧はサーバの順序のまま描く
+  //
+  // `Delta` はバイト順では `alpha` の前、casefold 順では後。クライアントが
+  // 並べ替え直すと `LoadTargetRequest.index` の基準とずれる。
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("picker-up").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  check("the listing keeps the order the server sent",
+    el("picker-list").children.map((row) => row.children[0].textContent)
+      .join(",") === "data/,Delta/,notes.npy",
+    el("picker-list").children.map((row) => row.children[0].textContent).join(","));
+
+  // --- 5. ディレクトリのクリックは1回の要求で入る
+  const before = browseLog.length;
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("picker-entry-0").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  check("entering a directory costs exactly one /api/browse",
+    browseLog.length === before + 1 && el("picker-cwd").textContent === "/repo/data",
+    `requests=${browseLog.length - before} cwd="${el("picker-cwd").textContent}"`);
+
+  // --- 6. ファイルモードでは、ファイルを選ぶまで 選択 が押せない
+  //
+  // `file` モードにはディレクトリという既定の答えが無い。押せてしまうと
+  // 「何が返るのか」を利用者が推測することになる。ファイルの選択自体は
+  // fetch を伴わない同期処理なので、ここは settled() のままでよい。
+  const chooseBeforePick = el("picker-choose").disabled;
+  el("picker-entry-1").__fire("click");     // matrices_linear_gamma.npy
+  await settled();
+  check("選択 is dead until a file is picked, and names exactly what it will return",
+    chooseBeforePick === true
+      && el("picker-choose").disabled === false
+      && el("picker-chosen").textContent === "/repo/data/matrices_linear_gamma.npy",
+    `before=${chooseBeforePick} after=${el("picker-choose").disabled} `
+      + `chosen="${el("picker-chosen").textContent}"`);
+
+  // --- 7. 確定は欄を書き換え、`change` を発火する
+  //
+  // 代入だけの実装と区別できない検査にしない。`gen-output-dir` の編集リスナは
+  // 上書き合意を失効させるので、イベント無しの代入は「Aについての合意をBに
+  // 使う」経路になる。ここで見るのは行列の欄だが、発火は4欄で共通の1箇所である。
+  // 選択の確定は /api/browse を発行しないため、待つ対象は `change` の発火
+  // そのもの（`sawChange`）にする。
+  let sawChange = 0;
+  el("path-input").addEventListener("change", () => { sawChange += 1; });
+  el("picker-choose").__fire("click");
+  await waitFor(() => sawChange > 0);
+  check("choosing writes the box and fires change on it",
+    el("path-input").value === "/repo/data/matrices_linear_gamma.npy"
+      && sawChange === 1
+      && el("picker-backdrop").hidden === true,
+    `value="${el("path-input").value}" change=${sawChange} `
+      + `hidden=${el("picker-backdrop").hidden}`);
+
+  // --- 8. 取消は欄に触れない
+  el("path-input").value = "untouched";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-matrix").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  el("picker-cancel").__fire("click");
+  await settled();
+  check("cancelling leaves the box exactly as it was",
+    el("path-input").value === "untouched" && el("picker-backdrop").hidden === true,
+    `value="${el("path-input").value}" hidden=${el("picker-backdrop").hidden}`);
+
+  // --- 9. 拒否はモーダルの中に出て、モーダルは開いたまま
+  //
+  // ページのステータス行に出すと背景の裏に印字される。見えないディレクトリに
+  // ついての拒否は、対処のしようが無い。
+  el("path-input").value = "/repo/data/x.npy";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-matrix").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("picker-up").__fire("click");          // -> /repo
+  await browseSettled(prevCwd, prevError);
+  const cwdBeforeDenial = el("picker-cwd").textContent;
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("picker-entry-1").__fire("click");     // Delta -> 403
+  await browseSettled(prevCwd, prevError);
+  check("a refusal is shown inside the dialog, which stays where it was",
+    el("picker-backdrop").hidden === false
+      && /403/.test(el("picker-error").textContent)
+      && el("picker-cwd").textContent === cwdBeforeDenial,
+    `hidden=${el("picker-backdrop").hidden} error="${el("picker-error").textContent}" `
+      + `cwd="${el("picker-cwd").textContent}"`);
+
+  // --- 10. 打ち切りは件数で言う
+  //
+  // 黙って切ると「これがディレクトリの全部」と読まれる。
+  el("picker-cancel").__fire("click");
+  await settled();
+  el("path-input").value = "/repo/data/shots/x.npy";
+  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  el("btn-browse-matrix").__fire("click");
+  await browseSettled(prevCwd, prevError);
+  check("a truncated listing says how much of it is shown",
+    el("picker-count").textContent === "12800件中2件を表示",
+    `count="${el("picker-count").textContent}"`);
+  el("picker-cancel").__fire("click");
+  await settled();
 }
 
 if (!checks.length) check(`unknown scenario ${SCENARIO}`, false);

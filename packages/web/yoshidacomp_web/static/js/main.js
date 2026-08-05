@@ -42,6 +42,7 @@ import { LAYOUT_PLANAR, requireSupportedKind, traitsFor } from "./contract.js";
 // パレットはシェーダのモジュールから読む（ここに書き写さない）。
 import { CLASS_COLORS, classColorCss } from "./shaders.js";
 import { drawLutCurve } from "./plot.js";
+import { pickPath, suffixesFor } from "./filepicker.js";
 
 const $ = (id) => document.getElementById(id);
 
@@ -1336,6 +1337,70 @@ function redrawLutCurve() {
   });
 }
 
+// The four path boxes and what 参照 means for each of them.
+//
+// A table rather than four wirings, because the boxes differ only in these
+// four values. `suffixKey` is a key into `GET /api/browse/suffixes` and not a
+// list of extensions: the image formats are `pipeline.SUPPORTED_TARGET_IMAGE_
+// SUFFIXES`'s to decide, and writing them here would be the second place they
+// live.
+//
+// `gen-output-dir` is `dir` and the other write-related property follows from
+// it: the picker returns a path that may not exist yet, and creating it stays
+// `POST /api/generate`'s job.
+//
+// 4欄の違いはこの4つの値だけなので表にする。`suffixKey` が拡張子の並びでは
+// なくキーなのは、画像形式の決定権が pipeline 側にあるためである。
+const BROWSE_FIELDS = [
+  { button: "btn-browse-matrix", input: "path-input", mode: "file",
+    suffixKey: "matrix", title: "行列 .npy を選択" },
+  { button: "btn-browse-target", input: "target-path", mode: "file_or_dir",
+    suffixKey: "target", title: "ターゲット画像またはディレクトリを選択" },
+  { button: "btn-browse-lut", input: "lut-path", mode: "file",
+    suffixKey: "lut", title: "逆LUT .npz を選択" },
+  { button: "btn-browse-output", input: "gen-output-dir", mode: "dir",
+    suffixKey: null, title: "出力先ディレクトリを選択" },
+];
+
+function wireBrowseButtons() {
+  for (const field of BROWSE_FIELDS) {
+    // The table is written complete (all four boxes) so that giving the
+    // sidebar its own three buttons later needs no second edit here -- but
+    // this branch ships wired to only one of them (`btn-browse-matrix`), and
+    // an unguarded lookup would throw on `main()`'s very first pass, taking
+    // every other control on the page down with it before its own try/catch
+    // is even reached.
+    // 表は4欄分を完成させて書く（サイドバーに残る3個を足す側で二度書かずに
+    // 済むように）。ただしこの変更が出荷する時点でボタンがあるのは
+    // `btn-browse-matrix` だけなので、無条件に取得すると main() の最初の
+    // 一巡で例外になり、まだ try/catch に入ってすらいない他の結線ごと道連れに
+    // なる。
+    const button = $(field.button);
+    if (!button) continue;
+    button.addEventListener("click", () => {
+      (async () => {
+        const suffixes = field.suffixKey ? await suffixesFor(field.suffixKey) : [];
+        const box = $(field.input);
+        const chosen = await pickPath({
+          mode: field.mode, suffixes, start: box.value.trim(), title: field.title,
+        });
+        if (chosen === null) return;      // cancelled: the box is not touched
+        box.value = chosen;
+        // Dispatched, not just assigned. `gen-output-dir`'s edit listeners
+        // retire the 上書き agreement, and a value set without an event would
+        // let an agreement about one directory be spent on another. The
+        // press-time re-check catches it too, but a box whose listeners are
+        // bypassed is a trap for the next listener added here.
+        // 代入だけで済ませない。`gen-output-dir` の編集リスナは上書き合意を
+        // 失効させる。押下時にも再確認しているが、リスナを迂回する欄は次に
+        // リスナを足す人にとっての罠になる。
+        box.dispatchEvent(new Event("input", { bubbles: true }));
+        box.dispatchEvent(new Event("change", { bubbles: true }));
+      })().catch((e) => status(errorText(e), true));
+    });
+  }
+}
+
 function wireLoaders() {
   $("btn-load-target").addEventListener("click", () => {
     loadTargetImage($("target-path").value.trim())
@@ -2336,6 +2401,7 @@ async function main() {
 
   wireDisplayControls();
   wireLoaders();
+  wireBrowseButtons();
   wireGenerate();
   // Before the first render, so the button starts in the state the page is
   // actually in ("nothing is displayed") rather than looking pressable.
