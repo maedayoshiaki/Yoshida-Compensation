@@ -116,6 +116,40 @@ function renderRoots(roots, cwd) {
 }
 
 async function navigate(path) {
+  // `navigate` is called unawaited from four places -- a directory row
+  // (see ::renderList below), `↑ 上へ`, the root <select>, and `pickPath`'s
+  // own opening call -- none of which wait for it, and `session` is one
+  // module-level binding every dialog shares. A response that lands after
+  // the dialog has moved on writes into whatever `session` currently names,
+  // not into the dialog it was issued for.
+  //
+  // After 取消/選択 (`close()` sets `session = null`) that throws --
+  // `session.cwd = ...` on `null`, reproduced against the shipped code with
+  // no mutation involved: click a directory row, then 取消 before the
+  // listing arrives. After a second 参照 opens a *different* box
+  // (`pickPath()` replaces `session` with a new object) it does not throw,
+  // and is worse for it: the late response silently repaints that other
+  // dialog's `picker-cwd` and listing with its own answer -- the ターゲット
+  // dialog can end up showing the 行列 box's `.npy`-filtered listing of a
+  // directory nobody asked it for, and 選択 then returns a path built from
+  // someone else's answer.
+  //
+  // `mine` freezes which session this call belongs to at the moment it
+  // started; every write below that follows an `await` is gated on
+  // `session` still being that same object.
+  // navigate() は一覧のディレクトリ行・↑ 上へ・ルート <select>・pickPath()
+  // 自身の開始呼び出しのいずれからも await されずに呼ばれ、session はダイア
+  // ログ全体で共有する単一のモジュール変数である。ダイアログが先に進んだ
+  // あとに届いた応答は、その時点で session が指しているものへ書き込む
+  // ——取消・選択のあと（session が null）なら例外（出荷コードそのものに
+  // 対して、行クリック→取消→到着で再現する）。別の参照が別の欄を開いた
+  // あと（session が別オブジェクトに差し替わる）なら例外にはならず、その
+  // 欄の一覧を黙って上書きする——ターゲットのダイアログが行列欄の .npy
+  // 絞り込み一覧を出し、選択がそこから組んだパスを返しうる。mine はこの
+  // 呼び出しがどの session に属するかを開始時点で固定する。await の後に
+  // 来る書き込みはすべて、session がまだ同じオブジェクトであることを
+  // 条件にする。
+  const mine = session;
   const params = new URLSearchParams({ path });
   if (session.suffixes.length) params.set("suffixes", session.suffixes.join(","));
   let res;
@@ -138,6 +172,7 @@ async function navigate(path) {
     // Promise（settle を呼ぶのは close() だけで、ここには届かない）が
     // 永久に解決せず、以後ページを再読み込みするまで 参照 が効かなくなる。
     // HTTP の拒否と同じ扱いにする（モーダル内に出し、開いたまま留まる）。
+    if (session !== mine) return;   // the dialog moved on while this was in flight
     $("picker-error").textContent = `${e.message || e}`;
     return;
   }
@@ -147,6 +182,7 @@ async function navigate(path) {
     // refusal for a directory the user cannot see is a refusal they cannot act
     // on. モーダル内に出し、直前のディレクトリに留まる。
     let detail = await res.text();
+    if (session !== mine) return;   // the dialog moved on while this was in flight
     try {
       const parsed = JSON.parse(detail);
       if (parsed && typeof parsed.detail === "string") detail = parsed.detail;
@@ -155,6 +191,7 @@ async function navigate(path) {
     return;
   }
   const body = await res.json();
+  if (session !== mine) return;   // the dialog moved on while this was in flight
   $("picker-error").textContent = "";
   session.cwd = body.path;
   session.parent = body.parent;

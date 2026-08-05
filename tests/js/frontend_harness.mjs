@@ -1089,6 +1089,28 @@ const requestLog = [];
 // observable. 移動1回が要求1回であることを外から見るための記録。
 const browseLog = [];
 
+// GET /api/browse can be held open, the same way point-query responses are
+// held for the probe timing checks (see `holdProbes` above): the fake
+// resolves inside a microtask, so without this a response racing a second
+// 参照 or a 取消 always lands before either can act, and `navigate()`'s
+// staleness guard (`filepicker.js`'s `mine`) would have no execution path to
+// exercise -- a check built on top of an always-fast fetch would pass
+// against an implementation with no guard in it at all.
+// `/api/browse` の応答も保留できるようにする（点クエリと同じ理由）。フェイクは
+// マイクロタスク内で解決するため、これが無いと2回目の参照や取消より必ず先に
+// 届いてしまい、navigate() のスタール判定（filepicker.js の mine）を実際に
+// 通す経路が作れない。
+let holdBrowse = false;
+const heldBrowse = [];   // [{ path, release }] -- responses waiting to be let go
+const heldBrowseIndex = (path) => heldBrowse.findIndex((h) => h.path === path);
+const waitForHeldBrowse = (path) => waitFor(() => heldBrowseIndex(path) >= 0);
+function releaseBrowse(path) {
+  const i = heldBrowseIndex(path);
+  if (i < 0) return false;
+  heldBrowse.splice(i, 1)[0].release();
+  return true;
+}
+
 // The fake filesystem the picker walks.
 //
 // `Delta` sorts before `alpha` bytewise and after it casefold, so a listing
@@ -1099,7 +1121,7 @@ const browseLog = [];
 // 並べ替える実装と区別するため（index の基準はサーバ側の順序である）。
 // The lone file at "/repo" and the two at "/repo/data/shots" are named
 // `.npy` rather than the brief's `notes.txt` / `IMG_0001.png` /
-// `IMG_0002.png`: this scenario opens the picker exclusively through
+// `IMG_0002.png`: Task 3's scenario opened the picker exclusively through
 // `btn-browse-matrix`, whose suffix filter (`.npy`, from `GET
 // /api/browse/suffixes`) applies to every navigation for the life of one
 // dialog, up-clicks included. Two separate facts combine to make that true:
@@ -1114,18 +1136,34 @@ const browseLog = [];
 // harness bug -- it is what a `.npy`-only picker is supposed to do to a
 // non-`.npy` file.
 //
+// Task 4 opens the same scenario through `btn-browse-target`,
+// `btn-browse-lut` and `btn-browse-output` too, so "exclusively" above no
+// longer holds -- only the naming rationale for these two directories does.
+// Neither new box collides with it: the target box's filter
+// (`.png`/`.jpg`/`.jpeg`) excludes `notes.npy` the same way a `.txt` file
+// would have, and the output box's (`dir`, no filter) shows it unfiltered
+// without any check depending on that being so.
+//
 // `/repo` の唯一のファイルと `/repo/data/shots` の2件を `.npy` にしてある
-// （ブリーフ原文は `notes.txt` / `IMG_0001.png` / `IMG_0002.png`）。このシナリオは
-// `btn-browse-matrix` からしか開かず、その拡張子フィルタ（`.npy`）はダイアログの
-// 生存期間中ずっと有効（上へ を含む全リクエストに掛かる）。これは2つの事実の
-// 組み合わせである: `browse.py::list_directory` は1回のリクエストが運ぶ
-// 拡張子だけを見て絞る（セッションという概念自体を持たない）。セッション全体に
-// 効くのは `filepicker.js` の `session.suffixes` の側で、`pickPath()` の時点で
-// 一度だけ決まり、以後の `navigate()` 呼び出しがそれをそのまま使い回すことに
-// よる。`.txt`/`.png` のままでは一覧に届く前に落ちる（実測: 3件目が消えて
-// "data/,Delta/"、`entries` が空になって "12800件中0件を表示"）。これは
-// ハーネスの不具合ではなく、`.npy` 専用のファイラが `.npy` でないファイルに
-// すべき振る舞いそのものである。
+// （ブリーフ原文は `notes.txt` / `IMG_0001.png` / `IMG_0002.png`）。Task 3の
+// シナリオは `btn-browse-matrix` からしか開かず、その拡張子フィルタ
+// （`.npy`）はダイアログの生存期間中ずっと有効（上へ を含む全リクエストに
+// 掛かる）。これは2つの事実の組み合わせである: `browse.py::list_directory`
+// は1回のリクエストが運ぶ拡張子だけを見て絞る（セッションという概念自体を
+// 持たない）。セッション全体に効くのは `filepicker.js` の
+// `session.suffixes` の側で、`pickPath()` の時点で一度だけ決まり、以後の
+// `navigate()` 呼び出しがそれをそのまま使い回すことによる。`.txt`/`.png`
+// のままでは一覧に届く前に落ちる（実測: 3件目が消えて "data/,Delta/"、
+// `entries` が空になって "12800件中0件を表示"）。これはハーネスの不具合
+// ではなく、`.npy` 専用のファイラが `.npy` でないファイルにすべき振る舞い
+// そのものである。
+//
+// Task 4 では同じシナリオを `btn-browse-target` / `btn-browse-lut` /
+// `btn-browse-output` からも開くため、上の「〜からしか開かず」は成り立たなく
+// なった（この2ディレクトリの命名の理由付けだけは残る）。新しい2欄とも
+// 衝突しない: ターゲットの欄のフィルタは `notes.npy` を `.txt` と同様に除外
+// し、出力先の欄（`dir`・フィルタ無し）はそのまま出すが、それに依存する
+// チェックは無い。
 const BROWSE_TREE = {
   "/repo": {
     parent: null,
@@ -1176,6 +1214,9 @@ globalThis.fetch = async (url, options) => {
     const query = new URLSearchParams(String(url).slice("/api/browse?".length));
     const at = query.get("path") || "/repo";
     browseLog.push({ path: at, suffixes: query.get("suffixes") ?? "" });
+    if (holdBrowse) {
+      await new Promise((release) => heldBrowse.push({ path: at, release }));
+    }
     const node = BROWSE_TREE[at];
     if (!node) {
       return new Response(JSON.stringify({ detail: `no such directory: ${at}` }), {
@@ -1524,12 +1565,47 @@ await import(pathToFileURL(path.join(STATIC_DIR, "js", "main.js")).href);
 // られるのはここだけである。
 const shaders = await import(pathToFileURL(path.join(STATIC_DIR, "js", "shaders.js")).href);
 
-async function waitFor(predicate, timeoutMs = 3000) {
+// A timeout is silent by default: at every call site but one, `await
+// waitFor(...)` discards the boolean, and the check that follows reads
+// whatever state exists at that point and reports *that* -- the actual DOM
+// values, in a message written for the property being tested, not for
+// "did the wait succeed." That is the useful failure, and it is why a
+// blanket "throw on timeout" was tried here and reverted: it turned every
+// wait whose condition a mutation legitimately prevents from ever becoming
+// true (`sawChange > 0` after a mutation that removes the dispatch it counts,
+// say) from a clean, specific check failure into an uncaught exception that
+// aborts the whole scenario before any of that detail is recorded --
+// measured against four of the picker mutations below, each of which
+// crashed the harness instead of failing the one check it names.
+//
+// `loud = true` exists for the opposite case: a call site with *no*
+// downstream differentiation, where discarding the boolean means a timeout
+// and a success are executed identically and nothing afterward can tell them
+// apart. `browseSettled()` was exactly that (measured, three call sites,
+// 3002-3003ms each, all silently "passing" through): waiting for *any*
+// change to `picker-cwd`/`picker-error` when the actual destination never
+// differed from where the dialog already was, so the wait always ran the
+// full timeout with nothing to show for it. It is now the one caller that
+// opts in.
+// タイムアウトは既定では静か: `started` を除く全呼び出し元は真偽値を捨て、
+// 後続のチェックがその時点の実際のDOM値を、そのプロパティ用の文言で報告
+// する。これが有用な失敗であり、一括して例外を投げる版を一度試して戻した
+// 理由でもある——変異によって正当に真にならなくなる条件（分岐した dispatch
+// を数える `sawChange > 0` など）を持つ待機が、詳細つきの検査失敗から、
+// 詳細が記録される前にシナリオごと落ちる素の例外に変わってしまい、
+// 下記 picker 変異のうち4件がそれぞれ落とすはずの1件ではなくハーネスごと
+// 落ちることを実測した。`loud = true` は逆に「後続に区別する手段が無い」
+// 呼び出し元のためにある。`browseSettled()` がまさにそれだった（実測・
+// 3箇所・各3002〜3003ms、いずれも黙って「通って」いた）——行き先が現在地と
+// 一度も変わらない場合、変化を待つ形は何も示さないままフルに止まる。
+// 現在はそこだけが明示的にこれを選ぶ。
+async function waitFor(predicate, timeoutMs = 3000, loud = false) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (predicate()) return true;
     await sleep(5);
   }
+  if (loud) throw new Error(`waitFor timed out after ${timeoutMs}ms waiting for ${predicate}`);
   return false;
 }
 
@@ -4567,9 +4643,22 @@ if (SCENARIO === "generate") {
 // 確実なのは、navigate() が成功・失敗のどちらで終わっても必ず書き換える
 // 2箇所（`picker-cwd` と `picker-error`）そのものを見張ることだけである。
 // クリックの直前の値を控え、どちらかが変わるまで待つ。
+//
+// `loud = true`: every caller discards this function's own return value, so
+// a timeout and a success used to run the identical next line -- three call
+// sites did exactly that (measured, 3002-3003ms each) whenever the actual
+// destination never differed from where the dialog already was, and nothing
+// afterward could have told the difference. See the note on `waitFor` for
+// why that is this function's problem to opt into and not `waitFor`'s
+// default.
+// `loud = true`：この関数自身の戻り値は呼び出し元の誰も見ないため、以前は
+// タイムアウトと成功が次の行を同じように実行していた。行き先が現在地と
+// 一度も変わらない3箇所で実際にそうなっており（実測 各3002〜3003ms）、
+// 以降のどこにも違いを検出する手段が無かった。`waitFor` 側の既定にしない
+// 理由は `waitFor` のコメントを参照。
 function browseSettled(prevCwd, prevError) {
   return waitFor(() => el("picker-cwd").textContent !== prevCwd
-    || el("picker-error").textContent !== prevError);
+    || el("picker-error").textContent !== prevError, 3000, true);
 }
 
 if (SCENARIO === "picker") {
@@ -4729,18 +4818,37 @@ if (SCENARIO === "picker") {
   // the .npz, leaving [shots/, nature_1_sq.png] -- index 1, not the brief's
   // unfiltered index 3.
   //
-  // `browseSettled()`, not `settled()`, even though this row is a file under
-  // the shipped listing order: a file click is synchronous and this would
-  // still be safe if it stalled the full timeout for nothing, but a directory
-  // click is not, and this same index is a directory under
-  // `picker_re_sorts_the_listing_on_the_client`. Racing that unawaited
-  // `navigate()` against the confirm below (which closes the session as soon
-  // as `session.cwd` alone is a valid answer, `file_or_dir` mode) crashed the
-  // harness outright the one time this was `settled()`: the late response
-  // wrote into a `session` already nulled by close() (measured).
-  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  // Waits for `picker-chosen` to change rather than for `browseSettled()`:
+  // this row is a file under the shipped listing order (a synchronous
+  // selection, no `navigate()` at all) but a directory under
+  // `picker_re_sorts_the_listing_on_the_client` (an unawaited `navigate()`).
+  // `browseSettled()` cannot serve both -- on the shipped path nothing about
+  // `picker-cwd`/`picker-error` ever changes here, so it stalls the full 3s
+  // timeout for nothing (measured, 3002ms); under the mutation, racing that
+  // unawaited `navigate()` against 選択 below (which closes the session as
+  // soon as `session.cwd` alone is a valid answer, `file_or_dir` mode)
+  // crashed the harness outright the one time this waited on plain
+  // `settled()` instead -- the late response wrote into a `session` already
+  // nulled by close() (measured; `filepicker.js`'s `navigate()` now guards
+  // against this too, see the comment on its `mine`). `picker-chosen` is
+  // what both outcomes change -- synchronously for a selection, once
+  // `navigate()` resolves for a directory -- so waiting for it is instant on
+  // the shipped path and still correctly serialises the mutated one.
+  // `browseSettled()` ではなく `picker-chosen` の変化を待つ：この行は出荷
+  // コードの並びではファイル（同期的な選択で navigate() を伴わない）だが、
+  // `picker_re_sorts_the_listing_on_the_client` の下ではディレクトリになる
+  // （未 await の navigate()）。`browseSettled()` はどちらにも使えない
+  // ——出荷コードの経路では picker-cwd / picker-error のどちらも変わらず
+  // 3秒フルに止まり（実測 3002ms）、変異下では未 await の navigate() と
+  // 直後の 選択（file_or_dir モードでは session.cwd だけでも答えになるため
+  // すぐ session を閉じる）が競合し、単に settled() で待っていた時点では
+  // ハーネスごとクラッシュした（実測。filepicker.js の navigate() にも
+  // mine によるガードを足した——そちらのコメント参照）。どちらの結果でも
+  // 変わるのは picker-chosen なので、それを待てば出荷コードの経路では
+  // 即時、変異下でも navigate() の完了を正しく待つ。
+  const prevChosenBeforeSecondClick = el("picker-chosen").textContent;
   el("picker-entry-1").__fire("click");            // nature_1_sq.png
-  await browseSettled(prevCwd, prevError);
+  await waitFor(() => el("picker-chosen").textContent !== prevChosenBeforeSecondClick);
   check("the target box can answer with an image or with a directory",
     targetRequest.suffixes === ".png,.jpg,.jpeg"
       && dirIsAnswerable
@@ -4774,10 +4882,38 @@ if (SCENARIO === "picker") {
   // 書き込み先なので「まだ存在しないディレクトリ」を指せなければならない。
   // ファイラは存在するものしか一覧できないので、現在地＋入力名という形になる。
   // **ここで作りはしない。** 作成は POST /api/generate の仕事のままである。
+  //
+  // Waits for `picker-chosen` to change rather than for `browseSettled()` --
+  // or for `picker-cwd` alone to reach the expected `/repo`. Neither of
+  // those is safe here: an empty box always lands at `/repo` (the fake
+  // server's own default for an empty `path`), which is exactly where check
+  // 12 (LUT) also left the dialog, so `browseSettled()`'s delta on
+  // `picker-cwd`/`picker-error` never fires (stalls the full 3s timeout,
+  // measured 3003ms) -- and waiting for `picker-cwd === "/repo"` directly is
+  // worse, not slower: `picker-cwd` is *already* `"/repo"` from check 12
+  // before this box's own `navigate()` has even resolved, so that wait
+  // returns instantly and wrongly, reading `picker-chosen` a full round
+  // trip early (measured: `emptyMeansHere` false, because check 12's `file`
+  // mode left it `""`, and this box's own answer had not landed yet).
+  // `picker-chosen` is written by `renderFoot()`, which `navigate()` calls
+  // last, after every other DOM write -- so a change in it is the one signal
+  // that cannot fire before this specific round trip has fully landed, and
+  // `""` (LUT box, `file` mode, nothing selected) truly differs from `/repo`
+  // (this box, `dir` mode, nothing typed) once it does.
+  // `browseSettled()` でも `picker-cwd` 単独の到達確認でもなく、
+  // `picker-chosen` の変化を待つ。空欄は常に `/repo` に着地するが、直前の
+  // 12番目（LUT）のダイアログも同じ `/repo` で終わっているため、
+  // `browseSettled()` は変化せず3秒フルに止まる（実測 3003ms）。
+  // `picker-cwd === "/repo"` を直接待つのはさらに悪い——12番目からすでに
+  // `/repo` なので、この欄自身の navigate() が終わる前に真になり、
+  // `picker-chosen` を1往復早く読んでしまう（実測: emptyMeansHere が false。
+  // 12番目は file モードで "" を残していた）。`picker-chosen` は
+  // `renderFoot()` が書き、`navigate()` は他の全ての書き込みのあとに
+  // それを呼ぶため、変化はこの往復が完全に終わったことの唯一の合図になる。
+  const prevChosenBeforeOutputOpen = el("picker-chosen").textContent;
   el("gen-output-dir").value = "";
-  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
   el("btn-browse-output").__fire("click");
-  await browseSettled(prevCwd, prevError);
+  await waitFor(() => el("picker-chosen").textContent !== prevChosenBeforeOutputOpen);
   const newdirShown = el("picker-newdir").hidden === false;
   const emptyMeansHere = el("picker-chosen").textContent === "/repo";
   prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
@@ -4808,9 +4944,42 @@ if (SCENARIO === "picker") {
   // --- 15. 新規フォルダ名は次に開いたとき残らない
   //
   // 残ると、別の出力先を選びに来た押下が前回の名前を連れてくる。
-  prevCwd = el("picker-cwd").textContent; prevError = el("picker-error").textContent;
+  //
+  // Sets its own starting value rather than reading whatever check 14 left
+  // in the box: under a mutation that corrupts check 14's own write (`dir`
+  // mode ignoring the new-folder name, say), reopening from that corrupted
+  // value strips a *different* last segment and this check then fails for a
+  // reason that has nothing to do with the property it names -- a later
+  // check depending on state an earlier one happened to leave, which failed
+  // exactly that way once (measured) and is why this line exists.
+  //
+  // Waits for `picker-chosen` to change rather than for `browseSettled()`
+  // or for `picker-cwd` alone to reach `/repo/data`: this reopen and check
+  // 13 both land there, so a `browseSettled()` delta on
+  // `picker-cwd`/`picker-error` never fires and stalls the full 3s timeout
+  // (measured, 3003ms) -- and `picker-cwd` alone would be worse, not
+  // slower, for the same reason it was at check 13's own open: it is
+  // *already* `/repo/data` before this reopen's `navigate()` resolves, so
+  // that wait returns instantly and reads `picker-chosen` a round trip
+  // early. `picker-chosen` itself does change: check 14 left it
+  // `/repo/data/proj_20260805` (the typed name, still concatenated), and
+  // `renderFoot()` -- called last in `navigate()`, after the new-folder box
+  // has been reset to empty by this reopen's own `pickPath()` -- writes it
+  // back down to the bare `/repo/data` once the round trip lands.
+  // `browseSettled()` でも `picker-cwd` 単独の到達確認でもなく、
+  // `picker-chosen` の変化を待つ：このチェックと13番目は同じ `/repo/data`
+  // に着地するため、`browseSettled()` は変化せず3秒フルに止まる
+  // （実測 3003ms）。`picker-cwd` 単独の確認はさらに悪い——13番目の開始点の
+  // 節と同じ理由で、この開き直しの navigate() が終わる前からすでに
+  // `/repo/data` であり、`picker-chosen` を1往復早く読んでしまう。
+  // `picker-chosen` 自体は変化する：14番目は `/repo/data/proj_20260805`
+  // （入力した名前つき）を残しており、`renderFoot()`（navigate() の最後に
+  // 呼ばれ、この開き直し自身の pickPath() が新規フォルダ名欄を空に戻した
+  // あと）が往復の完了時にそれを裸の `/repo/data` へ書き戻す。
+  const prevChosenBeforeOutputReopen = el("picker-chosen").textContent;
+  el("gen-output-dir").value = "/repo/data/proj_20260805";   // this check sets its own start
   el("btn-browse-output").__fire("click");
-  await browseSettled(prevCwd, prevError);
+  await waitFor(() => el("picker-chosen").textContent !== prevChosenBeforeOutputReopen);
   check("the new-folder name does not survive into the next dialog",
     el("picker-newdir-name").value === "" && el("picker-chosen").textContent === "/repo/data",
     `name="${el("picker-newdir-name").value}" chosen="${el("picker-chosen").textContent}"`);
@@ -4827,6 +4996,62 @@ if (SCENARIO === "picker") {
   check("the new-folder box is absent where the path must already exist",
     el("picker-newdir").hidden === true,
     `hidden=${el("picker-newdir").hidden}`);
+  el("picker-cancel").__fire("click");
+  await settled();
+
+  // --- 17. 出遅れた応答は、今開いている別のダイアログを上書きしない
+  //
+  // `navigate()` is called unawaited from a directory row, `↑ 上へ`, the
+  // root <select>, and `pickPath()`'s own opening call, and `session` is one
+  // module-level binding every dialog shares. A response for an abandoned
+  // dialog therefore writes into whatever `session` currently names once it
+  // finally lands -- and pressing a second 参照 replaces `session` with a
+  // new object without ever calling `close()`, so the *first* dialog's
+  // response is not refused, it is simply answered late, into the box that
+  // is open now.
+  //
+  // Held open (see `holdBrowse`) so this race is a state the harness can
+  // actually reach: the fake resolves inside a microtask on its own, faster
+  // than a second 参照 press could ever land. Opens the 行列 box on
+  // `/repo/data` and holds that response, opens the ターゲット box on
+  // `/repo` in its place (unheld, so it lands normally), then releases the
+  // held response and checks that the now-open ターゲット dialog still says
+  // `/repo` -- not `/repo/data`, which is what 行列's answer, arriving after
+  // the fact, would repaint it to without `navigate()`'s `mine` guard (see
+  // `filepicker.js`). This is the quieter of the two consequences the guard
+  // was written for; the other -- 取消 nulling `session` before a held
+  // response lands -- throws (`session.cwd = ...` on `null`) rather than
+  // producing a check this framework can pin, and was verified by hand
+  // against the shipped code with no mutation at all.
+  //
+  // 未 await の navigate() と、全ダイアログが共有する単一の session が
+  // 組み合わさると、見捨てられたダイアログへの応答は、届いた時点で
+  // session が指しているものへ書き込む——2度目の 参照 は close() を経ず
+  // session を差し替えるだけなので、1つ目の応答は拒否されず、今開いている
+  // 別の欄へ遅れて届く。フェイクはマイクロタスク内で解決してしまうため、
+  // この競合を実際に起こすには応答を保留する必要がある。行列の欄を
+  // `/repo/data` で開いて保留し、その間にターゲットの欄を `/repo` で開き
+  // （保留せず通常に解決）、保留を解いたあとターゲットのダイアログが
+  // `/repo` のままであること（`mine` ガードが無ければ `/repo/data` に
+  // 書き換わる）を見る。もう一つの帰結（取消が session を null にした
+  // あとに応答が届く）は例外になり、この枠組みで固定できるチェックには
+  // ならないため、出荷コードそのものに対して手で確認済み（変異は使って
+  // いない）。
+  el("path-input").value = "/repo/data/matrices_linear_gamma.npy";
+  holdBrowse = true;
+  el("btn-browse-matrix").__fire("click");     // navigates to /repo/data, held
+  await waitForHeldBrowse("/repo/data");
+  holdBrowse = false;
+  const prevChosenBeforeRace = el("picker-chosen").textContent;
+  el("target-path").value = "";
+  el("btn-browse-target").__fire("click");     // a second 参照, on a different box
+  await waitFor(() => el("picker-chosen").textContent !== prevChosenBeforeRace);
+  const cwdBeforeStaleResponse = el("picker-cwd").textContent;
+  releaseBrowse("/repo/data");
+  await sleep(40);   // let the released response's own continuation, if any, run
+  check("a response for an abandoned dialog does not repaint the one now open",
+    cwdBeforeStaleResponse === "/repo" && el("picker-cwd").textContent === "/repo",
+    `before="${cwdBeforeStaleResponse}" after="${el("picker-cwd").textContent}"`);
   el("picker-cancel").__fire("click");
   await settled();
 }

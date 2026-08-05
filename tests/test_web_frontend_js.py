@@ -2135,36 +2135,59 @@ _MUTATIONS = [
     # 「/repo」の一覧を使い回しているためである。ダイアログを開き直す2件
     # （取消・打ち切り表示）だけは影響を受けない。
     #
-    # Task 4 adds five more of the same kind. `Delta` sorts before `data`
+    # Task 4 adds four more of the same kind. `Delta` sorts before `data`
     # under *any* suffix filter that keeps both (the target box's and the
     # output box's), so each box's own `picker-entry-0` -- documented `//
     # data/` -- lands on `Delta` and 403s instead. The target box (checks 11
     # and 12) then answers from `/repo` rather than
     # `/repo/data/nature_1_sq.png`. The output box (check 13) types its
-    # new-folder name against `/repo` instead of `/repo/data`, writes
-    # `/repo/proj_20260805` (check 14), and its reopen (check 15) inherits the
-    # `picker-error` that 403 left set -- which `dir` mode's `pickPath()`
-    # clears *synchronously*, with no suffix lookup ahead of it to defer that
-    # reset by a tick the way the other three boxes' opens do, so
-    # `browseSettled()` reports "settled" against the stale render one
-    # navigation early (measured -- not a crash, just the wrong string).
+    # new-folder name against `/repo` instead of `/repo/data` and writes
+    # `/repo/proj_20260805` (check 14).
     #
-    # The harness itself needed one fix for this mutation, not an entry here:
-    # check 11's second `picker-entry-N` click is a file under the shipped
-    # order but a directory under this one, and racing its unawaited
-    # `navigate()` against the confirm button crashed the process outright
-    # (`session` written to after `close()` had nulled it) until that click
-    # started waiting on `browseSettled()` instead of `settled()`. See the
-    # comment at that call site.
-    # Task 4 で5件が同様に道連れになる。`Delta` は `data` を残す拡張子フィルタ
+    # Check 15 -- the reopen -- does *not* fail here, and that absence is a
+    # finding of its own kind rather than a gap: it sets its own starting
+    # value before reopening precisely so that it does not inherit whatever
+    # check 14 happened to write (see the comment there), so it is
+    # unaffected by this mutation's corruption of check 14. Before that fix
+    # it failed here for a reason unrelated to what it names -- see I1 in the
+    # Task 4 review this table's comments now document.
+    #
+    # The harness itself needed two fixes to keep this mutation from
+    # crashing it outright, neither of them entries in this table because
+    # neither removes a guard on purpose -- they are the harness's own waits
+    # being made safe against a listing order it does not control:
+    #
+    #   - Check 11's second `picker-entry-N` click is a file under the
+    #     shipped order but a directory under this one. Racing its unawaited
+    #     `navigate()` against the confirm button crashed the process
+    #     outright (`session` written to after `close()` had nulled it) while
+    #     that click waited on `settled()`; it now waits for `picker-chosen`
+    #     to change, which both outcomes do.
+    #   - Checks 13 and 15's own opens used to wait on `browseSettled()` or on
+    #     `picker-cwd` reaching a specific value, both of which this
+    #     mutation's reordering can make return before this box's own
+    #     `navigate()` has actually landed (measured: `emptyMeansHere` false
+    #     under the first, a round-trip-early read under the second). Both
+    #     now wait for `picker-chosen` to change instead, which cannot fire
+    #     before the round trip that writes it lands.
+    #
+    # クライアント側で並べ替え直す。index の基準はサーバ側の casefold 順なので、
+    # 「3枚目」が欄と要求とで別のファイルを指すようになる。並び替え検査の他に
+    # 4件が道連れで落ちるのは、`picker-entry-N` が「今画面にある一覧」への
+    # 添字であり、並び替え検査より後のほとんどが、その並び替えられた
+    # 「/repo」の一覧を使い回しているためである。ダイアログを開き直す2件
+    # （取消・打ち切り表示）だけは影響を受けない。
+    #
+    # Task 4 で4件が同様に道連れになる。`Delta` は `data` を残す拡張子フィルタ
     # であれば常に `data` より先に並ぶため、ターゲットの欄・出力先の欄それぞれの
     # `picker-entry-0`（コメント上は `data/`）が `Delta` に当たって403になる。
-    # 出力先の欄はその403が残した `picker-error` を次に開いたとき
-    # （`pickPath()` が同期的に消す）引き継ぎ、`browseSettled()` が1回早く
-    # 「落ち着いた」と報告する（実測——クラッシュはせず、値が違うだけ）。
-    # このミューテーションはハーネス自体の修正も1件要した（11番目の検査の
-    # 2回目のクリック先が、この変異下ではファイルではなくディレクトリになり、
-    # 未 await の navigate() と確定ボタンが競合してプロセスごと落ちた）。
+    # 15番目（開き直し）はここでは落ちない——自分の始点を自分で設定するため、
+    # 14番目が実際に何を書いたかに依存しない（Task 4 レビューの I1 参照）。
+    # このミューテーションでハーネスがクラッシュしないよう2箇所直したが、
+    # どちらも意図的にガードを外すものではないためこの表には項目を作らない
+    # （11番目の2回目のクリック待ちと、13・15番目自身の開き直しの待ち方——
+    # いずれも `picker-chosen` の変化を待つ形にした。理由は各該当箇所の
+    # コメント参照）。
     pytest.param(
         "picker",
         [(
@@ -2182,7 +2205,6 @@ _MUTATIONS = [
             "the target box receives the picked image",
             "the output box picks a directory that need not exist yet",
             "the output box is written and its edit listeners are reached",
-            "the new-folder name does not survive into the next dialog",
         ),
         id="picker_re_sorts_the_listing_on_the_client",
     ),
@@ -2241,20 +2263,22 @@ _MUTATIONS = [
     # and `generate.py` refuses a non-empty one. The box becomes unable to
     # express its own ordinary case.
     #
-    # A third check falls with it, and it is downstream rather than
-    # independent: the "does not survive into the next dialog" check reopens
-    # the dialog by trimming the *box's own* last path segment off the value
-    # the previous check just wrote. Under this mutation that value is
-    # `/repo/data` (the folder name never made it in), so stripping its last
-    # segment lands one directory too high, at `/repo` instead of
-    # `/repo/data` -- not a second guard, the same missing name surfacing at
-    # its next read (measured).
+    # A third check -- "does not survive into the next dialog" -- does *not*
+    # fall with it, and that took a harness fix to be true: that check used to
+    # reopen from whatever the previous check had just written, so under this
+    # mutation it inherited a corrupted value (`/repo/data`, the folder name
+    # never made it in) and failed for a reason unrelated to what it names --
+    # stripping *that* value's last segment lands one directory too high, at
+    # `/repo` instead of `/repo/data`. It now sets its own starting value
+    # before reopening (see the comment at that call site) and so is
+    # independent of this mutation's corruption of the check before it.
     # 新規フォルダ名を無視する。出力先は既存ディレクトリしか名乗れなくなり、
     # generate.py は空でないディレクトリを拒むので、通常の使い方ができなくなる。
-    # 3件目が道連れで落ちるのは別のガードではない: 「次に開いたとき残らない」
-    # 検査は直前の検査が書いた欄の値そのものから最後の1区切りを削って開き直す
-    # ため、フォルダ名が入っていない値（`/repo/data`）では1段上の `/repo` に
-    # 着地する（実測）。
+    # 「次に開いたとき残らない」検査は道連れにならない——以前は直前の検査が
+    # 書いた値からそのまま開き直しており、この変異下では壊れた値
+    # （`/repo/data`）を1区切り削って `/repo` に着地し、無関係な理由で落ちて
+    # いた。今は開き直す前に自分で始点を設定するため、直前の検査の壊れ方に
+    # 依存しない。
     pytest.param(
         "picker",
         [(
@@ -2264,8 +2288,7 @@ _MUTATIONS = [
             "    return session.cwd;",
         )],
         ("picks a directory that need not exist yet",
-         "the output box is written and its edit listeners are reached",
-         "the new-folder name does not survive into the next dialog"),
+         "the output box is written and its edit listeners are reached"),
         id="picker_dir_mode_ignores_the_new_folder_name",
     ),
     # `file_or_dir` narrowed to `file`: the target box can no longer answer with
@@ -2296,6 +2319,55 @@ _MUTATIONS = [
         )],
         ("absent where the path must already exist",),
         id="picker_offers_a_new_folder_name_on_a_reading_box",
+    ),
+    # The staleness guard on the one write that lands after a real round trip
+    # in this scenario: a response for a dialog the user has moved away from,
+    # answered late into whichever dialog is open now.
+    #
+    # `navigate()` is called unawaited from four places (a directory row,
+    # `↑ 上へ`, the root <select>, `pickPath()`'s own opening call), and
+    # `session` is one module-level binding every dialog shares. Removing
+    # `mine`'s check on the success path reproduces the state that shipped:
+    # a second 参照 replaces `session` with a new dialog's before the first
+    # one's held response lands, and that response then writes its answer
+    # into the *new* dialog -- `check 17`'s ターゲット box, left open on
+    # `/repo`, is silently repainted to `/repo/data`, which is 行列's answer
+    # for a request nobody watching that dialog made.
+    #
+    # The sharper consequence -- 取消 nulling `session` before a held
+    # response lands, which throws (`session.cwd = ...` on `null`) instead of
+    # failing a check -- is not reachable through this table at all: a crash
+    # makes `_run_harness` raise before it ever returns a `checks` list, so
+    # this framework's own "did we get the expected failures" comparison
+    # never runs. Verified by hand instead, against the shipped code with no
+    # mutation involved (click a directory row, then 取消 before the listing
+    # arrives).
+    #
+    # このシナリオで実際の往復のあとに書き込む唯一のガード: 離れたダイアログ
+    # 宛ての応答が、今開いている別のダイアログへ遅れて書き込まれる。
+    # navigate() は4箇所（ディレクトリ行・↑ 上へ・ルート <select>・
+    # pickPath() 自身の開始呼び出し）から await されずに呼ばれ、session は
+    # 全ダイアログ共有の単一変数である。成功経路の mine の検査を外すと
+    # 出荷されていた状態そのものが再現する: 2度目の参照が session を新しい
+    # ダイアログのものに差し替えたあと、保留されていた1つ目の応答が届き、
+    # その答えを新しいダイアログへ書き込む——17番目のチェックの
+    # ターゲットの欄（`/repo` で開いたまま）が、誰も見ていない要求への
+    # 行列側の答え `/repo/data` へ黙って書き換わる。より鋭い帰結（取消が
+    # session を null にしたあとに保留応答が届き、`session.cwd = ...` が
+    # null に対する例外になる）は、この表では検出できない——クラッシュは
+    # `_run_harness` を「期待した失敗集合と一致するか」の比較にすら
+    # 到達させずに落とすため。出荷コードそのものに対して、変異なしで手で
+    # 確認した（行のクリック→取消→到着）。
+    pytest.param(
+        "picker",
+        [(
+            "js/filepicker.js",
+            "  const body = await res.json();\n"
+            "  if (session !== mine) return;   // the dialog moved on while this was in flight\n",
+            "  const body = await res.json();\n",
+        )],
+        ("does not repaint the one now open",),
+        id="navigate_writes_a_late_response_into_whichever_dialog_is_open",
     ),
 ]
 
