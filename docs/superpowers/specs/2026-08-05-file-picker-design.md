@@ -64,9 +64,28 @@ Explorer からのドラッグ&ドロップも同じ理由で不可（`DataTrans
 再解決させると、ブラウザから見て同一オリジンになり CORS の判定自体が発生しない。
 uvicorn は既定でこれを防いでいない。
 
-対策として、`Host` ヘッダのホスト部が `127.0.0.1` / `localhost` / `::1` の
-いずれでもない要求を 403 で拒むミドルウェアを `create_app()` に入れる。ポート番号は
-問わない。既存の全エンドポイントに掛かる。
+対策として、Starlette の `TrustedHostMiddleware` を `create_app()` に入れる。
+自前で書かない ── ポート除去と一致判定はこのミドルウェアの仕事そのもので、
+`.venv` に入っている実装を読んで挙動を確認済みである。
+
+```python
+app.add_middleware(TrustedHostMiddleware,
+                   allowed_hosts=["127.0.0.1", "localhost", "testserver"])
+```
+
+確認した挙動と、それに伴う仕様の確定：
+
+- 拒否は **400 `Invalid host header`（plain text）**。403 ではない。本文は JSON では
+  ないので `api.js::errorMessage` の「`detail` が無ければそのまま出す」経路に落ちる。
+- ホスト部は `headers.get("host", "").split(":")[0]` で取る。**IPv6リテラルは扱えない**
+  （`[::1]:8123` は `[` になる）。サーバは IPv4 ループバック束縛なので `::1` では
+  そもそも到達できず、実害は無い。`allowed_hosts` に `::1` を書いても効かないため書かない。
+- `testserver` を許すのは `TestClient` の既定 `base_url` がこれだからである。
+  既存の `TestClient(...)` は11ファイル85箇所にあり、全部に `base_url` を渡すのは
+  この変更に見合わない。**DNS リバインディングは名前解決を要する攻撃**であり、
+  `testserver` は単一ラベルで登録可能なドメインではないので、ブラウザにこの
+  `Host` を送らせる経路が無い。Host ヘッダを自由に作れるローカルのプロセスは
+  そもそもソケットへ直接届くので、この検査の対象ではない。
 
 この検査を入れない限り「マシン全体を閲覧可能にしても安全」とは言えない。両者は
 セットである。
@@ -117,6 +136,7 @@ GET /api/browse?path=<str>&suffixes=<.npy,.npz>
 | 読む権限が無い（`C:/System Volume Information` など） | **403** |
 
 `PermissionError` を 500 にしない。Windows のマシン全体閲覧では通常操作で踏む。
+（`Host` 検査による拒否だけは 400 で、これはミドルウェアの応答であり本APIのものではない。）
 
 **テスト可能性の制約**
 
@@ -139,10 +159,17 @@ GET /api/browse?path=<str>&suffixes=<.npy,.npz>
 | `lut-path` | ファイル | `.npz` |
 | `gen-output-dir` | ディレクトリ ＋ 新規フォルダ名 | — |
 
-ターゲットの拡張子一覧はフロントに書かない。`yoshidacomp.compensation.pipeline` の
-`SUPPORTED_TARGET_IMAGE_SUFFIXES` が唯一の出所で、`GET /api/browse` の応答か
-既存のビュー仕様経由で受け取る。ここに `.png,.jpg,...` と書くと同じ集合の
-2つ目の出所ができる。
+**拡張子はフロントに書かない。** `GET /api/browse/suffixes` を1つ足し、
+起動時に取得する。
+
+```json
+{"matrix": [".npy"], "target": [".png", ".jpg", ...], "lut": [".npz"]}
+```
+
+`target` の出所は `yoshidacomp.compensation.pipeline` の
+`SUPPORTED_TARGET_IMAGE_SUFFIXES` ひとつだけ。`.png,.jpg,...` をフロントに書くと
+同じ集合の2つ目の出所ができる。`matrix` と `lut` も同じ表に載せて、4欄すべての
+フィルタが1箇所から来るようにする。
 
 **構成**
 
@@ -206,7 +233,7 @@ GET /api/browse?path=<str>&suffixes=<.npy,.npz>
 - 404（存在しない）／400（ファイルを指した）／403（`PermissionError` を注入）
 - 打ち切り時に `total` が実数で `truncated` が `true` であること
 - ドライブ直下で `parent` が `null` であること
-- `Host: evil.example` が 403、`Host: localhost:8123` と `127.0.0.1:8123` が通ること
+- `Host: evil.example` が 400、`Host: localhost:8123` と `127.0.0.1:8123` が通ること
 
 **`tests/js/frontend_harness.mjs` に `picker` シナリオを追加**
 
