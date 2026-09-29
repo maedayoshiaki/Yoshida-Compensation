@@ -1,0 +1,27 @@
+[project]
+name = "gamut-solid-handoff"
+version = "0.1.0"
+description = "6^3 colour-lattice capture and measured-output-solid figure (extracted from Yoshida-Compensation)"
+requires-python = ">=3.13"
+dependencies = [
+    "yoshidacomp",
+    # plot_gamut_solid_3d.py / 解析スクリプト用
+    "matplotlib",
+]
+
+[project.optional-dependencies]
+# 実機撮影（Canon EDSDK + RAW現像）を行う場合のみ必要。
+# 解析・作図だけなら不要（uv sync だけでよい）。
+capture = [
+    "yoshidacomp[camera]",
+]
+
+[tool.uv.workspace]
+members = ["packages/core"]
+
+[tool.uv.sources]
+yoshidacomp = { workspace = true }
+
+# 元環境は torch を CUDA 12.8 index から入れていたが、このバンドルの
+# 2スクリプト（撮影・作図）は CPU torch で動く。GPU が必要なら元リポジトリの
+# pyproject.toml と同じ [[tool.uv.index]] pytorch-cu128 設定を足すこと。

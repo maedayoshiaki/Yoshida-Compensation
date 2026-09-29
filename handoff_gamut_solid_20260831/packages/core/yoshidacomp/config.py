@@ -1,0 +1,595 @@
+# coding: utf-8
+"""Centralized configuration loader for the Yoshida-Compensation project.
+
+Reads config.toml from the project root, provides typed dataclasses
+for each section, and falls back to hardcoded defaults when the file
+or individual fields are absent.
+
+Yoshida-Compensation プロジェクトの集中型設定ローダー。
+
+プロジェクトルートの config.toml を読み込み、各セクションに対応する
+型付きデータクラスを提供する。ファイルまたは個々のフィールドが存在しない
+場合はハードコードされたデフォルト値にフォールバックする。
+"""
+
+from __future__ import annotations
+
+import re
+import tomllib
+import warnings
+from dataclasses import asdict, dataclass, field
+from fractions import Fraction
+from math import isfinite
+from pathlib import Path
+from typing import Optional, Sequence
+
+# Project root: four levels up from packages/core/yoshidacomp/config.py
+_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_DEFAULT_CONFIG_PATH = _PROJECT_ROOT / "config.toml"
+
+
+# ── Section dataclasses ──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class ProjectorConfig:
+    """Configuration for the projector device.
+
+    Attributes:
+        gamma: Gamma correction value for the projector display.
+            プロジェクタディスプレイのガンマ補正値。
+        width: Projector display width in pixels.
+            プロジェクタの表示幅（ピクセル）。
+        height: Projector display height in pixels.
+            プロジェクタの表示高さ（ピクセル）。
+        pos_x: Horizontal position of the projector window on the desktop.
+            デスクトップ上のプロジェクタウィンドウの水平位置。
+        pos_y: Vertical position of the projector window on the desktop.
+            デスクトップ上のプロジェクタウィンドウの垂直位置。
+        refresh_rate: Projector refresh rate in Hz. Camera exposures are
+            snapped to integer multiples of this period (``1 / refresh_rate``)
+            so the shutter integrates whole refresh cycles and avoids
+            flicker/banding when photographing the projection. ``0`` (or
+            negative) disables the constraint.
+            プロジェクタのリフレッシュレート（Hz）。カメラ露光をこの周期
+            （``1 / refresh_rate``）の整数倍へスナップし、シャッターが
+            リフレッシュ周期の整数個を積分するようにして、投影撮影時の
+            フリッカー/バンディングを防ぐ。``0``（以下）で無効。
+        active_x, active_y, active_width, active_height: Rectangle that may
+            emit projector light. Non-positive width or height selects the
+            full projector frame.
+
+    プロジェクタデバイスの設定。
+    """
+
+    gamma: float = 2.2
+    width: int = 1920
+    height: int = 1080
+    pos_x: int = 5360
+    pos_y: int = 0
+    refresh_rate: float = 60.0
+    active_x: int = 0
+    active_y: int = 0
+    active_width: int = 0
+    active_height: int = 0
+
+
+@dataclass(frozen=True)
+class CameraConfig:
+    """Configuration for the camera device.
+
+    Attributes:
+        backend: Camera backend implementation name.
+            ``canon_edsdk`` or ``opencv``.
+            使用するカメラバックエンド実装名。
+        av: Aperture value (F-stop) as a string.
+            Used by ``canon_edsdk`` backend.
+            絞り値（F値）を文字列で指定。
+        tv: Shutter speed as a string (e.g., "1/15").
+            Used by ``canon_edsdk`` backend.
+            シャッタースピードを文字列で指定（例: "1/15"）。
+        iso: ISO sensitivity as a string.
+            Used by ``canon_edsdk`` backend.
+            ISO感度を文字列で指定。
+        image_quality: Image quality setting for the camera (e.g., "LR" for low-res RAW).
+            Used by ``canon_edsdk`` backend.
+            カメラの画質設定（例: "LR" は低解像度RAW）。
+        device_index: Camera index for OpenCV backend.
+            OpenCV バックエンドで使用するカメラインデックス。
+        wait_key_ms: Delay in milliseconds between projecting a pattern and capturing.
+            パターン投影からキャプチャまでの待機時間（ミリ秒）。
+        trigger_wait_key_ms: Short display-event wait after the first frame
+            in a Canon triggered batch. The synchronous EDSDK trigger supplies
+            the remaining projector-settle time while transferring RAW data.
+        hdr_enabled: Whether projection-pattern batches use exposure-bracket
+            HDR around ``tv``. GrayCode capture has its own path and is not
+            affected by this switch.
+        edsdk_dll_dir: Directory containing Canon ``EDSDK.dll`` and
+            ``EdsImage.dll``. It is exported as ``EDSDK_PYTHON_DLL_DIR``
+            before importing edsdk-python.
+        half_size: Compatibility field. Half-resolution RAW development is
+            prohibited by the Canon backend and this must remain ``False``.
+            Canon RAW を半解像度で現像（メモリ約1/4）。低RAM機で必須。ROI平均の
+            計測は不変だが、ROI座標は半解像度ピクセルで指定する必要がある。
+            ``canon_edsdk`` の ``capture_linear_rgb`` のみに影響。
+
+    カメラデバイスの設定。
+    """
+
+    backend: str = "canon_edsdk"
+    av: str = "8"
+    tv: str = "1/15"
+    iso: str = "400"
+    image_quality: str = "LR"
+    device_index: int = 0
+    wait_key_ms: int = 200
+    trigger_wait_key_ms: int = 300
+    hdr_enabled: bool = False
+    edsdk_dll_dir: str = ""
+    half_size: bool = False
+
+
+@dataclass(frozen=True)
+class PathsConfig:
+    """File path configuration for input/output directories.
+
+    Attributes:
+        c2p_map: Path to the camera-to-projector pixel correspondence map.
+            カメラ-プロジェクタ間のピクセル対応マップのパス。
+        p2c_map: Path to the projector-to-camera pixel correspondence map.
+            プロジェクタ-カメラ間のピクセル対応マップのパス。
+        warp_method: Correspondence direction used by sample scripts.
+            ``"c2p"`` または ``"p2c"`` を指定。
+        target_image_space: Coordinate system used by images in ``target_image_dir``.
+            ``"camera"`` または ``"projector"`` を指定。
+        rpcc_matrix: Path to the RPCC (Root-Polynomial Color Correction) matrix file.
+            RPCC（ルート多項式色補正）行列ファイルのパス。
+        target_image_dir: Directory containing target images for compensation.
+            補償対象の目標画像を格納するディレクトリ。
+        linear_pattern_dir: Directory for storing linear projection patterns.
+            リニア投影パターンを保存するディレクトリ。
+        inv_gamma_pattern_dir: Directory for storing inverse gamma corrected patterns.
+            逆ガンマ補正済みパターンを保存するディレクトリ。
+        captured_image_dir: Directory for storing captured camera images.
+            カメラでキャプチャした画像を保存するディレクトリ。
+        compensation_image_dir: Directory for storing computed compensation images.
+            計算された補償画像を保存するディレクトリ。
+        inv_gamma_comp_dir: Directory for storing inverse gamma corrected compensation images.
+            逆ガンマ補正済み補償画像を保存するディレクトリ。
+
+    入出力ディレクトリのファイルパス設定。
+    """
+
+    c2p_map: str = ""
+    p2c_map: str = ""
+    warp_method: str = "p2c"
+    target_image_space: str = "projector"
+    rpcc_matrix: str = ""
+    target_image_dir: str = "data/target_images"
+    linear_pattern_dir: str = "data/linear_proj_patterns"
+    inv_gamma_pattern_dir: str = "data/inv_gamma_proj_patterns"
+    captured_image_dir: str = "data/captured_images"
+    compensation_image_dir: str = "data/compensation_images"
+    inv_gamma_comp_dir: str = "data/inv_gamma_comp_images"
+
+
+@dataclass(frozen=True)
+class CompensationConfig:
+    """Configuration for photometric compensation parameters.
+
+    Attributes:
+        num_divisions: Number of discrete intensity levels per color channel
+            for generating projection patterns. Total patterns = num_divisions^3.
+            投影パターン生成時の各色チャネルの離散強度レベル数。
+            総パターン数 = num_divisions^3。
+        safety_margin: Fraction of available memory to use for batch processing
+            (0.0 to 1.0).
+            バッチ処理に使用する利用可能メモリの割合（0.0〜1.0）。
+        min_batch_size: Minimum number of pixels to process per batch.
+            バッチあたりの最小処理ピクセル数。
+        use_gpu: Whether to use GPU acceleration for matrix computations.
+            行列計算にGPUアクセラレーションを使用するかどうか。
+
+    色補償パラメータの設定。
+    """
+
+    num_divisions: int = 3
+    safety_margin: float = 0.5
+    min_batch_size: int = 256
+    use_gpu: bool = False
+
+
+@dataclass(frozen=True)
+class InverseLutConfig:
+    """Configuration for the measured inverse LUT (projector linearization).
+
+    Attributes:
+        num_levels: Number of gradation points per ramp (gray and per-channel).
+            各ランプ（グレー / 単独チャンネル）の階調数。
+        source: Sampling method used for both capture and curve building.
+            One of "channel_ramp" (per-channel ramps) or "gray" (gray ramp).
+            Exactly one method is used; the two are never mixed.
+            撮影と曲線構築の双方に使うサンプリング系統。"channel_ramp"
+            （各チャンネル単独ランプ）または "gray"（グレーランプ）の一方のみ。
+            両系統を混在させない。
+        lut_resolution: Number of entries in the dense [0,1] inverse LUT.
+            密な [0,1] 逆LUTのエントリ数。
+        roi_x: Left edge (x) of the measurement ROI in pixels.
+            計測 ROI の左端 x（ピクセル）。
+        roi_y: Top edge (y) of the measurement ROI in pixels.
+            計測 ROI の上端 y（ピクセル）。
+        roi_width: Width of the measurement ROI in pixels. ``0`` (or any
+            non-positive value) averages the whole captured frame.
+            計測 ROI の幅（ピクセル）。``0``（以下）なら全フレームを平均。
+        roi_height: Height of the measurement ROI in pixels. ``0`` (or any
+            non-positive value) averages the whole captured frame.
+            計測 ROI の高さ（ピクセル）。``0``（以下）なら全フレームを平均。
+        trust_low: Lower trustworthy bound as an 8-bit pixel value (0-255).
+            Values at or below are treated as unreliable/crushed.
+            信頼下限（8bit画素値 0〜255）。以下は非信頼/黒潰れ扱い。
+        trust_high: Upper trustworthy bound as an 8-bit pixel value (0-255).
+            Values at or above are treated as unreliable/saturated.
+            信頼上限（8bit画素値 0〜255）。以上は非信頼/サチュ扱い。
+        hdr_enabled: Whether to use the simple HDR bracket capture.
+            簡易HDRブラケット撮影を使うか。
+        hdr_max_stops: Max exposure stops to bracket in each direction.
+            各方向にブラケットする最大露光段数。
+        inverse_lut_path: Output path for the saved inverse LUT (.npz).
+            保存する逆LUT（.npz）の出力先パス。
+
+    測定ベース逆LUT（プロジェクタ線形化）の設定。
+    """
+
+    num_levels: int = 17
+    source: str = "channel_ramp"
+    lut_resolution: int = 256
+    roi_x: int = 0
+    roi_y: int = 0
+    roi_width: int = 0
+    roi_height: int = 0
+    trust_low: float = 10.0
+    trust_high: float = 245.0
+    hdr_enabled: bool = False
+    hdr_max_stops: int = 3
+    inverse_lut_path: str = "data/inverse_lut.npz"
+
+
+# ── Top-level config container ───────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class AppConfig:
+    """Top-level application configuration container.
+
+    Aggregates all section-specific configurations into a single
+    immutable object.
+
+    Attributes:
+        projector: Projector device settings.
+            プロジェクタデバイスの設定。
+        camera: Camera device settings.
+            カメラデバイスの設定。
+        paths: Input/output file path settings.
+            入出力ファイルパスの設定。
+        compensation: Photometric compensation parameters.
+            色補償パラメータ。
+
+    アプリケーション全体の設定コンテナ。
+
+    セクションごとの設定を単一の不変オブジェクトに集約する。
+    """
+
+    projector: ProjectorConfig = field(default_factory=ProjectorConfig)
+    camera: CameraConfig = field(default_factory=CameraConfig)
+    paths: PathsConfig = field(default_factory=PathsConfig)
+    compensation: CompensationConfig = field(default_factory=CompensationConfig)
+    inverse_lut: InverseLutConfig = field(default_factory=InverseLutConfig)
+
+
+# ── Loading logic ────────────────────────────────────────────────────
+
+_FRACTION_RE = re.compile(r"^\s*(-?\d+(?:\.\d+)?)\s*/\s*(-?\d+(?:\.\d+)?)\s*$")
+
+
+def _parse_number(value: object) -> object:
+    """Convert a fraction string (e.g., "1/15") to a float.
+
+    Integer and float values are returned as-is. Non-fraction strings
+    are also returned unchanged.
+
+    文字列の分数表記（例: "1/15"）を float に変換する。
+
+    int や float はそのまま返す。分数表記でない文字列もそのまま返す。
+
+    Args:
+        value: The value to parse. Can be a string, int, or float.
+            パースする値。文字列、int、または float。
+
+    Returns:
+        The parsed numeric value, or the original value if no conversion
+        is applicable.
+        パースされた数値、または変換が適用されない場合は元の値。
+    """
+    if isinstance(value, str):
+        m = _FRACTION_RE.match(value)
+        if m:
+            return float(Fraction(m.group(1)) / Fraction(m.group(2)))
+    return value
+
+
+def _build_section(cls: type, data: dict, key: str):
+    """Build a dataclass instance from a TOML sub-dictionary, ignoring unknown keys.
+
+    TOML サブ辞書からデータクラスインスタンスを構築する。
+    未知のキーは無視される。
+
+    Args:
+        cls: The dataclass type to instantiate.
+            インスタンス化するデータクラス型。
+        data: The full TOML dictionary.
+            TOML 辞書全体。
+        key: The section key to extract from *data*.
+            *data* から抽出するセクションキー。
+
+    Returns:
+        An instance of *cls* populated with values from the TOML section.
+        TOML セクションの値で生成された *cls* のインスタンス。
+    """
+    section = data.get(key, {})
+    field_types = {f.name: f.type for f in cls.__dataclass_fields__.values()}
+    filtered = {}
+    for k, v in section.items():
+        if k not in field_types:
+            continue
+        # str 型フィールドには分数パースを適用しない
+        if field_types[k] == "str" or field_types[k] is str:
+            filtered[k] = v
+        else:
+            filtered[k] = _parse_number(v)
+    return cls(**filtered)
+
+
+def load_config(config_path: Optional[Path] = None) -> AppConfig:
+    """Load configuration from a TOML file.
+
+    Falls back to compiled-in defaults if the file does not exist
+    or if individual fields are absent.
+
+    When *config_path* is omitted and the default ``config.toml`` cannot be
+    found, a :class:`RuntimeWarning` is emitted naming the path that was
+    searched. That fallback is silent otherwise, and every returned value
+    would be a compiled-in default rather than the project's tuning.
+    ``_PROJECT_ROOT`` is derived from this file's location, which is correct
+    for the editable workspace layout but points inside the virtualenv when
+    ``yoshidacomp`` is installed as a wheel -- exactly the case the warning
+    is meant to surface. An explicitly passed *config_path* is the caller's
+    responsibility and stays silent.
+
+    TOML ファイルから設定を読み込む。
+
+    ファイルが存在しない場合、または個々のフィールドが欠落している場合は
+    コンパイル済みデフォルト値にフォールバックする。
+
+    *config_path* を省略し、既定の ``config.toml`` が見つからない場合は
+    探索したパスを明示した :class:`RuntimeWarning` を出す。この
+    フォールバックは本来無警告で、返る値がすべてコンパイル済み既定値に
+    なってもプロジェクトの調整値との区別が付かないため。``_PROJECT_ROOT``
+    はこのファイルの位置から導出しており、editable なワークスペース配置
+    では正しいが、``yoshidacomp`` を wheel としてインストールした場合は
+    仮想環境内を指す（警告が可視化したいのはまさにこのケース）。
+    *config_path* を明示した場合は呼び出し側の責任として警告しない。
+
+    Args:
+        config_path: Path to the TOML configuration file. Defaults to
+            ``config.toml`` in the project root.
+            TOML 設定ファイルのパス。デフォルトはプロジェクトルートの
+            ``config.toml``。
+
+    Returns:
+        A fully populated :class:`AppConfig` instance.
+        完全に設定された :class:`AppConfig` インスタンス。
+    """
+    used_default_path = config_path is None
+    if config_path is None:
+        config_path = _DEFAULT_CONFIG_PATH
+
+    if not config_path.exists():
+        if used_default_path:
+            warnings.warn(
+                f"yoshidacomp.config: default config file not found at "
+                f"'{config_path}'; every value falls back to a compiled-in "
+                f"default. The search root is '{_PROJECT_ROOT}', derived from "
+                f"the location of '{__file__}'. Pass an explicit config_path "
+                f"to silence this.",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+        return AppConfig()
+
+    with open(config_path, "rb") as f:
+        data = dict(tomllib.load(f))
+
+    return AppConfig(
+        projector=_build_section(ProjectorConfig, data, "projector"),
+        camera=_build_section(CameraConfig, data, "camera"),
+        paths=_build_section(PathsConfig, data, "paths"),
+        compensation=_build_section(CompensationConfig, data, "compensation"),
+        inverse_lut=_build_section(InverseLutConfig, data, "inverse_lut"),
+    )
+
+
+def _format_toml_value(value: object) -> str:
+    """Format a Python value as an inline TOML literal.
+
+    Python の値を TOML リテラル文字列に整形する。
+    """
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if not isfinite(value):
+            raise ValueError("TOML does not support NaN or Infinity.")
+        return repr(value)
+    if isinstance(value, str):
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    raise TypeError(f"Unsupported TOML value type: {type(value)!r}")
+
+
+def _serialize_config_toml(config: AppConfig) -> str:
+    """Serialize :class:`AppConfig` to TOML text.
+
+    :class:`AppConfig` を TOML テキストへシリアライズする。
+    """
+    sections = [
+        ("projector", asdict(config.projector)),
+        ("camera", asdict(config.camera)),
+        ("paths", asdict(config.paths)),
+        ("compensation", asdict(config.compensation)),
+        ("inverse_lut", asdict(config.inverse_lut)),
+    ]
+
+    lines: list[str] = []
+    for section_name, section_values in sections:
+        lines.append(f"[{section_name}]")
+        for key, value in section_values.items():
+            lines.append(f"{key} = {_format_toml_value(value)}")
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def generate_config_file(
+    config_path: Optional[Path] = None,
+    config: Optional[AppConfig] = None,
+    overwrite: bool = False,
+) -> Path:
+    """Generate a TOML config file from an :class:`AppConfig`.
+
+    ``config`` が未指定の場合はデフォルト設定で ``config.toml`` を生成する。
+    既存ファイルに上書きするには ``overwrite=True`` を指定する。
+
+    Args:
+        config_path: Output TOML path. Defaults to project-root ``config.toml``.
+            出力先 TOML パス。デフォルトはプロジェクトルートの ``config.toml``。
+        config: Source configuration object. Defaults to :class:`AppConfig`.
+            出力元設定オブジェクト。デフォルトは :class:`AppConfig`。
+        overwrite: Whether to overwrite when the file already exists.
+            既存ファイルがある場合に上書きするか。
+
+    Returns:
+        The path to the generated TOML file.
+        生成された TOML ファイルのパス。
+
+    Raises:
+        FileExistsError: If target file exists and ``overwrite`` is ``False``.
+            出力先ファイルが存在し ``overwrite=False`` の場合。
+    """
+    if config_path is None:
+        config_path = _DEFAULT_CONFIG_PATH
+    if config is None:
+        config = AppConfig()
+
+    if config_path.exists() and not overwrite:
+        raise FileExistsError(
+            f"Config file already exists: {config_path}. "
+            "Set overwrite=True to replace it."
+        )
+
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(_serialize_config_toml(config), encoding="utf-8")
+    return config_path
+
+
+# ── Module-level singleton ───────────────────────────────────────────
+
+_config: Optional[AppConfig] = None
+
+
+def get_config(config_path: Optional[Path] = None) -> AppConfig:
+    """Return the cached AppConfig, loading it on first call.
+
+    キャッシュされた AppConfig を返す。初回呼び出し時に読み込みを行う。
+
+    Args:
+        config_path: Optional path to the TOML file. Only used on
+            the first call when the config is not yet loaded.
+            オプションの TOML ファイルパス。設定がまだ読み込まれていない
+            初回呼び出し時のみ使用される。
+
+    Returns:
+        The singleton :class:`AppConfig` instance.
+        シングルトンの :class:`AppConfig` インスタンス。
+    """
+    global _config
+    if _config is None:
+        _config = load_config(config_path)
+    return _config
+
+
+def reload_config(config_path: Optional[Path] = None) -> AppConfig:
+    """Force-reload configuration (useful for tests).
+
+    設定を強制的に再読み込みする（テスト時に便利）。
+
+    Args:
+        config_path: Optional path to the TOML file.
+            オプションの TOML ファイルパス。
+
+    Returns:
+        The newly loaded :class:`AppConfig` instance.
+        新しく読み込まれた :class:`AppConfig` インスタンス。
+    """
+    global _config
+    _config = load_config(config_path)
+    return _config
+
+
+def split_cli_config_path(argv: Sequence[str]) -> tuple[list[str], Optional[Path]]:
+    """Split optional ``--config`` / ``-c`` from CLI arguments.
+
+    Returns the cleaned argv and the selected config path.
+
+    CLI 引数からオプションの ``--config`` / ``-c`` を分離する。
+
+    戻り値は、設定オプションを除いた argv と設定ファイルパス。
+
+    Args:
+        argv: Raw CLI argument sequence (typically ``sys.argv``).
+            生の CLI 引数列（通常は ``sys.argv``）。
+
+    Returns:
+        Tuple of ``(cleaned_argv, config_path_or_none)``.
+            ``(整形後 argv, 設定パスまたは None)`` のタプル。
+
+    Raises:
+        ValueError: If config option is provided without a path.
+            設定オプションにパスが指定されていない場合。
+    """
+    cleaned: list[str] = []
+    config_path: Optional[Path] = None
+
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+
+        if arg in ("--config", "-c"):
+            if i + 1 >= len(argv):
+                raise ValueError("`--config` requires a file path.")
+            config_path = Path(argv[i + 1])
+            i += 2
+            continue
+
+        if arg.startswith("--config="):
+            value = arg.split("=", 1)[1]
+            if value == "":
+                raise ValueError("`--config` requires a file path.")
+            config_path = Path(value)
+            i += 1
+            continue
+
+        cleaned.append(arg)
+        i += 1
+
+    return cleaned, config_path

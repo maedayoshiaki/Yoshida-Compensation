@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yoshidacomp"
+version = "0.1.0"
+description = "Projector-camera photometric compensation core"
+requires-python = ">=3.13"
+dependencies = [
+    "numpy>=2.3.4",
+    "opencv-contrib-python>=4.11.0.86",
+    "pillow>=12.0.0",
+    "psutil>=7.0.0",
+    "scipy>=1.16.3",
+    "torch>=2.9.1",
+]
+
+[project.optional-dependencies]
+camera = [
+    "rawpy",
+    "edsdk-python @ https://github.com/youme-town/edsdk-python/releases/download/v0.2.0/edsdk_python-0.2.0-cp313-cp313-win_amd64.whl ; sys_platform == 'win32' and python_version == '3.13'",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["yoshidacomp*"]
