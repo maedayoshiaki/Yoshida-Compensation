@@ -196,11 +196,16 @@ def apply_inverse_gamma_correction(
     corrected_image = torch.pow(_image, gamma)
     corrected_image = torch.clamp(corrected_image, 0.0, 1.0)
 
-    # Convert back to original dtype
+    # Convert back to original dtype, rounding half-up. A bare ``.to()``
+    # cast truncates toward zero and biases every code down by up to 1
+    # count (2026-08-06 fix; kept byte-identical to the numpy version in
+    # pipeline._apply_inverse_gamma_numpy, which rounds the same way).
     if image_dtype == np.uint8 or image_dtype == torch.uint8:
-        corrected_image = (corrected_image * 255).to(torch.uint8)
+        corrected_image = torch.floor(corrected_image * 255.0 + 0.5).to(torch.uint8)
     elif image_dtype == np.uint16 or image_dtype == torch.uint16:
-        corrected_image = (corrected_image * 65535).to(torch.uint16)
+        corrected_image = torch.floor(corrected_image * 65535.0 + 0.5).to(
+            torch.uint16
+        )
 
     # Convert back to numpy if input was numpy
     if is_numpy:

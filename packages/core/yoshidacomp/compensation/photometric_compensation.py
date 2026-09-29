@@ -185,3 +185,50 @@ def calc_compensation_image(
         compensation_image = compensation_image.astype(dtype)
 
     return compensation_image
+
+
+def quantize_unit_image(
+    image: ndarray,
+    dtype: np.typing.DTypeLike,
+) -> ndarray:
+    """Quantize a [0, 1] float image to *dtype* in one rounding step.
+
+    The single, final quantization of the projection pipeline: linear
+    compensation values are kept in float through the linearizer (inverse
+    gamma or inverse LUT) and converted to integer code values exactly
+    once, here, with ``floor(x * scale + 0.5)`` — the same rounding
+    :func:`calc_compensation_image` uses. Quantizing earlier (in linear
+    space, before the linearizer) makes dark projector codes unreachable:
+    linear 1/255 maps to code ~21 under a 1/2.2 inverse gamma, so codes
+    1-19 could never be emitted.
+
+    投影パイプラインの最終量子化。線形補償値は線形化(逆ガンマ・逆LUT)
+    まで float のまま保ち、整数コード値への変換はここで 1 回だけ
+    ``floor(x * scale + 0.5)`` で行う(:func:`calc_compensation_image`
+    と同じ丸め)。線形化より前のリニア空間で量子化すると、リニア 1/255 が
+    逆ガンマ 1/2.2 でコード約 21 に写るため、コード 1〜19 が到達不能に
+    なり暗部が潰れる。
+
+    Args:
+        image: Image with values in [0, 1]. Values outside are clipped
+            before scaling (integer *dtype* only).
+            値域 [0, 1] の画像。範囲外は(整数 *dtype* のときのみ)
+            スケーリング前にクリップされる。
+        dtype: ``np.uint8`` scales by 255, ``np.uint16`` by 65535; any
+            float dtype is a plain cast with no clip and no rounding.
+            ``np.uint8`` は 255 倍、``np.uint16`` は 65535 倍。float は
+            クリップも丸めもせず型変換のみ。
+
+    Returns:
+        Array of the requested *dtype* with the same shape as *image*.
+        *image* と同形状で要求 *dtype* の配列。
+    """
+    array = np.asarray(image, dtype=np.float32)
+    out_dtype = np.dtype(dtype)
+    if out_dtype == np.uint8:
+        scale = 255.0
+    elif out_dtype == np.uint16:
+        scale = 65535.0
+    else:
+        return array.astype(out_dtype)
+    return np.floor(np.clip(array, 0.0, 1.0) * scale + 0.5).astype(out_dtype)

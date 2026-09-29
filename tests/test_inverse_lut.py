@@ -380,8 +380,10 @@ def test_capture_hdr_linear_uses_actual_exposure_ratio():
 
 def test_capture_hdr_linear_channels_restricts_bracketing():
     # 単独チャンネル(青)相当: R,G は常時 ~0(黒潰れ), B は中間(問題なし)。
+    # B=0.3 は ×2 でも 0.6 < trust_high なので、飽和予測ガードには
+    # かからない（このテストは channels ゲートの効果だけを見る）。
     def _blue_only(scale):
-        return np.array([[[0.0, 0.0, 0.5]]], dtype=np.float32)
+        return np.array([[[0.0, 0.0, 0.3]]], dtype=np.float32)
 
     # channels=(2,) なら 暗い R/G は無視され、B が正常なのでブラケットしない。
     calls = {"n": 0}
@@ -395,9 +397,9 @@ def test_capture_hdr_linear_channels_restricts_bracketing():
         max_stops=3, channels=(2,),
     )
     assert calls["n"] == 1  # 基準撮影のみ、無駄な長露光なし
-    assert np.isclose(out[0, 0, 2], 0.5)
+    assert np.isclose(out[0, 0, 2], 0.3)
 
-    # channels 未指定(全ch)だと、常時暗の R/G が黒潰れループを毎回誘発する。
+    # channels 未指定(全ch)だと、常時暗の R/G が黒潰れループを誘発する。
     calls_all = {"n": 0}
 
     def capture_at_all(scale):
@@ -427,19 +429,85 @@ def test_capture_hdr_linear_per_channel_best_exposure():
     assert abs(out[0, 0, 2] - 0.01) < 0.004  # B: 最長の非飽和露光から(高SNR)
 
 
-def test_capture_hdr_linear_prefers_longest_unsaturated():
-    # B が暗い場合、low を最初に超えた露光ではなく、飽和しない範囲で最長の
-    # 露光(最高SNR)を選ぶこと。
-    true = np.array([[[0.5, 0.5, 0.01]]], dtype=np.float32)
+def test_capture_hdr_linear_saturated_long_exposure_must_not_corrupt_bright():
+    """飽和した長露光の現像値が trust_high をすり抜けても明chを壊さない。
+
+    2026-08-12 の色グリッド実測で顕在化した事故の再現: 単色 R255
+    （R=0.4, G=B≈0.0004）で暗い G/B が黒潰れ判定→長露光ブラケット
+    ×2/×4/×8 が走る。×4 以降 R はセンサ飽和するが、現像値は 1.0 に
+    張り付かず 0.7 程度に落ちて飽和判定 (< 0.96) をすり抜ける。
+    旧マージ（各フレーム自身の値で書き込み先を判定）はこの 0.7 を採用して
+    R = 0.7/8 ≈ 0.087 に崩壊させた。基準露光アンカーの新マージでは
+    R は基準値 0.4 のまま、G/B は長露光から回復される。
+
+    落ちる誤実装: 書き込み先をフレーム自身の値 (< trust_high) だけで
+    決める（旧実装に戻すと R が 0.087 になり落ちる）。
+    """
+    base_r, dark = 0.4, 0.004
+    saturated_developed = 0.7  # センサ飽和後の現像値（< trust_high=0.96）
 
     def capture_at(scale):
-        return np.clip(true * scale, 0.0, 1.0).astype(np.float32)
+        if scale == 1.0:
+            values = [base_r, dark, dark]
+        else:
+            grown = base_r * scale
+            values = [
+                grown if grown < 0.96 else saturated_developed,
+                dark * scale,
+                dark * scale,
+            ]
+        return np.array([[values]], dtype=np.float32)
 
     out = ilut.capture_hdr_linear(
-        capture_at, enabled=True, trust_low=10, trust_high=245,
-        max_stops=3, channels=(2,),
+        capture_at, enabled=True, trust_low=10, trust_high=245, max_stops=3
     )
-    assert abs(out[0, 0, 2] - 0.01) < 0.003
+    assert abs(out[0, 0, 0] - base_r) < 1e-6   # 基準値のまま（旧実装は 0.0875）
+    assert abs(out[0, 0, 1] - dark) < 1e-6     # 暗chは長露光から回復
+    assert abs(out[0, 0, 2] - dark) < 1e-6
+
+
+def test_capture_hdr_linear_prefers_longest_unsaturated():
+    # 全チャンネルが暗い場合、low を最初に超えた露光ではなく、飽和しない
+    # 範囲で最長の露光(最高SNR)を選ぶこと。読み出しノイズ相当の加法offset
+    # を混ぜ、露光が長いほど回復値が真値に近づく合成カメラで、最長露光が
+    # 選ばれたことを回復精度から判定する。
+    true = np.array([[[0.01, 0.01, 0.01]]], dtype=np.float32)
+    offset = 0.004  # 露光に依らない加法ノイズ; 回復後は offset/ratio
+
+    def capture_at(scale):
+        return np.clip(true * scale + offset, 0.0, 1.0).astype(np.float32)
+
+    out = ilut.capture_hdr_linear(
+        capture_at, enabled=True, trust_low=10, trust_high=245, max_stops=3,
+    )
+    # 掃引は ×4 (値 0.044 > low) で止まる。×4 から回復していれば誤差は
+    # offset/4 = 0.001、×2 を選ぶ誤実装なら 0.002 になり落ちる。
+    assert abs(out[0, 0, 2] - 0.01) < 0.0015
+
+
+def test_capture_hdr_linear_stops_lengthening_before_predicted_clip():
+    """明chが飽和すると予測されるスケールでは長露光を撮らない。
+
+    飽和チャンネルは現像色行列で他chに混入するため、フレームごと使えない
+    （2026-08-12 実測: R255 の ×8 露光で G 0.0005→0.03）。基準 R=0.4 なら
+    ×2 (0.8 < 0.96) までで打ち切り、×4/×8 は撮影しないこと。
+
+    落ちる誤実装: ガード無しで max_stops まで撮る（撮影回数 5 になる）。
+    """
+    base = np.array([[[0.4, 0.004, 0.004]]], dtype=np.float32)
+    scales = []
+
+    def capture_at(scale):
+        scales.append(scale)
+        grown = np.clip(base * scale, 0.0, 1.0)
+        return grown.astype(np.float32)
+
+    out = ilut.capture_hdr_linear(
+        capture_at, enabled=True, trust_low=10, trust_high=245, max_stops=3
+    )
+    assert scales == [1.0, 2.0]  # 基準 + ×2 のみ（×4 は 1.6 ≥ 0.96 予測で中止）
+    assert abs(out[0, 0, 0] - 0.4) < 1e-6
+    assert abs(out[0, 0, 1] - 0.004) < 1e-6  # ×2 のクリーンなフレームから回復
 
 
 def test_tv_to_seconds_parses_canon_formats():

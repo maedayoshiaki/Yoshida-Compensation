@@ -64,7 +64,8 @@ def test_capture_linear_rgb_converts_jpeg_output_to_linear(monkeypatch) -> None:
 
     class FakeController:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            captured["controller_args"] = args
+            captured["controller_kwargs"] = kwargs
 
         def __enter__(self):
             return self
@@ -90,6 +91,11 @@ def test_capture_linear_rgb_converts_jpeg_output_to_linear(monkeypatch) -> None:
     )
     linear_rgb = camera.capture_linear_rgb()
 
+    assert captured["controller_args"] == ()
+    assert captured["controller_kwargs"] == {
+        "register_property_events": False,
+        "protected": True,
+    }
     assert captured["properties"] == {
         "av": "5",
         "tv": "1/15",

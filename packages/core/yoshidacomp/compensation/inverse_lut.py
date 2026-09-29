@@ -15,6 +15,7 @@ correction; it is channel-independent and global (not per-pixel).
 
 from __future__ import annotations
 
+import gc
 import json
 import sys
 import time
@@ -614,24 +615,52 @@ def _frame_and_ratio(ret, nominal_scale: float) -> Tuple[np.ndarray, float]:
 def _merge_hdr_exposures(
     exposures: Sequence[Tuple[np.ndarray, float]],
     *,
+    trust_low: float,
     trust_high: float,
 ) -> np.ndarray:
-    """Merge already captured exposures using the HDR selection policy."""
+    """Merge already captured exposures using the HDR selection policy.
+
+    The write TARGET is decided from the BASE exposure, never from the
+    bracketed frame's own value:
+
+    - cells inside the trust band ``[low, high)`` at base keep the base value,
+    - only base-dark cells (``<= low``) are recovered from longer exposures
+      (they cannot saturate there: ``low * 2^max_stops < high``),
+    - only base-saturated cells (``>= high``) are recovered from shorter
+      exposures (falling back to the shortest one if every frame saturates).
+
+    2026-08-12: 以前は「そのフレームで飽和していないセル」を露光比の大きい
+    フレームで上書きしていたが、センサ飽和した長露光の現像値が 1.0 に
+    張り付かず trust_high を下回ってすり抜け、÷露光比で明チャンネルが
+    崩壊する（例: 単色 R255 が 0.7/8 ≈ 0.087 と記録される）。sample.py の
+    2026-08-07 の修正と同じく、書き込み先を基準露光で判定して飽和判定への
+    依存を断つ。中間帯のセルが長露光の SNR を得られなくなる代償は受け入れる
+    （sample.py の HDR マージと同じ意味論に揃える）。
+    """
     if not exposures:
         raise ValueError("At least one exposure is required for HDR merge.")
 
+    low = float(trust_low) / 255.0
     high = float(trust_high) / 255.0
     base = np.asarray(exposures[0][0], dtype=np.float32)
+    base_dark = base <= low
+    base_saturated = base >= high
     result = base.copy()
     chosen = np.zeros(base.shape, dtype=np.float32)
-    for frame, ratio in sorted(exposures, key=lambda item: -item[1]):
+    for frame, ratio in sorted(exposures[1:], key=lambda item: -item[1]):
         frame = np.asarray(frame, dtype=np.float32)
-        take = (frame < high) & (ratio > chosen)
+        if ratio > 1.0:
+            take = base_dark & (frame < high) & (ratio > chosen)
+        elif ratio < 1.0:
+            take = base_saturated & (frame < high) & (chosen == 0.0)
+        else:
+            continue
         result = np.where(take, frame / ratio, result)
         chosen = np.where(take, np.float32(ratio), chosen)
     shortest_frame, shortest_ratio = min(exposures, key=lambda item: item[1])
+    unrecovered = base_saturated & (chosen == 0.0)
     result = np.where(
-        chosen == 0.0,
+        unrecovered,
         np.asarray(shortest_frame, dtype=np.float32) / shortest_ratio,
         result,
     )
@@ -654,21 +683,22 @@ def capture_hdr_linear(
     With ``enabled=False`` this simply returns the base exposure
     ``capture_at_fn(1.0)``. With ``enabled=True`` it brackets exposures
     (shorten while any gated channel saturates, lengthen while any is
-    crushed) and then merges **independently per channel**: for each channel
-    (and pixel) it picks the longest exposure whose own value is not
-    saturated (< ``trust_high``) -- the highest-SNR trustworthy sample -- and
-    rescales it to base-exposure units by ``1/ratio``. Each channel judges
-    its own saturation/crush, so a bright channel is never held back by a
-    dark one; values may exceed 1.0 (dynamic range beyond the base clip).
+    crushed) and then merges **independently per channel**, anchored on the
+    base exposure: cells inside the trust band keep the base value, cells
+    dark at base (``<= trust_low``) are recovered from the longest
+    trustworthy long exposure, and cells saturated at base
+    (``>= trust_high``) are recovered from a shorter exposure. Each channel
+    judges its own state, so a bright channel is never held back by a dark
+    one; values may exceed 1.0 (dynamic range beyond the base clip).
 
     ``enabled=False`` では基準露光 ``capture_at_fn(1.0)`` をそのまま返す。
     ``enabled=True`` では露光をブラケット（対象chのいずれかがサチる間は短く、
-    いずれかが黒潰れの間は長く）してから、**チャンネルごとに独立**にマージする:
-    各チャンネル（各画素）について、自分の値が飽和しない (< ``trust_high``)
-    範囲で最も長い露光＝最高SNRの信頼サンプルを選び、``1/ratio`` 倍して基準
-    露光単位に戻す。各chが自分の飽和/黒潰れを判定するので、明るいchが暗いchに
-    引きずられない。値は 1.0 を超え得る（基準クリップを超えるダイナミックレンジを
-    拡張する（値は 1.0 を超え得る）。
+    いずれかが黒潰れの間は長く）してから、**基準露光を基点にチャンネル独立**で
+    マージする: 信頼帯内のセルは基準値のまま、基準で暗い (``<= trust_low``)
+    セルだけ長露光から、基準で飽和 (``>= trust_high``) したセルだけ短露光から
+    回復する（詳細と理由は :func:`_merge_hdr_exposures`）。各chが自分の状態を
+    判定するので、明るいchが暗いchに引きずられない。値は 1.0 を超え得る
+    （基準クリップを超えるダイナミックレンジを拡張する）。
 
     Recovery divides each bracketed frame by its *actual* exposure ratio
     (see :func:`_frame_and_ratio`), not the nominal ``scale``, so discrete
@@ -740,21 +770,31 @@ def capture_hdr_linear(
         exposures.append((raw, ratio))
     raw = base
     scale = 1.0
+    # ANY channel (gated or not) predicted to saturate poisons the whole
+    # frame: the RAW development's colour matrix mixes the clipped channel
+    # into the others, so even the dark channels of that frame read wrong
+    # (2026-08-12 実測: 単色 R255 の ×8 露光で G が 0.0005 → 0.03 に化けた)。
+    # Stop lengthening BEFORE the brightest channel is predicted (linearly
+    # from the base exposure) to clip; the crushed channels then recover from
+    # the longest clean frame only.
+    base_peak = float(np.max(base)) if base.size else 0.0
     for _ in range(int(max_stops)):
         if not np.any((raw <= low) & channel_gate):
+            break
+        if base_peak * (scale * 2.0) >= high:
             break
         scale *= 2.0
         frame, ratio = _frame_and_ratio(capture_at_fn(scale), scale)
         raw = np.asarray(frame, dtype=np.float32)
         exposures.append((raw, ratio))
 
-    # Per-channel merge: for EACH channel (and pixel) INDEPENDENTLY, choose the
-    # longest exposure whose own value is not saturated (< trust_high) -- that
-    # gives the highest SNR -- and convert it to base-exposure units. Each
-    # channel decides its own saturation/crush from its own value; a bright
-    # channel is not held back by a dark one and vice versa. Elements saturated
-    # in every exposure fall back to the shortest one.
-    return _merge_hdr_exposures(exposures, trust_high=trust_high)
+    # Per-channel merge anchored on the BASE exposure: base-dark cells are
+    # recovered from longer exposures, base-saturated cells from shorter ones,
+    # everything else keeps the base value. See _merge_hdr_exposures for why
+    # the bracketed frame's own value must not decide the write target.
+    return _merge_hdr_exposures(
+        exposures, trust_low=trust_low, trust_high=trust_high
+    )
 
 
 def _query_supported_shutter_speeds(camera_backend: Any) -> Optional[List[str]]:
@@ -1137,12 +1177,35 @@ def run_calibration_capture(
                     prepared[_sample_key(sample)] = _prepare_frame(
                         sample, frame, tv_label, ratio
                     )
+                    # The developed frame is full-resolution (~390 MB).
+                    # Release it before the next RAW is developed; otherwise
+                    # the loop can keep two large arrays alive and eventually
+                    # terminate the native RAW decoder.
+                    del frame
+                    gc.collect()
                 development_seconds = time.perf_counter() - development_started
                 print(
                     f"inverse_lut: RAW development complete in "
                     f"{development_seconds:.2f}s.",
                     file=sys.stderr,
                 )
+            return prepared
+
+        # Full-resolution Canon RAW batches can terminate the RAW developer
+        # when too many files are held in one EDSDK spool.  Keep the capture
+        # order and exposure unchanged, but develop small triggered batches
+        # before acquiring the next chunk.
+        calibration_chunk_size = 4
+
+        def capture_chunked(
+            pass_samples: Sequence[CalibrationSample],
+            tv_label: str,
+            ratio: float,
+        ) -> dict[Tuple[float, float, float], np.ndarray]:
+            prepared: dict[Tuple[float, float, float], np.ndarray] = {}
+            for start in range(0, len(pass_samples), calibration_chunk_size):
+                chunk = pass_samples[start : start + calibration_chunk_size]
+                prepared.update(capture_pass(chunk, tv_label, ratio))
             return prepared
 
         base_frames = capture_pass(unique, base_tv, 1.0)
@@ -1206,9 +1269,19 @@ def run_calibration_capture(
             ]
             used_long_tvs = {base_tv}
             for stop in range(1, int(ilut_cfg.hdr_max_stops) + 1):
+                scale = 2.0**stop
+                # ANY channel predicted (linearly from base) to clip poisons
+                # the whole frame via the RAW development colour matrix, so
+                # such samples must not be captured at this scale at all.
+                # 詳細は capture_hdr_linear の長露光ガードのコメントを参照。
+                pending = [
+                    sample
+                    for sample in pending
+                    if float(np.max(base_frames[_sample_key(sample)])) * scale
+                    < high
+                ]
                 if not pending:
                     break
-                scale = 2.0**stop
                 tv_label = scale_shutter_tv(
                     base_tv,
                     scale,
@@ -1233,6 +1306,7 @@ def run_calibration_capture(
         merged_by_key = {
             key: _merge_hdr_exposures(
                 captured,
+                trust_low=ilut_cfg.trust_low,
                 trust_high=ilut_cfg.trust_high,
             )
             for key, captured in exposures.items()

@@ -11,8 +11,10 @@ Canon カメラから RAW を取得し、測光パイプライン向けのリニ
 from __future__ import annotations
 
 import io
+import multiprocessing as mp
 import os
 import tempfile
+import traceback
 from pathlib import Path
 from typing import Iterator
 
@@ -45,6 +47,20 @@ def _linear_to_srgb(rgb: np.ndarray) -> np.ndarray:
 def _image_quality_looks_raw(image_quality: str) -> bool:
     """Best-effort check whether the configured quality includes RAW data."""
     return "R" in image_quality.strip().upper()
+
+
+def _create_camera_controller(controller_type):
+    """Create a controller whose EDSDK session lives in a protected worker.
+
+    edsdk-python 0.2.0 supports ``arm_triggered_capture()`` through the
+    protected worker, so the fast in-memory trigger path remains available.
+    Keeping EDSDK out of the projection process also lets the worker close the
+    camera session when that parent process exits unexpectedly.
+    """
+    return controller_type(
+        register_property_events=False,
+        protected=True,
+    )
 
 
 def _normalize_capture_output(image: np.ndarray, image_quality: str) -> np.ndarray:
@@ -186,6 +202,22 @@ def _captured_bytes_to_linear_rgb(
     return _normalize_capture_output(rgb, image_quality)
 
 
+def _develop_raw_to_npy_worker(
+    raw_path: str,
+    linear_path: str,
+    half_size: bool,
+    error_path: str,
+) -> None:
+    """Develop one RAW in a short-lived process and persist linear RGB."""
+    try:
+        payload = Path(raw_path).read_bytes()
+        linear_rgb = _raw_to_linear_rgb(payload, half_size=half_size)
+        np.save(linear_path, linear_rgb, allow_pickle=False)
+    except BaseException:
+        Path(error_path).write_text(traceback.format_exc(), encoding="utf-8")
+        raise
+
+
 class CanonEdsdkTriggeredBatch:
     """Spool fast triggered captures, then develop them sequentially.
 
@@ -207,9 +239,23 @@ class CanonEdsdkTriggeredBatch:
             )
 
         self._camera = camera
-        self._temporary = tempfile.TemporaryDirectory(
-            prefix="yoshida-edsdk-trigger-"
-        )
+        # The default TemporaryDirectory path is retained for normal use.
+        # Some managed Windows environments deny writes to directories created
+        # below the process temp root, even when the root itself is writable.
+        # In that case callers can provide an already-writable spool directory
+        # and we write batch files directly into it with a unique prefix.
+        spool_override = os.environ.get("YOSHIDA_EDSDK_TRIGGER_SPOOL_DIR")
+        if spool_override:
+            self._temporary = None
+            self._spool_dir = Path(spool_override)
+            self._spool_dir.mkdir(parents=True, exist_ok=True)
+            self._spool_prefix = f"{os.getpid()}-{id(self):x}-"
+        else:
+            self._temporary = tempfile.TemporaryDirectory(
+                prefix="yoshida-edsdk-trigger-"
+            )
+            self._spool_dir = Path(self._temporary.name)
+            self._spool_prefix = ""
         self._paths: list[tuple[Path, str]] = []
         self._mode = controller.arm_triggered_capture(
             transfer="memory",
@@ -245,7 +291,7 @@ class CanonEdsdkTriggeredBatch:
             )
         index = len(self._paths)
         suffix = Path(asset.filename).suffix or ".bin"
-        path = Path(self._temporary.name) / f"{index:06d}{suffix}"
+        path = self._spool_dir / f"{self._spool_prefix}{index:06d}{suffix}"
         path.write_bytes(asset.data)
         self._paths.append((path, asset.filename))
 
@@ -258,16 +304,52 @@ class CanonEdsdkTriggeredBatch:
         """Disarm capture and develop the spooled frames in trigger order."""
         self._disarm()
         half = bool(getattr(self._camera.config, "half_size", False))
+        controller = getattr(self._camera, "_controller", None)
+        isolated_raw_development = (
+            controller is not None
+            and type(controller).__module__.split(".", 1)[0] == "edsdk"
+        )
         for path, filename in self._paths:
-            try:
-                yield _captured_bytes_to_linear_rgb(
-                    path.read_bytes(),
-                    filename,
-                    self._camera.config.image_quality,
-                    half_size=half,
+            suffix = Path(filename).suffix.lower()
+            if isolated_raw_development and suffix in {".cr2", ".cr3", ".raw"}:
+                linear_path = path.with_name(path.name + ".linear.npy")
+                error_path = path.with_name(path.name + ".linear.error.txt")
+                context = mp.get_context("spawn")
+                worker = context.Process(
+                    target=_develop_raw_to_npy_worker,
+                    args=(str(path), str(linear_path), half, str(error_path)),
                 )
-            finally:
-                path.unlink(missing_ok=True)
+                worker.start()
+                worker.join()
+                try:
+                    if worker.exitcode != 0:
+                        details = (
+                            error_path.read_text(encoding="utf-8")
+                            if error_path.exists()
+                            else f"worker exit code {worker.exitcode}"
+                        )
+                        raise CameraCaptureError(
+                            f"RAW development failed for {filename!r}:\n{details}"
+                        )
+                    developed = np.load(linear_path, allow_pickle=False)
+                    try:
+                        yield np.asarray(developed, dtype=np.float32)
+                    finally:
+                        del developed
+                finally:
+                    linear_path.unlink(missing_ok=True)
+                    error_path.unlink(missing_ok=True)
+                    path.unlink(missing_ok=True)
+            else:
+                try:
+                    yield _captured_bytes_to_linear_rgb(
+                        path.read_bytes(),
+                        filename,
+                        self._camera.config.image_quality,
+                        half_size=half,
+                    )
+                finally:
+                    path.unlink(missing_ok=True)
 
     def __enter__(self) -> "CanonEdsdkTriggeredBatch":
         return self
@@ -276,7 +358,11 @@ class CanonEdsdkTriggeredBatch:
         try:
             self._disarm()
         finally:
-            self._temporary.cleanup()
+            if self._temporary is not None:
+                self._temporary.cleanup()
+            else:
+                for path in self._spool_dir.glob(f"{self._spool_prefix}*"):
+                    path.unlink(missing_ok=True)
 
 
 class CanonEdsdkCamera(CameraBackend):
@@ -333,7 +419,7 @@ class CanonEdsdkCamera(CameraBackend):
                 "edsdk is required for canon_edsdk backend."
             ) from exc
 
-        controller = CameraController(register_property_events=False)
+        controller = _create_camera_controller(CameraController)
         controller.__enter__()
         try:
             controller.set_properties(
@@ -404,7 +490,7 @@ class CanonEdsdkCamera(CameraBackend):
                 "edsdk is required for canon_edsdk backend."
             ) from exc
 
-        with CameraController(register_property_events=False) as camera:
+        with _create_camera_controller(CameraController) as camera:
             camera.set_properties(
                 av=self.config.av,
                 tv=tv if tv is not None else self.config.tv,
@@ -460,7 +546,7 @@ class CanonEdsdkCamera(CameraBackend):
                 "edsdk is required for canon_edsdk backend."
             ) from exc
 
-        with CameraController(register_property_events=False) as camera:
+        with _create_camera_controller(CameraController) as camera:
             return self._accepted_shutter_speeds(camera)
 
     @staticmethod

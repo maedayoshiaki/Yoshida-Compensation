@@ -240,7 +240,8 @@ def test_linearizers_gamma_matches_torch_byte_for_byte() -> None:
 
 def test_generate_projection_image_gamma_output_is_byte_identical_to_torch() -> None:
     """``generate_projection_image`` (linearizer="gamma", dtype=uint8) の出力が、
-    行列積・ガンマ補正の両方をtorchで計算した場合とバイト単位で一致すること。
+    行列積・ガンマ補正の両方をtorchのfloat経路で計算し最後に1回だけ量子化した
+    場合とバイト単位で一致すること。
 
     **Both stages of the reference side are torch, not just the gamma
     step.** An earlier version of this test built its "reference" by calling
@@ -259,6 +260,15 @@ def test_generate_projection_image_gamma_output_is_byte_identical_to_torch() -> 
     that module's docstring) followed by torch's
     ``apply_inverse_gamma_correction``, so it is independent of both numpy
     implementations under test.
+
+    **2026-08-06 (quantization-order fix):** the pipeline now keeps the
+    compensation in float32 through the linearizer and quantizes exactly
+    once at the end (``floor(x * 255 + 0.5)``), so the reference here does
+    the same: torch matmul in float32, mask, torch gamma on the float
+    array, then one inline quantization. The pre-fix version of this test
+    quantized the torch compensation to uint8 *before* the gamma step,
+    which is precisely the shadow-crushing order the fix removed (see
+    ``tests/test_projection_quantization_order.py``).
 
     This is *not* an end-to-end check of any actual CLI script's output:
     neither ``examples/python/sample.py`` nor
@@ -318,29 +328,33 @@ def test_generate_projection_image_gamma_output_is_byte_identical_to_torch() -> 
         target_decode="none",
     )
 
-    # Independently reconstruct what the pre-switch torch path would have
-    # produced: the *torch* compensation step (not the numpy one under
-    # test), then the torch gamma correction (device="cpu" -- uint8 already
-    # measured identical on CUDA too, see
+    # Independently reconstruct the same computation via torch: the *torch*
+    # compensation step (not the numpy one under test) kept in float32,
+    # then the torch gamma correction on the float array (device="cpu" --
+    # uint8 already measured identical on CUDA too, see
     # test_gamma_numpy_matches_torch_byte_for_byte_on_uint8 and
-    # tests/test_photometric_compensation_numpy.py).
+    # tests/test_photometric_compensation_numpy.py), then one inline
+    # quantization -- mirroring the fixed single-quantization order.
     compensation = torch_calc_compensation_image(
         target.astype(np.float32) / 255.0,
         matrices,
         device="cpu",
-        dtype=np.uint8,
+        dtype=np.float32,
         clip=True,
     )
     compensation = mask_to_active_region(compensation, (0, 0, 16, 16))
-    reference_codes = np.asarray(
+    reference_float = np.asarray(
         apply_inverse_gamma_correction(
             compensation, gamma=1.0 / Projector().gamma, device="cpu"
         )
     )
+    reference_codes = np.floor(
+        np.clip(reference_float, 0.0, 1.0) * 255.0 + 0.5
+    ).astype(np.uint8)
 
     assert wired_codes.dtype == np.uint8
     # Sanity: the target/matrix combination above must actually exercise a
     # range of compensation values, not collapse to one -- otherwise this
     # test would pass even with a badly broken implementation.
-    assert len(np.unique(compensation)) > 10
+    assert len(np.unique(reference_codes)) > 10
     np.testing.assert_array_equal(wired_codes, reference_codes)

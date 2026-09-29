@@ -26,6 +26,7 @@ import numpy as np
 from yoshidacomp.compensation.inverse_lut import InverseLut, apply_inverse_lut
 from yoshidacomp.compensation.photometric_compensation import (
     calc_compensation_image,
+    quantize_unit_image,
 )
 from yoshidacomp.compensation.projection_region import (
     embed_in_active_region,
@@ -327,6 +328,16 @@ def _apply_inverse_gamma_numpy(
     割に合わない。加えて torch は module scope で psutil ごと web 層へ漏れる。
 
     **Wired into ``LINEARIZERS["gamma"]``** (via :func:`_linearize_gamma`).
+
+    **2026-08-06:** integer outputs now round half-up (``floor(x*scale+0.5)``)
+    instead of truncating, as part of the quantization-order fix (see
+    ``tests/test_projection_quantization_order.py``). The torch
+    implementation was changed identically in the same commit. The
+    measurements quoted below were taken against the *truncating* version:
+    the uint8 numpy-vs-torch byte parity is re-verified for the rounding
+    version by ``tests/test_pipeline_gamma_numpy.py``, while the uint16
+    mismatch counts are historical and have not been re-measured.
+
     Measured against the torch implementation (see
     ``.superpowers/sdd/2026-08-02-target-and-lut/task-1-report.md`` for the
     full table, corrected after an earlier draft attributed these numbers to
@@ -470,10 +481,14 @@ def _apply_inverse_gamma_numpy(
     # today, not dead by this function's own documented interface.
     corrected = np.clip(corrected, 0.0, 1.0)
 
+    # Round half-up, matching calc_compensation_image / quantize_unit_image.
+    # A bare ``.astype`` here would truncate and bias every code down by up
+    # to 1 count (2026-08-06 fix; the torch implementation was changed the
+    # same way, and the exhaustive parity tests re-verify the two agree).
     if dtype == np.uint8:
-        return (corrected * 255.0).astype(np.uint8)
+        return np.floor(corrected * 255.0 + 0.5).astype(np.uint8)
     if dtype == np.uint16:
-        return (corrected * 65535.0).astype(np.uint16)
+        return np.floor(corrected * 65535.0 + 0.5).astype(np.uint16)
     return corrected.astype(dtype)
 
 
@@ -648,13 +663,20 @@ def generate_projection_image(
             ターゲットの復号方式。
         target_gamma: Exponent used when ``target_decode="gamma"``.
             ``target_decode="gamma"`` のときの指数。
-        dtype: Output data type of both returned arrays. ``np.uint8``
-            (default) reproduces the CLI's 8-bit quantization; a float
-            dtype keeps the compensation in normalized units, which is
-            what a viewer needs.
-            返す2配列の出力データ型。既定の ``np.uint8`` は CLI と同じ
-            8bit 量子化。float を指定すると補償値を正規化のまま保持でき、
-            ビューアはこちらを必要とする。
+        dtype: Output data type of both returned arrays. For integer
+            dtypes (``np.uint8`` default) the pipeline computes matmul,
+            mask and linearizer entirely in float32 and quantizes each
+            returned array exactly once at the end with
+            ``floor(x * scale + 0.5)`` — the linearizer never sees
+            quantized input, so dark projector codes stay reachable. A
+            float dtype keeps the compensation in normalized units, which
+            is what a viewer needs.
+            返す2配列の出力データ型。整数 dtype(既定 ``np.uint8``)では
+            行列積・マスク・線形化まで float32 のまま計算し、最後に
+            ``floor(x * scale + 0.5)`` で 1 回だけ量子化する(線形化は
+            量子化済みの入力を受け取らないため、暗部の投影コードが
+            到達可能なまま保たれる)。float を指定すると補償値を正規化の
+            まま保持でき、ビューアはこちらを必要とする。
         clip: Clamp the compensation to [0, 1] before quantization.
             Defaults to ``True``. ``clip=False`` keeps out-of-gamut
             values so a caller can classify which pixels the matrix
@@ -709,16 +731,26 @@ def generate_projection_image(
         (projector.width, projector.height),
         active_region,
     )
+
+    # The whole chain (matmul -> mask -> linearizer) runs in float; integer
+    # output is quantized ONCE at the very end. Quantizing the compensation
+    # to 8 bits in linear space *before* the linearizer made projector codes
+    # 1-19 unreachable (linear 1/255 maps to code ~21 under 1/2.2), crushing
+    # shadow detail. Pinned by tests/test_projection_quantization_order.py.
+    out_dtype = np.dtype(dtype)
+    integer_output = np.issubdtype(out_dtype, np.integer)
+    compute_dtype: np.typing.DTypeLike = np.float32 if integer_output else dtype
+
     compensation = calc_compensation_image(
         target_image=target_linear,
         color_mixing_matrices=warped_matrix,
-        dtype=dtype,
+        dtype=compute_dtype,
         clip=clip,
     )
     compensation = mask_to_active_region(compensation, active_region)
 
     projector_image = linearize(
-        compensation, projector=projector, lut=lut, dtype=dtype
+        compensation, projector=projector, lut=lut, dtype=compute_dtype
     )
     # Every entry in LINEARIZERS returns a plain numpy array now that
     # _linearize_gamma calls _apply_inverse_gamma_numpy instead of torch
@@ -726,4 +758,9 @@ def generate_projection_image(
     # to live here for the old torch-backed gamma path and has been removed
     # as dead code rather than left to imply a torch tensor could still
     # arrive.
+    if integer_output:
+        return (
+            quantize_unit_image(compensation, out_dtype),
+            quantize_unit_image(np.asarray(projector_image), out_dtype),
+        )
     return compensation, np.asarray(projector_image, dtype=dtype)

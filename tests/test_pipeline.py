@@ -66,14 +66,17 @@ def test_generate_projection_image_identity_matrix() -> None:
     # これを独立に計算した期待値と突き合わせる。
     #
     # NOTE: `assert np.array_equal(linear, projected)` では検証にならない。
-    # _linearize_none() は受け取ったオブジェクトをそのまま返し、np.asarray()
-    # も dtype が一致すれば同一オブジェクトを返すため、`linear is projected`
-    # は常に真であり、その比較は決して失敗しない。同じ理由で、将来この2つの
-    # 戻り値のどちらかを in-place で書き換える呼び出し側はもう一方も壊す。
+    # 整数 dtype では同じ float 補償値から同じ量子化で2配列を作るため
+    # 常に等しく、float dtype では _linearize_none() が受け取ったオブジェクト
+    # をそのまま返すため `linear is projected` が真になる(2026-08-06 の
+    # 量子化順序修正より前は整数 dtype でも同一オブジェクトだった)。
+    # いずれにせよ相互比較は決して失敗しないので、独立に計算した期待値と
+    # 比較する。
     #
     # NOTE: comparing the two return values against each other cannot fail --
-    # they are the same object for linearizer="none" -- and an in-place writer
-    # of either would silently corrupt the other.
+    # for integer dtypes they are quantized from the same float array, and
+    # for float dtypes they are the same object -- so the expectation is
+    # computed independently instead.
     from yoshidacomp.compensation.pipeline import decode_target
     from yoshidacomp.compensation.photometric_compensation import (
         calc_compensation_image,
