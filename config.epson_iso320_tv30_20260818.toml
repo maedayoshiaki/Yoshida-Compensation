@@ -1,0 +1,65 @@
+# EPSON PJ (\.\DISPLAY4, (3440,0) 1920x1080@60Hz) — 2026-08-17 切替後の初回校正。
+# 非HDR / Tv=1/30・av=14 固定（2026-08-18 ユーザー指示: Tv1/30でISO250-500再スイープ）。
+# ISOはガラス上限とEPSON輝度から白が飽和しない 100/200/250 を採用
+# （実測白LUT-ROI: 0.137/0.272/0.344。ISO320以上はROIの5割が飽和しNG）。
+# WB=ColorTemp(D65)。位相ジッタは1/60で3.3%（1/15の1.1%より大、既知のトレードオフ）。
+# active_region は ISO200 GrayCode から導出後 inset24 相当に縮めた固定ROI
+# (340,64,890,890)（全ISO共通、ユーザー指示によりROIは最初の決定を維持）。
+
+[projector]
+gamma = 2.2
+width = 1920
+height = 1080
+pos_x = 3440
+pos_y = 0
+refresh_rate = 60.0
+active_x = 340
+active_y = 64
+active_width = 890
+active_height = 890
+
+[camera]
+backend = "canon_edsdk"
+av = "14"
+tv = "1/30"
+iso = "320"
+image_quality = "LR"
+device_index = 0
+wait_key_ms = 300
+trigger_wait_key_ms = 300
+hdr_enabled = false
+edsdk_dll_dir = "C:/py_scripts/edsdk-python/dependencies/EDSDK_64/Dll"
+half_size = false
+
+[paths]
+c2p_map = ""
+p2c_map = "data/graycode_epson_20260818_tv30_iso320/p2c_dense_active_1920x1080.npy"
+warp_method = "p2c"
+target_image_space = "projector"
+rpcc_matrix = ""
+target_image_dir = "data/comp_test_targets_square"
+linear_pattern_dir = "data/epson_iso320_tv30_20260818/calibration/linear_patterns"
+inv_gamma_pattern_dir = "data/epson_iso320_tv30_20260818/calibration/projected_patterns"
+captured_image_dir = "data/epson_iso320_tv30_20260818/calibration/captures"
+compensation_image_dir = "data/epson_iso320_tv30_20260818/calibration/compensation_linear"
+inv_gamma_comp_dir = "data/epson_iso320_tv30_20260818/calibration/compensation_projector"
+
+[compensation]
+num_divisions = 4
+safety_margin = 0.5
+min_batch_size = 256
+use_gpu = true
+
+[inverse_lut]
+num_levels = 17
+source = "channel_ramp"
+lut_resolution = 256
+roi_x = 4520
+roi_y = 1600
+roi_width = 480
+roi_height = 400
+trust_low = 10
+trust_high = 245
+hdr_enabled = false
+hdr_max_stops = 3
+inverse_lut_path = "data/epson_iso320_tv30_20260818/inverse_lut_channel/inverse_lut.npz"

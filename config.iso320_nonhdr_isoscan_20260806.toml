@@ -1,0 +1,61 @@
+# ISO320 non-HDR isoscan (2026-08-06). Bootstrap active ROI is replaced
+# with this ISO's derived_active_region.json by the campaign driver before
+# photometric calibration and evaluation.
+
+[projector]
+gamma = 2.2
+width = 1920
+height = 1080
+pos_x = 3440
+pos_y = 0
+refresh_rate = 60.0
+active_x = 616
+active_y = 207
+active_width = 798
+active_height = 798
+
+[camera]
+backend = "canon_edsdk"
+av = "14"
+tv = "1/15"
+iso = "320"
+image_quality = "LR"
+device_index = 0
+wait_key_ms = 300
+trigger_wait_key_ms = 300
+hdr_enabled = false
+edsdk_dll_dir = "C:/py_scripts/edsdk-python/dependencies/EDSDK_64/Dll"
+half_size = false
+
+[paths]
+c2p_map = ""
+p2c_map = "data/graycode_recalibration_20260806_iso320_fullframe_isoscan/p2c_dense_active_1920x1080.npy"
+warp_method = "p2c"
+target_image_space = "projector"
+rpcc_matrix = ""
+target_image_dir = "data/comp_test_targets_square"
+linear_pattern_dir = "data/iso320_nonhdr_isoscan_20260806/calibration/linear_patterns"
+inv_gamma_pattern_dir = "data/iso320_nonhdr_isoscan_20260806/calibration/projected_patterns"
+captured_image_dir = "data/iso320_nonhdr_isoscan_20260806/calibration/captures"
+compensation_image_dir = "data/iso320_nonhdr_isoscan_20260806/calibration/compensation_linear"
+inv_gamma_comp_dir = "data/iso320_nonhdr_isoscan_20260806/calibration/compensation_projector"
+
+[compensation]
+num_divisions = 4
+safety_margin = 0.5
+min_batch_size = 256
+use_gpu = true
+
+[inverse_lut]
+num_levels = 17
+source = "channel_ramp"
+lut_resolution = 256
+roi_x = 4520
+roi_y = 1600
+roi_width = 480
+roi_height = 400
+trust_low = 10
+trust_high = 245
+hdr_enabled = false
+hdr_max_stops = 3
+inverse_lut_path = "data/iso320_nonhdr_isoscan_20260806/inverse_lut_channel/inverse_lut.npz"
