@@ -12,6 +12,11 @@ projection setup costs are shared across the comparison.
 
 Pass ``--gray-lut-comp-dir`` to append a fifth condition using an inverse LUT
 fitted from gray-ramp projections.
+
+2026-08-10: captured frames are quantized to uint8 LINEARLY for both metric
+computation and saved PNGs (previously ``capture_to_srgb_uint8`` applied an
+sRGB OETF before scoring). Saved PNGs are linear code values and look dark
+in a normal viewer; only uint8 quantization is permitted at this boundary.
 """
 
 from __future__ import annotations
@@ -36,6 +41,7 @@ from examples.python import sample
 # 書き出し側と同じ辞書を読む（ここでの literal は「誰も守っていない
 # ファイル名の取り決め」になる）。
 from yoshidacomp.compensation.pipeline import LINEARIZER_FILENAME_PREFIXES
+from yoshidacomp.compensation.photometric_compensation import quantize_unit_image
 from yoshidacomp.config import reload_config
 
 
@@ -45,6 +51,11 @@ BASE_CONDITIONS = (
     "comp_gamma",
     "comp_inverse_lut",
 )
+
+
+def _capture_to_linear_uint8(image: np.ndarray) -> np.ndarray:
+    """Quantize a linear [0, 1] capture to uint8 with no tone encoding."""
+    return quantize_unit_image(np.asarray(image, dtype=np.float32), np.uint8)
 
 
 def _load_rgb(path: Path) -> np.ndarray:
@@ -249,7 +260,7 @@ def main() -> None:
     for index, (capture, (target_name, condition, target)) in enumerate(
         zip(captures, sequence, strict=True)
     ):
-        capture_uint8 = sample.capture_to_srgb_uint8(capture)
+        capture_uint8 = _capture_to_linear_uint8(capture)
         _save_rgb(
             output_dir / f"capture_{index:02d}_{target_name}_{condition}.png",
             capture_uint8,
@@ -266,7 +277,7 @@ def main() -> None:
             warp_method="p2c",
         )
         warp_seconds.append(time.perf_counter() - warp_started)
-        warped_uint8 = sample.capture_to_srgb_uint8(warped_linear)
+        warped_uint8 = _capture_to_linear_uint8(warped_linear)
         active_capture = warped_uint8[y : y + height, x : x + width]
         evaluated = cv2.resize(
             active_capture,
@@ -334,6 +345,9 @@ def main() -> None:
         "requested_conditions": list(conditions),
         "color_levels_per_channel": args.color_levels,
         "calibration_patterns_per_compensation_matrix": args.color_levels**3,
+        # このフィールドが無い実行は、撮影を sRGB エンコードしてから
+        # 採点する旧チェーンである。
+        "capture_encoding": "linear_uint8",
         "capture_and_development_seconds": capture_seconds,
         "warp_seconds": warp_seconds,
         "images": [

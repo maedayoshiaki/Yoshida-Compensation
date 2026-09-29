@@ -165,8 +165,8 @@ def main() -> None:
             "half_size": cfg.camera.half_size,
             "hdr_enabled": cfg.camera.hdr_enabled,
             "hdr_max_stops": cfg.inverse_lut.hdr_max_stops,
-            "hdr_trust_low": cfg.inverse_lut.hdr_trust_low,
-            "hdr_trust_high": cfg.inverse_lut.hdr_trust_high,
+            "hdr_trust_low": cfg.inverse_lut.trust_low,
+            "hdr_trust_high": cfg.inverse_lut.trust_high,
             "capture_shape": list(captures[0].shape),
         },
         "projector": {

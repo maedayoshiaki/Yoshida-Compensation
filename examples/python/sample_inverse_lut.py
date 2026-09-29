@@ -53,6 +53,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[2]
 from yoshidacomp.compensation import inverse_lut as ilut
 # The writers' own map -- see the note in
 # ``evaluate_compensation_conditions.py`` for why it is read, not restated.
+from yoshidacomp.compensation.photometric_compensation import quantize_unit_image
 from yoshidacomp.compensation.pipeline import LINEARIZER_FILENAME_PREFIXES
 from yoshidacomp.config import get_config, reload_config, split_cli_config_path
 
@@ -322,10 +323,12 @@ def main(argv: list[str] | None = None) -> None:
                 color_mixing_matrices,
                 "c2p compensation",
             )
+            # float32 のまま計算する。8bit 量子化は LUT 適用後に 1 回だけ
+            # 行う(リニア空間で先に量子化すると暗部の投影コードが潰れる)。
             before_warped_compensation_image = sample.calc_compensation_image(
                 target_image=compensation_target_image,
                 color_mixing_matrices=color_mixing_matrices,
-                dtype=np.uint8,
+                dtype=np.float32,
             )
             compensation_image = sample.warp_image(
                 before_warped_compensation_image,
@@ -356,7 +359,7 @@ def main(argv: list[str] | None = None) -> None:
             compensation_image = sample.calc_compensation_image(
                 target_image=compensation_target_image,
                 color_mixing_matrices=warped_color_mixing_matrices,
-                dtype=np.uint8,
+                dtype=np.float32,
             )
 
         if compensation_image is None or compensation_image.size == 0:
@@ -370,13 +373,21 @@ def main(argv: list[str] | None = None) -> None:
         # === LUT-based projector linearization (replaces inverse gamma) ===
         # sample.py: apply_inverse_gamma_correction(compensation_image,
         #                                            gamma=1/proj.gamma)
-        lut_comp_image = ilut.apply_inverse_lut(
-            compensation_image, lut, dtype=np.uint8
+        # The compensation is still float here; quantization to 8 bits
+        # happens once, after the LUT, so dark projector codes stay
+        # reachable.
+        # 補償値は float のまま LUT へ通し、8bit 量子化はその後に 1 回だけ行う。
+        lut_comp_image = quantize_unit_image(
+            ilut.apply_inverse_lut(compensation_image, lut, dtype=np.float32),
+            np.uint8,
         )
 
         cv2.imwrite(
             str(compensation_output_dir / f"compensation_image_{idx:02d}.png"),
-            cv2.cvtColor(compensation_image, cv2.COLOR_RGB2BGR),
+            cv2.cvtColor(
+                quantize_unit_image(compensation_image, np.uint8),
+                cv2.COLOR_RGB2BGR,
+            ),
         )
         cv2.imwrite(
             str(

@@ -41,6 +41,7 @@ from yoshidacomp.compensation.color_mixing_matrix import (
 from yoshidacomp.capture import CameraCaptureError, create_camera_backend
 from yoshidacomp.compensation.photometric_compensation import (
     calc_compensation_image,
+    quantize_unit_image,
 )
 from yoshidacomp.config import (
     get_config,
@@ -462,8 +463,20 @@ def capture_projection_patterns(
 
                     # Reuse the base-frame arrays as the merged HDR output.
                     # Saturated base samples stay NaN until a shorter exposure
-                    # recovers them. Longer trustworthy exposures overwrite the
-                    # base to improve shadow SNR.
+                    # recovers them. Longer trustworthy exposures overwrite
+                    # ONLY the samples that were too dark in the base exposure.
+                    #
+                    # 2026-08-07: 以前は「長露光で飽和していない全セル」を長露光値で
+                    # 上書きしていたが、ISO320 実測で飽和した長露光フレームの現像値が
+                    # 1.0 に張り付かず 0.54〜0.97 に落ちる（trust_high=0.96 の飽和判定を
+                    # すり抜ける）ことが判明し、白の G が ÷露光比で崩壊した
+                    # （G 0.52 → 0.092、投影がマゼンタに見える事故）。長露光の値は
+                    # 非飽和域では正確（グレー実測 0"5/その1/15 = 7.460 / 理論 7.5）
+                    # なので、書き込み先を基準露光の暗部（base <= low）に限定して
+                    # 飽和判定への依存を断つ。
+                    base_dark_masks = [
+                        frame <= low for frame in base_frames
+                    ]
                     for frame in base_frames:
                         frame[frame >= high] = np.nan
 
@@ -491,7 +504,7 @@ def capture_projection_patterns(
                             np.copyto(
                                 base_frames[index],
                                 frame,
-                                where=trustworthy,
+                                where=trustworthy & base_dark_masks[index],
                             )
 
                         capture_pass(long_pending, tv_label, merge_long)
@@ -545,11 +558,33 @@ def capture_projection_patterns(
                     def append_frame(_index: int, frame: np.ndarray) -> None:
                         captured_images.append(frame)
 
-                    capture_pass(
-                        list(range(len(patterns))),
-                        str(cfg.camera.tv),
-                        append_frame,
+                    all_indices = list(range(len(patterns)))
+                    batch_size_text = os.environ.get(
+                        "YOSHIDA_EDSDK_TRIGGER_BATCH_SIZE"
                     )
+                    batch_size = None
+                    if batch_size_text:
+                        try:
+                            parsed_batch_size = int(batch_size_text)
+                        except ValueError as exc:
+                            raise ValueError(
+                                "YOSHIDA_EDSDK_TRIGGER_BATCH_SIZE must be an integer."
+                            ) from exc
+                        if parsed_batch_size <= 0:
+                            raise ValueError(
+                                "YOSHIDA_EDSDK_TRIGGER_BATCH_SIZE must be positive."
+                            )
+                        batch_size = parsed_batch_size
+
+                    if batch_size is None or batch_size >= len(all_indices):
+                        capture_pass(all_indices, str(cfg.camera.tv), append_frame)
+                    else:
+                        for start in range(0, len(all_indices), batch_size):
+                            capture_pass(
+                                all_indices[start : start + batch_size],
+                                str(cfg.camera.tv),
+                                append_frame,
+                            )
         else:
             if hdr_enabled:
                 print(
@@ -855,10 +890,12 @@ def main(argv: list[str] | None = None):
                 color_mixing_matrices,
                 "c2p compensation",
             )
+            # float32 のまま計算する。8bit 量子化は逆ガンマ適用後に 1 回だけ
+            # 行う(リニア空間で先に量子化すると暗部の投影コードが潰れる)。
             before_warped_compensation_image = calc_compensation_image(
                 target_image=compensation_target_image,
                 color_mixing_matrices=color_mixing_matrices,
-                dtype=np.uint8,
+                dtype=np.float32,
             )
             compensation_image = warp_image(
                 before_warped_compensation_image,
@@ -907,7 +944,7 @@ def main(argv: list[str] | None = None):
             compensation_image = calc_compensation_image(
                 target_image=compensation_target_image,
                 color_mixing_matrices=warped_color_mixing_matrices,
-                dtype=np.uint8,
+                dtype=np.float32,
             )
 
         if compensation_image is None or compensation_image.size == 0:
@@ -923,7 +960,11 @@ def main(argv: list[str] | None = None):
             encoding="utf-8",
         )
 
-        # Apply inverse gamma correction for projector display
+        # Apply inverse gamma correction for projector display. The
+        # compensation is still float here; quantization to 8 bits happens
+        # once, after the gamma, so dark projector codes stay reachable.
+        # 補償値は float のまま逆ガンマへ通し、8bit 量子化はその後に 1 回
+        # だけ行う(先に量子化すると暗部の投影コードが潰れる)。
         inv_gamma_comp_image = apply_inverse_gamma_correction(
             compensation_image, gamma=1 / proj.gamma
         )
@@ -931,9 +972,12 @@ def main(argv: list[str] | None = None):
         if isinstance(inv_gamma_comp_image, torch.Tensor):
             inv_gamma_comp_image = inv_gamma_comp_image.cpu().numpy()
 
+        compensation_uint8 = quantize_unit_image(compensation_image, np.uint8)
+        inv_gamma_comp_uint8 = quantize_unit_image(inv_gamma_comp_image, np.uint8)
+
         # Save compensation images (convert RGB to BGR for OpenCV)
-        bgr_comp = cv2.cvtColor(compensation_image, cv2.COLOR_RGB2BGR)
-        bgr_inv_gamma_comp = cv2.cvtColor(inv_gamma_comp_image, cv2.COLOR_RGB2BGR)
+        bgr_comp = cv2.cvtColor(compensation_uint8, cv2.COLOR_RGB2BGR)
+        bgr_inv_gamma_comp = cv2.cvtColor(inv_gamma_comp_uint8, cv2.COLOR_RGB2BGR)
         cv2.imwrite(
             str(compensation_output_dir / f"compensation_image_{idx:02d}.png"),
             bgr_comp,

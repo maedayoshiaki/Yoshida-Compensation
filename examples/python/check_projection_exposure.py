@@ -33,6 +33,11 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--full-frame",
+        action="store_true",
+        help="Use a full-frame white pattern instead of the configured active region.",
+    )
     return parser.parse_args()
 
 
@@ -42,10 +47,9 @@ def main() -> None:
     proj = cfg.projector
     active_region = resolve_active_region(proj)
     black = np.zeros((proj.height, proj.width, 3), dtype=np.uint8)
-    white = mask_to_active_region(
-        np.full((proj.height, proj.width, 3), 255, dtype=np.uint8),
-        active_region,
-    )
+    white = np.full((proj.height, proj.width, 3), 255, dtype=np.uint8)
+    if not args.full_frame:
+        white = mask_to_active_region(white, active_region)
 
     window_name = "projection_window"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -89,8 +93,8 @@ def main() -> None:
         "half_size": cfg.camera.half_size,
         "hdr_enabled": cfg.camera.hdr_enabled,
         "hdr_max_stops": cfg.inverse_lut.hdr_max_stops,
-        "hdr_trust_low": cfg.inverse_lut.hdr_trust_low,
-        "hdr_trust_high": cfg.inverse_lut.hdr_trust_high,
+        "hdr_trust_low": cfg.inverse_lut.trust_low,
+        "hdr_trust_high": cfg.inverse_lut.trust_high,
         "image_shape": list(captures[0].shape),
         "clean_roi": list(roi),
         "capture_and_development_seconds": elapsed,

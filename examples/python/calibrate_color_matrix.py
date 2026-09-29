@@ -1,4 +1,4 @@
-"""Capture an HDR photometric calibration and fit a per-pixel colour matrix."""
+"""Capture a photometric calibration and fit a per-pixel colour matrix."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 from examples.python import sample
 from yoshidacomp.compensation import inverse_lut
+from yoshidacomp.compensation.photometric_compensation import quantize_unit_image
 from yoshidacomp.config import reload_config
 from yoshidacomp.compensation.projection_region import mask_to_active_region, resolve_active_region
 
@@ -47,17 +48,21 @@ def main() -> None:
     cfg = reload_config(args.config)
     if cfg.camera.half_size:
         raise ValueError("Full-resolution RAW is required; half_size must be false.")
-    if not cfg.camera.hdr_enabled:
-        raise ValueError("camera.hdr_enabled must be true for HDR calibration.")
     if args.linearizer == "inverse_lut" and args.lut is None:
         raise ValueError("--lut is required for --linearizer inverse_lut.")
 
     proj = cfg.projector
     active_region = resolve_active_region(proj)
+    # 2026-08-10: パターンは float32 [0,1] で生成し、線形化まで float のまま
+    # 通してから最後に 1 回だけ uint8 化する（half-up）。以前は uint8 生成
+    # （切り捨て量子化）→ uint8→uint8 線形化の二重量子化だった。補償画像側の
+    # 量子化順序修正（2026-08-06、tests/test_projection_quantization_order.py）
+    # と同じ契約に校正パターン側を揃える。教師値（model_patterns）も
+    # 量子化を経ない正確な {0, 1/3, 2/3, 1} になる。
     model_patterns = sample.generate_projection_patterns(
         proj.width,
         proj.height,
-        dtype=np.dtype(np.uint8),
+        dtype=np.float32,
     )
     linear_patterns = [
         mask_to_active_region(pattern, active_region)
@@ -83,9 +88,13 @@ def main() -> None:
             projected = inverse_lut.apply_inverse_lut(
                 pattern,
                 lut,
-                dtype=np.uint8,
+                dtype=np.float32,
             )
-        projected_patterns.append(np.asarray(projected, dtype=np.uint8))
+        projected_patterns.append(
+            quantize_unit_image(
+                np.asarray(projected, dtype=np.float32), np.uint8
+            )
+        )
 
     output_dir = args.output_dir
     linear_dir = output_dir / "linear_patterns"
@@ -96,7 +105,13 @@ def main() -> None:
     for index, (linear, projected) in enumerate(
         zip(linear_patterns, projected_patterns, strict=True)
     ):
-        _save_rgb(linear_dir / f"linear_pattern_{index:02d}.png", linear)
+        # linear は float32 になったので、保存PNGは従来どおり「コード値」に
+        # なるよう明示的に量子化する（capture_to_srgb_uint8 の sRGB エンコード
+        # を経由させない）。
+        _save_rgb(
+            linear_dir / f"linear_pattern_{index:02d}.png",
+            quantize_unit_image(linear, np.uint8),
+        )
         _save_rgb(projected_dir / f"projected_pattern_{index:02d}.png", projected)
 
     window_name = "projection_window"
@@ -122,10 +137,10 @@ def main() -> None:
     finally:
         cv2.destroyWindow(window_name)
     if captures is None:
-        raise RuntimeError("HDR colour-matrix capture failed.")
+        raise RuntimeError("Colour-matrix capture failed.")
 
     for index, capture in enumerate(captures):
-        _save_rgb(captures_dir / f"hdr_capture_{index:02d}.png", capture)
+        _save_rgb(captures_dir / f"capture_{index:02d}.png", capture)
 
     fit_started = time.perf_counter()
     matrix = sample.calc_color_mixing_matrices(
@@ -140,6 +155,8 @@ def main() -> None:
         "config": str(args.config),
         "linearizer": args.linearizer,
         "inverse_lut": str(args.lut) if args.lut else None,
+        # このフィールドが無い実行は旧チェーン（uint8生成→uint8線形化）である。
+        "pattern_pipeline": "float_generate->float_linearize->uint8_half_up",
         "patterns": len(model_patterns),
         "color_levels_per_channel": cfg.compensation.num_divisions,
         "camera": {
