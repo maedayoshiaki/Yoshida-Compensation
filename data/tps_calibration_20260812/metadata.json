@@ -1,0 +1,35 @@
+{
+  "config": "config.color_grid_iso200_hdr_d65_20260812.toml",
+  "purpose": "6^3 calibration frames for matrix-vs-TPS compensation",
+  "downsample": 4,
+  "settle_seconds": 2.0,
+  "seed": 0,
+  "camera": {
+    "iso": "200",
+    "av": "14",
+    "base_tv": "1/15",
+    "hdr_enabled": true,
+    "trust_low": 10,
+    "trust_high": 245,
+    "hdr_max_stops": 3
+  },
+  "projector": {
+    "frame": [
+      1920,
+      1080
+    ],
+    "active_region": [
+      607,
+      209,
+      794,
+      794
+    ]
+  },
+  "p2c_map": "data/graycode_recalibration_20260807_iso200_fullframe_isoscan_d65/p2c_dense_active_1920x1080.npy",
+  "roi_gate": [
+    4520,
+    1600,
+    480,
+    400
+  ]
+}

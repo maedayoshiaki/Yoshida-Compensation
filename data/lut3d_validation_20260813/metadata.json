@@ -1,0 +1,13 @@
+{
+  "config": "config.color_grid_iso200_hdr_d65_20260812.toml",
+  "lut": "data\\tps_compensation_20260812\\inverse_lut3d.npz",
+  "calibration_dir": "data\\tps_calibration_20260812",
+  "seed": 0,
+  "settle_seconds": 2.0,
+  "sets": {
+    "gray": 17,
+    "single": 15,
+    "random_box": 24,
+    "held_out": 12
+  }
+}

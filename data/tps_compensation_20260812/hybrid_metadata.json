@@ -1,0 +1,8 @@
+{
+  "condition": "comp_matrix_lut3d",
+  "calibration_dir": "data\\tps_calibration_20260812",
+  "lut_size": 33,
+  "smoothing": 0.0001,
+  "target_decode": "none",
+  "model": "target -> per-pixel 4x3 matrix (to normalized reference response) -> baked TPS inverse 3D LUT"
+}

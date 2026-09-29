@@ -91,6 +91,58 @@
 | `full_recalibration_20260730_iso400/` | 同上のISO400版 | `docs/iso200_iso400_five_condition_comparison_20260730.md` |
 | `hdr_recalibration_20260730_iso400/` | **最新**。HDR撮影による方式別再校正と5条件評価 | `docs/hdr_full_recalibration_iso400_20260730.md` |
 
+### 2026-08-06
+
+| ディレクトリ | 内容 | 対応文書 |
+| --- | --- | --- |
+| `graycode_recalibration_20260806_iso100_fullframe/` | ISO100・全画面GrayCodeからROI `(578,214,784,784)` とP2C/C2Pを新規導出 | `docs/full_recalibration_iso100_iso160_20260806.md` |
+| `iso100_nonhdr_full_20260806/` | ISO100・非HDR。露出/幾何検証、2種LUT、方式別4行列、5条件評価、画素別マップ | 同上 |
+| `graycode_recalibration_20260806_iso160_fullframe/` | ISO160・全画面GrayCodeからROI `(583,214,786,786)` とP2C/C2Pを新規導出 | 同上 |
+| `iso160_nonhdr_full_20260806/` | ISO160・非HDR。露出/幾何検証、2種LUT、方式別4行列、5条件評価、画素別マップ | 同上 |
+| `graycode_recalibration_20260806_iso100_fullframe_step1_rerun/` | ISO100・フル解像度Step 1 GrayCode 46枚からROI `(566,217,784,784)` とP2C/C2Pを再導出 | `docs/full_recalibration_iso100_iso160_step1_rerun_20260806.md` |
+| `iso100_nonhdr_full_20260806_step1_rerun/` | ISO100・保護高速撮影。露出/幾何検証、2種LUT、方式別4行列、5条件評価、画素別マップ | 同上 |
+| `graycode_recalibration_20260806_iso160_fullframe_step1_rerun/` | ISO160・フル解像度Step 1 GrayCode 46枚からROI `(591,213,788,788)` とP2C/C2Pを再導出 | 同上 |
+| `iso160_nonhdr_full_20260806_step1_rerun/` | ISO160・保護高速撮影。露出/幾何検証、2種LUT、方式別4行列、5条件評価、画素別マップ | 同上 |
+
+（2026-08-07 の isoscan 8ラン、2026-08-09〜11 のリニア統一ランのディレクトリは未記載。
+一覧は `AGENTS.md` 第6章の追記とメモリを参照。）
+
+### 2026-08-12
+
+| ディレクトリ | 内容 | 対応文書 |
+| --- | --- | --- |
+| `color_grid_response_20260812/` | 3ch混色応答グリッド計測 r1。**HDRブラケット飽和すり抜けバグの凍結証拠**（鮮色・混合色は汚染、グレー・暗部は有効）。逐次ランププローブ（`sequential_ramp_probe.py` / `.json`）を含む | `docs/color_grid_response_20260812.md` |
+| `color_grid_response_20260812_r2/` | 同計測のバグ修正後再実行（**有効データ**）。321色生駆動 + LUT通し35色 + 番兵13点、`analysis/` にプロットと summary.json | 同上 |
+| `tps_calibration_20260812/` | TPS補償用 6³=216色校正。プロジェクタ座標1/4縮小リニアフレーム225枚 + manifest | 同上 §7 |
+| `tps_compensation_20260812/` | 同一校正から fit した行列/ガンマ+行列/TPS/行列+3D LUT の補償画像・tps_map.npz・inverse_lut3d.npz・実機評価3ラン（`evaluation`/`evaluation_r2`/`evaluation_hybrid`） | 同上 §7 |
+
+### 2026-08-13
+
+| ディレクトリ | 内容 | 対応文書 |
+| --- | --- | --- |
+| `lut3d_validation_20260813/` | 3D LUT（TPS焼き）単体の実機精度検証（要求色→LUT→投影→実測、73計測、`analysis/` に summary・誤差可視化・立体プロット群） | `docs/color_grid_response_20260812.md` §7.2c |
+| `lut3d_validation_20260813_linear/` | 区分線形補間で焼いた3D LUTの同一プロトコル検証（同一要求色68点、TPS版とのペア比較つき） | 同上 §7.2c |
+
+
+### 2026-08-17（EPSON プロジェクタ切替）
+
+| ディレクトリ | 内容 | 対応文書 |
+| --- | --- | --- |
+| `graycode_epson_20260817_iso{100,200,250,320,400}/` | EPSON切替後のGrayCode幾何（ISO毎、固定ROI (340,64,890,890)） | `docs/epson_recalibration_20260817.md` |
+| `epson_iso{100,200,250,320,400}_nonhdr_20260817/` | Tv1/60・f14・非HDRのフル校正と5条件評価。総合最良は**ISO400 comp_gamma 17.5dB/ΔE11.8**（320/400は白ROI約5割の飽和許容ラン） | 同上 |
+| `epson_tps_calibration_20260817/` | 216色校正フレーム（特性計測・TPS/LUT fit 用） | 同上 |
+| `epson_color_grid_response_20260817/` | 321色応答調査（加法比0.91-1.07、モデルCV: 行列4.2 / TPS 0.97） | 同上 |
+| `epson_lut3d_validation_20260817/` | 3D LUT実機検証（gray/held-out ΔE1.8）と特性図一式 | 同上 |
+| `epson_tps_compensation_20260817/` | inverse_lut3d.npz と行列/ハイブリッド補償画像 | 同上 |
+
+### 2026-08-18（Tv=1/30 スイープと最良条件の特性計測）
+
+| ディレクトリ | 内容 | 対応文書 |
+| --- | --- | --- |
+| `graycode_epson_20260818_tv30_iso{250,320,400,500}/` | Tv1/30版GrayCode幾何（固定ROI継続） | `docs/epson_recalibration_20260817.md` §2b |
+| `epson_iso{250,320,400,500}_tv30_20260818/` | Tv1/30フル校正と5条件評価。**全実験最良 = ISO250 comp_gamma 18.6dB/ΔE9.86**。ISO500で補償利得消失 | 同上 §2b |
+| `epson_tps_calibration_20260818_tv30/` ほか `*_20260818_tv30/` 4式 | 最良条件（Tv1/30 ISO250）での特性計測一式（216色/321色/3D LUT検証、白54%飽和条件の実効特性） | 同上 §3b |
+
 ## 5. 追跡していないもの
 
 `.gitignore` により以下は git 管理下にない。実験を再現するには再計算が必要。

@@ -1,0 +1,86 @@
+{
+  "config": "config.color_grid_iso200_hdr_d65_20260812.toml",
+  "spec": "docs/superpowers/specs/2026-08-12-color-grid-response-design.md",
+  "lut": "data\\iso200_hdr_isoscan_d65_20260807\\inverse_lut_gray\\inverse_lut.npz",
+  "lut_source": "gray",
+  "seed": 0,
+  "sentinel_every": 30,
+  "jobs_total": 369,
+  "jobs_precompleted": 0,
+  "camera": {
+    "backend": "canon_edsdk",
+    "iso": "200",
+    "av": "14",
+    "base_tv": "1/15",
+    "hdr_enabled": true,
+    "hdr_max_stops": 3,
+    "trust_low": 10,
+    "trust_high": 245
+  },
+  "measurement_roi": [
+    4520,
+    1600,
+    480,
+    400
+  ],
+  "settle_seconds": 2.0,
+  "projector": {
+    "frame": [
+      1920,
+      1080
+    ],
+    "active_region": [
+      607,
+      209,
+      794,
+      794
+    ],
+    "refresh_rate": 60.0
+  },
+  "started_at": "2026-08-12T09:19:05.183424+00:00",
+  "camera_properties_readback": {
+    "status": "ok",
+    "properties": {
+      "Av": "14",
+      "Tv": "1/15",
+      "ISO": "200",
+      "SaveTo": "2",
+      "AEMode": "Manual",
+      "MeteringMode": "EvaluativeMetering",
+      "WhiteBalance": "ColorTemp",
+      "ImageQuality": "LR",
+      "DriveMode": "SingleShooting",
+      "AFMode": "ManualFocus",
+      "EvfAFMode": "LiveZone"
+    }
+  },
+  "smoke_test": {
+    "black": {
+      "mean": [
+        0.0007599067175760865,
+        0.0002511917846277356,
+        0.000498760084155947
+      ],
+      "std": [
+        0.0006598313339054585,
+        0.0002816398337017745,
+        0.0004483677330426872
+      ]
+    },
+    "white": {
+      "mean": [
+        0.5744872093200684,
+        0.31878530979156494,
+        0.4409177303314209
+      ],
+      "std": [
+        0.4690946936607361,
+        0.266706258058548,
+        0.36666247248649597
+      ]
+    },
+    "passed": true
+  },
+  "finished_at": "2026-08-12T10:31:22.242716+00:00",
+  "jobs_measured_this_run": 369
+}

@@ -1,0 +1,22 @@
+{
+  "calibration_dir": "data\\tps_calibration_20260812",
+  "config": "config.color_grid_iso200_hdr_d65_20260812.toml",
+  "targets": [
+    "car-new_sq.png",
+    "car_sq.png",
+    "nature_1_sq.png",
+    "nature_2_sq.png",
+    "nature_3_sq.png"
+  ],
+  "target_decode": "none",
+  "conditions": [
+    "comp_matrix",
+    "comp_gamma_matrix",
+    "comp_tps"
+  ],
+  "node_grid": 33,
+  "node_window_ds_px": 5,
+  "tps_smoothing": 0.0001,
+  "gamma": 2.2,
+  "downsample": 4
+}

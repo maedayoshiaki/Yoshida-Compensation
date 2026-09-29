@@ -1,0 +1,153 @@
+{
+  "config": "config.color_grid_iso200_hdr_d65_20260812.toml",
+  "capture": "immediate_single_exposure",
+  "capture_encoding": "linear_uint8",
+  "settle_seconds": 2.0,
+  "conditions": [
+    "no_comp",
+    "comp_gamma_matrix",
+    "comp_tps_clamped",
+    "comp_matrix_lut3d"
+  ],
+  "targets": [
+    "car-new_sq",
+    "car_sq",
+    "nature_1_sq",
+    "nature_2_sq",
+    "nature_3_sq"
+  ],
+  "per_image": {
+    "car-new_sq": {
+      "no_comp": {
+        "psnr_db": 11.771780584680958,
+        "ssim": 0.37837088108062744,
+        "delta_e76": 34.78905487060547
+      },
+      "comp_gamma_matrix": {
+        "psnr_db": 17.460486718902672,
+        "ssim": 0.7010669112205505,
+        "delta_e76": 16.268829345703125
+      },
+      "comp_tps_clamped": {
+        "psnr_db": 17.018024594547605,
+        "ssim": 0.7096529006958008,
+        "delta_e76": 14.585948944091797
+      },
+      "comp_matrix_lut3d": {
+        "psnr_db": 17.329648447000793,
+        "ssim": 0.696854293346405,
+        "delta_e76": 17.801311492919922
+      }
+    },
+    "car_sq": {
+      "no_comp": {
+        "psnr_db": 9.566440454633037,
+        "ssim": 0.4399068355560303,
+        "delta_e76": 52.02214431762695
+      },
+      "comp_gamma_matrix": {
+        "psnr_db": 12.536425351994529,
+        "ssim": 0.5936208367347717,
+        "delta_e76": 27.311342239379883
+      },
+      "comp_tps_clamped": {
+        "psnr_db": 12.152216478345416,
+        "ssim": 0.5802704691886902,
+        "delta_e76": 28.91606903076172
+      },
+      "comp_matrix_lut3d": {
+        "psnr_db": 12.955768348135452,
+        "ssim": 0.6298596858978271,
+        "delta_e76": 29.21198272705078
+      }
+    },
+    "nature_1_sq": {
+      "no_comp": {
+        "psnr_db": 9.256476270635154,
+        "ssim": 0.310618132352829,
+        "delta_e76": 36.77227020263672
+      },
+      "comp_gamma_matrix": {
+        "psnr_db": 12.642765005088227,
+        "ssim": 0.6795822978019714,
+        "delta_e76": 25.64838218688965
+      },
+      "comp_tps_clamped": {
+        "psnr_db": 12.276679629308989,
+        "ssim": 0.6639087796211243,
+        "delta_e76": 25.932266235351562
+      },
+      "comp_matrix_lut3d": {
+        "psnr_db": 13.202579095867799,
+        "ssim": 0.6790489554405212,
+        "delta_e76": 27.360048294067383
+      }
+    },
+    "nature_2_sq": {
+      "no_comp": {
+        "psnr_db": 10.345159481636259,
+        "ssim": 0.3089921772480011,
+        "delta_e76": 38.95868682861328
+      },
+      "comp_gamma_matrix": {
+        "psnr_db": 15.608708846558809,
+        "ssim": 0.6606152653694153,
+        "delta_e76": 18.84588623046875
+      },
+      "comp_tps_clamped": {
+        "psnr_db": 15.164120194975608,
+        "ssim": 0.6339004635810852,
+        "delta_e76": 17.991247177124023
+      },
+      "comp_matrix_lut3d": {
+        "psnr_db": 13.762231856372697,
+        "ssim": 0.6235206723213196,
+        "delta_e76": 22.436168670654297
+      }
+    },
+    "nature_3_sq": {
+      "no_comp": {
+        "psnr_db": 9.900314022916872,
+        "ssim": 0.37093356251716614,
+        "delta_e76": 44.692901611328125
+      },
+      "comp_gamma_matrix": {
+        "psnr_db": 14.571125241346918,
+        "ssim": 0.66460120677948,
+        "delta_e76": 21.39397430419922
+      },
+      "comp_tps_clamped": {
+        "psnr_db": 14.01584031454804,
+        "ssim": 0.6181468367576599,
+        "delta_e76": 22.8681583404541
+      },
+      "comp_matrix_lut3d": {
+        "psnr_db": 14.424937375193775,
+        "ssim": 0.6382580399513245,
+        "delta_e76": 24.74950408935547
+      }
+    }
+  },
+  "averages": {
+    "no_comp": {
+      "psnr_db": 10.168034162900456,
+      "ssim": 0.36176431775093076,
+      "delta_e76": 41.44701156616211
+    },
+    "comp_gamma_matrix": {
+      "psnr_db": 14.563902232778233,
+      "ssim": 0.6598973035812378,
+      "delta_e76": 21.893682861328124
+    },
+    "comp_tps_clamped": {
+      "psnr_db": 14.125376242345132,
+      "ssim": 0.6411758899688721,
+      "delta_e76": 22.05873794555664
+    },
+    "comp_matrix_lut3d": {
+      "psnr_db": 14.335033024514104,
+      "ssim": 0.6535083293914795,
+      "delta_e76": 24.31180305480957
+    }
+  }
+}
